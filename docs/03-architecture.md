@@ -36,6 +36,8 @@ engram/
 
 **Implementation refinements vs. the original sketch** (decided during Phase 1 build): the **tutor is the main conversation itself**, governed by `_shared/dialogue-grammar.md`, not a subagent — the tutoring relationship must persist in-context, and only *grading* needs fresh-context isolation (the assessor). The **coach** likewise runs as the `/coach` skill in the main loop and generates the HTML dashboard directly from `stats --json` (no separate `report.py`). Receipts are written at the moment of grading by `engram.py`, so no `session-end.sh` flush is needed — one SessionStart hook is the entire ambient surface. The explorable widget vocabulary lives in `_shared/explorable-contract.md` rather than a `templates/` directory until real usage shows which templates earn extraction.
 
+**v0.2 additions** (hardening after the first live dogfood): `stash` (crash-safe pending-verification queue — learner productions persist to disk the moment they exist), `report` (deterministic self-contained HTML dashboard), `refit` (guarded coarse per-user interval fit), `doctor` (state diagnostics), and two integrity rules promoted to law in the dialogue grammar: confidence is never invented (null over estimate), and the assessor grades only the learner's actual words.
+
 **Why scripts, not prose:** FSRS math, state validation, and schema migration are deterministic — they run as code (oracle-grade), never as LLM arithmetic. The parent repo's lesson: everything checkable must be checked by something executable.
 
 ## 2. State (the learner file system)

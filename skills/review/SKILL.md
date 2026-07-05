@@ -6,32 +6,32 @@ argument-hint: [quick | <topic>]
 
 # /review — the retention loop
 
-Read `skills/_shared/dialogue-grammar.md` (hard rules + rating map apply here verbatim). Set:
+Read `skills/_shared/dialogue-grammar.md` (hard rules, confidence integrity, park-and-resume, and the rating map apply here verbatim). Set:
 
 ```bash
-ENGRAM="${CLAUDE_PLUGIN_ROOT:-$HOME/Documents/Github/engram}/scripts/engram.py"
+ENGRAM="${CLAUDE_PLUGIN_ROOT:-${ENGRAM_ROOT:-$HOME/Documents/Github/engram}}/scripts/engram.py"
 ```
 
 ## 1 · Load the queue
 
 ```bash
+python3 "$ENGRAM" stash count     # a previous session's ungraded work?
 python3 "$ENGRAM" due --limit <cap>
 ```
 
-Caps: `quick` → 5 items; otherwise mode default (Standard ≈ 12). `--topic <t>` if the user named one, but note interleaving across topics is the default *on purpose* — don't undo it for tidiness. Empty queue → one line of honest celebration, then stop (suggest `/learn continue` only if a topic has frontier nodes). Never invent reviews.
+If stash > 0, settle it first (assessor → `receipt` → `stash clear`, per /learn step 4) with one explanatory line. Caps: `quick` → 5 items; otherwise mode default (Standard ≈ 12). `--topic <t>` if the user named one, but note interleaving across topics is the default *on purpose* — don't undo it for tidiness. Open with the session ticket. Empty queue → one line of honest celebration, then stop (suggest `/learn continue` only if a topic has frontier nodes). Never invent reviews.
 
 ## 2 · Per item — the retrieval protocol
 
-The `due` payload gives you `probe`, `claim` (canonical answer), and `rubric`. The order of operations is sacred:
+The `due` payload gives you `probe`, `claim` (canonical answer), and `rubric`. Show a progress marker per item: `[3/6] · residual-stream †`. The order of operations is sacred:
 
-1. Show the **probe only**. Free recall — no options, no hints in the prompt, no "remember when we...".
-2. They produce. (Silence is fine; "no idea" is an answer — treat as lapse, warmly.)
-3. **Confidence 0–100, before any feedback.**
-4. Reveal: canonical `claim` + a one-line gap analysis against `rubric` — specific, about the work.
-5. Map to a rating with the shared table (round down when torn) and commit **immediately**:
+1. Show the **probe only**. Free recall — no options, no hints in the prompt, no "remember when we...". Ask for **confidence in the same breath**: *"answer + gut 0–100."*
+2. They produce. (Silence is fine; "no idea" is an answer — treat as lapse, warmly.) No number after one casual retry → confidence is null, never estimated.
+3. Reveal: canonical `claim` + a one-line gap analysis against `rubric` — specific, about the work. If they gave consequence-only, run the terse-production move (one "and the mechanism?" — grammar file) *before* the reveal.
+4. Map to a rating with the shared table (round down when torn) and commit **immediately**:
 
 ```bash
-python3 "$ENGRAM" rate --topic <t> --node <n> --rating <r> --confidence <c> \
+python3 "$ENGRAM" rate --topic <t> --node <n> --rating <r> --confidence <c-or-omit> \
   --grade <g> --production "<their answer, trimmed>" --kind review --source self
 ```
 
@@ -44,7 +44,7 @@ Relay the returned due date in passing, not ceremonially ("back in 12 days").
 
 ## 3 · Assessor audit (keep self-grading honest)
 
-If the session had ≥8 items, any disputed grade, or ≥3 `partial`s: batch `{probe, claim, rubric, production, your rating}` to the **engram-assessor** for audit. Report disagreements to the learner and log a `misconception add` or a note — do **not** re-rate already-committed items (scheduling stands; drift is the coach's monthly business). Disputes from the learner: same path, once.
+If the session had ≥8 items, any disputed grade, or ≥3 `partial`s: stash `{topic, node, probe, claim, rubric, production, confidence, kind:"audit", tutor_rating:"<r>"}` for each such item, then spawn **engram-assessor** on `stash list` for an audit verdict, and `stash clear` after. Report disagreements to the learner and log a `misconception add` or a note — do **not** re-rate already-committed items (scheduling stands; drift is the coach's monthly business). Disputes from the learner: same path, once.
 
 ## 4 · Close
 
@@ -53,4 +53,4 @@ python3 "$ENGRAM" log-session --kind review --mode <mode> --minutes <est> --item
 python3 "$ENGRAM" stats
 ```
 
-Close with at most two lines: streak + one meaningful number (e.g., month-bucket recall rate), and the next due date. If the queue was large and they stopped early — fine, say what's left, zero guilt. The two-minute floor exists to protect the habit, not to grow the session.
+Close with the **receipt strip**: items → outcomes, streak, one meaningful number (e.g., month-bucket recall rate), next due date. If the queue was large and they stopped early — fine, say what's left, zero guilt. The two-minute floor exists to protect the habit, not to grow the session.

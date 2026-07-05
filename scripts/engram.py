@@ -6,14 +6,15 @@ All scheduling math, state transitions, and evidence (receipts) live here.
 The LLM never computes dates or stability values; it calls this CLI (Article 10:
 receipts or it didn't happen; the oracle is never a vibe).
 
-Scheduler: FSRS-4.5 (open-spaced-repetition). Default parameters below; per-user
-refit is Phase 3 (`refit` is a guarded stub until enough receipts exist).
+Scheduler: FSRS-4.5 (open-spaced-repetition), with an optional per-user
+interval multiplier fitted by `refit` once enough review evidence exists.
 
 Stdlib only. State lives in ~/.claude/learning (override: ENGRAM_HOME).
 Test hooks: ENGRAM_TODAY=YYYY-MM-DD freezes "today"; `selftest` runs in a tempdir.
 """
 
 import argparse
+import itertools
 import json
 import math
 import os
@@ -21,6 +22,7 @@ import sys
 import tempfile
 import time
 from datetime import date, timedelta
+from html import escape
 
 SCHEMA = 1
 RETENTION_DEFAULT = 0.90
@@ -37,6 +39,8 @@ RATINGS = {"again": 1, "hard": 2, "good": 3, "easy": 4}
 GRADES = ("recalled", "partial", "lapsed")
 NODE_STATES = ("new", "learning", "review")
 
+_SEQ = itertools.count()
+
 # ---------------------------------------------------------------- fsrs core
 
 def clamp(x, lo, hi):
@@ -47,8 +51,8 @@ def retrievability(elapsed_days, stability):
         return 0.0
     return (1.0 + FACTOR * elapsed_days / stability) ** DECAY
 
-def interval_for(stability, retention):
-    days = stability / FACTOR * (retention ** (1.0 / DECAY) - 1.0)
+def interval_for(stability, retention, multiplier=1.0):
+    days = stability / FACTOR * (retention ** (1.0 / DECAY) - 1.0) * multiplier
     return int(clamp(round(days), 1, INTERVAL_MAX))
 
 def init_stability(g):
@@ -85,7 +89,7 @@ def apply_rating(fsrs, rating_name, on_date):
         r = retrievability(elapsed, s0)
         d = next_difficulty(d0, g)
         s = next_stability_forget(d0, s0, r) if g == 1 else next_stability_recall(d0, s0, r, g)
-    ivl = interval_for(s, fsrs.get("retention", RETENTION_DEFAULT))
+    ivl = interval_for(s, fsrs.get("retention", RETENTION_DEFAULT), fsrs.get("im", 1.0))
     out = dict(fsrs)
     out.update({
         "s": round(s, 4), "d": round(d, 4),
@@ -148,7 +152,8 @@ def read_jsonl(path):
 DEFAULT_MODEL = {
     "schema": SCHEMA,
     "created": None,
-    "memory": {"fsrs_params": None, "desired_retention": RETENTION_DEFAULT, "last_refit": None},
+    "memory": {"fsrs_params": None, "desired_retention": RETENTION_DEFAULT,
+               "interval_multiplier": 1.0, "last_refit": None},
     "challenge_band": {"target_success": 0.85, "hint_budget": 2},
     "interests": [],
     "goals": [],
@@ -161,9 +166,10 @@ DEFAULT_MODEL = {
 def load_model():
     m = read_json(p("learner-model.json"))
     if m is None:
-        m = dict(DEFAULT_MODEL)
+        m = json.loads(json.dumps(DEFAULT_MODEL))
         m["created"] = today().isoformat()
         write_json(p("learner-model.json"), m)
+    m.setdefault("memory", {}).setdefault("interval_multiplier", 1.0)
     return m
 
 def load_graph(topic):
@@ -187,6 +193,8 @@ def die(msg, code=2):
 
 def emit(obj):
     print(json.dumps(obj, indent=2, ensure_ascii=False))
+
+STASH_FILE = "pending-verify.jsonl"
 
 # ---------------------------------------------------------------- commands
 
@@ -286,8 +294,9 @@ def cmd_next(args):
     emit({"topic": args.topic, "id": None,
           "note": "no frontier nodes: everything is encoded (or blocked by unmet requires)"})
 
-def due_items(topic_filter=None, limit=None):
+def due_items(topic_filter=None, limit=None, horizon_days=0):
     per_topic = {}
+    cutoff = today() + timedelta(days=horizon_days)
     for t in all_topics():
         if topic_filter and t != topic_filter:
             continue
@@ -299,12 +308,13 @@ def due_items(topic_filter=None, limit=None):
             if node["state"] == "new" or not d:
                 continue
             due_d = date.fromisoformat(d)
-            if due_d <= today():
+            if due_d <= cutoff:
                 items.append({
                     "topic": t, "id": nid, "probe": node["probe"],
                     "claim": node["claim"], "rubric": node.get("rubric", []),
                     "threshold": node.get("threshold", False),
                     "arbitrary": node.get("arbitrary", False),
+                    "due": d,
                     "overdue_days": (today() - due_d).days,
                     "s": node["fsrs"].get("s"), "reps": node["fsrs"].get("reps", 0),
                     "lapses": node["fsrs"].get("lapses", 0),
@@ -313,12 +323,11 @@ def due_items(topic_filter=None, limit=None):
         if items:
             per_topic[t] = items
     # interleave topics round-robin (P3: interleaving is the default)
-    merged, idx = [], 0
+    merged = []
     while any(per_topic.values()):
         for t in list(per_topic):
             if per_topic[t]:
                 merged.append(per_topic[t].pop(0))
-        idx += 1
     if limit:
         merged = merged[:limit]
     return merged
@@ -326,21 +335,21 @@ def due_items(topic_filter=None, limit=None):
 def cmd_due(args):
     emit(due_items(args.topic, args.limit))
 
-def make_receipt(args_or_item, extra, kind):
-    conf = args_or_item.get("confidence")
+def make_receipt(item, extra, kind):
+    conf = item.get("confidence")
     return {
-        "id": "r_%d" % int(time.time() * 1000),
+        "id": "r_%d_%03d" % (int(time.time() * 1000), next(_SEQ)),
         "ts": today().isoformat(),
-        "topic": args_or_item["topic"], "node": args_or_item["node"],
+        "topic": item["topic"], "node": item["node"],
         "kind": kind,
-        "probe": args_or_item.get("probe"),
-        "production": (args_or_item.get("production") or "")[:800] or None,
+        "probe": item.get("probe"),
+        "production": (item.get("production") or "")[:800] or None,
         "confidence": (int(conf) if conf is not None else None),
-        "grade": args_or_item.get("grade"),
-        "rating": args_or_item["rating"],
-        "misconceptions": args_or_item.get("misconceptions", []),
-        "rubric_notes": args_or_item.get("rubric_notes"),
-        "source": args_or_item.get("source", "self"),
+        "grade": item.get("grade"),
+        "rating": item["rating"],
+        "misconceptions": item.get("misconceptions", []),
+        "rubric_notes": item.get("rubric_notes"),
+        "source": item.get("source", "self"),
         **extra,
     }
 
@@ -356,9 +365,11 @@ def apply_item(item, kind):
         die("bad grade %r (use recalled|partial|lapsed)" % item["grade"])
     model = load_model()
     node["fsrs"]["retention"] = model["memory"].get("desired_retention", RETENTION_DEFAULT)
+    node["fsrs"]["im"] = model["memory"].get("interval_multiplier", 1.0)
     was_new = node["fsrs"].get("s") is None
     node["fsrs"], extra = apply_rating(node["fsrs"], rating, today())
     node["fsrs"].pop("retention", None)
+    node["fsrs"].pop("im", None)
     if rating == "again":
         node["state"] = "learning"
     elif was_new and rating == "hard":
@@ -388,8 +399,32 @@ def cmd_receipt(args):
         results.append(apply_item(item, item.get("kind", "encode")))
     emit(results)
 
+def cmd_stash(args):
+    path = p(STASH_FILE)
+    if args.action == "add":
+        payload = load_payload(args)
+        items = payload if isinstance(payload, list) else [payload]
+        for item in items:
+            for key in ("topic", "node", "probe", "production"):
+                if key not in item:
+                    die("stash item missing %s" % key)
+            item.setdefault("ts", today().isoformat())
+            append_jsonl(path, item)
+        emit({"ok": True, "pending": len(read_jsonl(path))})
+    elif args.action == "list":
+        emit(read_jsonl(path))
+    elif args.action == "count":
+        emit({"pending": len(read_jsonl(path))})
+    elif args.action == "clear":
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        emit({"ok": True, "pending": 0})
+
 def cmd_model(args):
     m = load_model()
+    changed = False
     if args.set:
         for assignment in args.set:
             if "=" not in assignment:
@@ -411,18 +446,20 @@ def cmd_model(args):
             for part in parts[:-1]:
                 ref = ref.setdefault(part, {})
             ref[parts[-1]] = val
+            changed = True
+    for interest in (args.add_interest or []):
+        if interest not in m["interests"]:
+            m["interests"].append(interest)
+            changed = True
+    if changed:
         write_json(p("learner-model.json"), m)
-    if args.add_interest:
-        if args.add_interest not in m["interests"]:
-            m["interests"].append(args.add_interest)
-            write_json(p("learner-model.json"), m)
     emit(m)
 
 def cmd_misconception(args):
     path = p("misconceptions.json")
     items = read_json(path, [])
     if args.action == "add":
-        items.append({"id": "m_%d" % int(time.time() * 1000),
+        items.append({"id": "m_%d_%03d" % (int(time.time() * 1000), next(_SEQ)),
                       "ts": today().isoformat(), "topic": args.topic,
                       "node": args.node, "description": args.description,
                       "status": "open"})
@@ -483,13 +520,22 @@ def collect_receipts():
         out.extend(read_jsonl(p("receipts", t + ".jsonl")))
     return out
 
-def cmd_stats(args):
+def compute_streak(receipts):
+    dayset = {r["ts"] for r in receipts}
+    cursor = today()
+    if cursor.isoformat() not in dayset:
+        cursor -= timedelta(days=1)  # grace: today isn't over yet
+    streak = 0
+    while cursor.isoformat() in dayset:
+        streak += 1
+        cursor -= timedelta(days=1)
+    return streak
+
+def compute_stats():
     receipts = collect_receipts()
     reviews = [r for r in receipts if r.get("kind") == "review" and r.get("rating")]
     def bucket(r):
-        rb = r.get("retrievability")
         s = r.get("s_before") or 0
-        # elapsed inferred from s_before & retrievability is fragile; use interval class by s
         return "early" if s < 7 else ("week" if s < 30 else "month+")
     buckets = {}
     for r in reviews:
@@ -506,69 +552,79 @@ def cmd_stats(args):
                  for r in graded]
         brier = round(sum((c - o) ** 2 for c, o in pairs) / len(pairs), 4)
         bias = round(sum(c - o for c, o in pairs) / len(pairs), 4)
-    days = sorted({r["ts"] for r in receipts}, reverse=True)
-    streak, cursor = 0, today()
-    dayset = set(days)
-    while cursor.isoformat() in dayset or (streak == 0 and (cursor - timedelta(days=1)).isoformat() in dayset):
-        if cursor.isoformat() in dayset:
-            streak += 1
-        cursor -= timedelta(days=1)
-        if streak == 0:
-            break
     topics = []
     for t in all_topics():
         g = load_graph(t)
         states = {}
         for node in g["nodes"].values():
             states[node["state"]] = states.get(node["state"], 0) + 1
-        topics.append({"topic": t, "states": states})
+        topics.append({"topic": t, "title": g.get("title"), "states": states})
     sessions = read_jsonl(p("sessions.jsonl"))
     last_coach = max((s["ts"] for s in sessions if s.get("kind") == "coach"), default=None)
-    out = {
+    return {
         "receipts": len(receipts), "reviews": len(reviews),
         "recall_by_stability": recall,
-        "calibration": {"brier": brier, "bias": bias,
+        "calibration": {"brier": brier, "bias": bias, "n": len(graded),
                         "read": (None if bias is None else
                                  ("overconfident" if bias > 0.05 else
                                   "underconfident" if bias < -0.05 else "well-calibrated"))},
-        "streak_days": streak,
+        "streak_days": compute_streak(receipts),
         "due_now": len(due_items()),
+        "pending_verify": len(read_jsonl(p(STASH_FILE))),
         "topics": topics,
         "misconceptions_open": len([m for m in read_json(p("misconceptions.json"), []) if m.get("status") == "open"]),
         "active_experiment": next((e["question"] for e in read_json(p("experiments.json"), []) if e.get("status") == "active"), None),
         "last_coach_checkin": last_coach,
     }
-    emit(out)
+
+def cmd_stats(_args):
+    emit(compute_stats())
+
+STATE_DOTS = {"review": "●", "learning": "◐", "new": "·"}
 
 def cmd_topic_status(args):
     g = load_graph(args.topic)
-    lines = ["%s — %s" % (g["topic"], g.get("title", "")), ""]
-    symbols = {"new": "·", "learning": "◐", "review": "●"}
+    counts = {"review": 0, "learning": 0, "new": 0}
+    for node in g["nodes"].values():
+        counts[node["state"]] = counts.get(node["state"], 0) + 1
+    total = len(g["nodes"])
+    width = 24
+    filled = int(round(width * counts["review"] / total))
+    half = int(round(width * counts["learning"] / total))
+    bar = "█" * filled + "▒" * half + "░" * max(0, width - filled - half)
+    lines = ["%s — %s" % (g["topic"], g.get("title", "")),
+             "%s  %d retained · %d learning · %d untouched" % (
+                 bar, counts["review"], counts["learning"], counts["new"]), ""]
     for nid in g["order"]:
         node = g["nodes"][nid]
         due = node["fsrs"].get("due") or "—"
         s = node["fsrs"].get("s")
         flags = ("†" if node.get("threshold") else "") + ("*" if node.get("arbitrary") else "")
         lines.append("%s %-34s%-2s due %-10s S=%s" % (
-            symbols.get(node["state"], "?"), nid, flags, due,
+            STATE_DOTS.get(node["state"], "?"), nid, flags, due,
             ("%.1fd" % s) if s else "—"))
     lines.append("")
-    lines.append("· new   ◐ learning   ● review   † threshold concept   * arbitrary (mnemonic route)")
+    lines.append("● retained (review)   ◐ learning   · untouched   † threshold   * memorize-only")
     print("\n".join(lines))
 
 def cmd_session_start(_args):
     if not os.path.isdir(home()):
         return  # never installed/used: stay silent
     due = due_items()
-    if not due:
-        return  # Article: ambient, never nagging
-    by_topic = {}
-    for d in due:
-        by_topic[d["topic"]] = by_topic.get(d["topic"], 0) + 1
-    summary = ", ".join("%s: %d" % kv for kv in sorted(by_topic.items(), key=lambda x: -x[1])[:3])
-    minutes = max(1, round(len(due) * 0.6))
-    print("[engram] %d review%s due (%s) · ~%d min · /review to clear, /learn to continue."
-          % (len(due), "s" if len(due) != 1 else "", summary, minutes))
+    pending = len(read_jsonl(p(STASH_FILE)))
+    if not due and not pending:
+        return  # Article 8: ambient, never nagging
+    if due:
+        by_topic = {}
+        for d in due:
+            by_topic[d["topic"]] = by_topic.get(d["topic"], 0) + 1
+        summary = ", ".join("%s: %d" % kv for kv in sorted(by_topic.items(), key=lambda x: -x[1])[:3])
+        minutes = max(1, round(len(due) * 0.6))
+        print("[engram] %d review%s due (%s) · ~%d min · /review to clear, /learn to continue."
+              % (len(due), "s" if len(due) != 1 else "", summary, minutes))
+    if pending:
+        print("[engram] %d production%s awaiting assessor grading — /learn or /review will finish verification."
+              % (pending, "s" if pending != 1 else ""))
     sessions = read_jsonl(p("sessions.jsonl"))
     last_coach = max((s["ts"] for s in sessions if s.get("kind") == "coach"), default=None)
     if last_coach and (today() - date.fromisoformat(last_coach)).days > 7:
@@ -577,20 +633,249 @@ def cmd_session_start(_args):
 def cmd_path(_args):
     print(home())
 
+# ---------------------------------------------------------------- refit
+
+def cmd_refit(args):
+    """Coarse per-user schedule fit (v1): a single interval multiplier.
+
+    Uses review receipts where a predicted retrievability was recorded.
+    If observed recall differs from predicted, rescale intervals along the
+    FSRS power forgetting curve so predictions match behavior. Full FSRS
+    parameter optimization is out of scope for v1 (documented in README)."""
+    receipts = [r for r in collect_receipts()
+                if r.get("kind") == "review" and r.get("rating")
+                and r.get("retrievability") is not None]
+    n = len(receipts)
+    if n < 50 and not args.force:
+        emit({"ok": False, "reason": "need >=50 review receipts with predictions, have %d" % n,
+              "hint": "keep reviewing; refit is meaningful only with real evidence"})
+        return
+    observed = sum(1.0 for r in receipts if r["rating"] != "again") / n
+    predicted = sum(r["retrievability"] for r in receipts) / n
+    def inv(r):  # proportional to elapsed/S at recall probability r (power curve)
+        return (clamp(r, 0.5, 0.999) ** (1.0 / DECAY)) - 1.0
+    multiplier = clamp(inv(predicted) / inv(observed), 0.5, 1.5)
+    m = load_model()
+    prev = m["memory"].get("interval_multiplier", 1.0)
+    m["memory"]["interval_multiplier"] = round(multiplier, 3)
+    m["memory"]["last_refit"] = today().isoformat()
+    write_json(p("learner-model.json"), m)
+    emit({"ok": True, "n_reviews": n, "observed_recall": round(observed, 3),
+          "predicted_recall": round(predicted, 3),
+          "interval_multiplier": {"before": prev, "after": round(multiplier, 3)},
+          "read": ("intervals shortened — memory decays faster than the default model"
+                   if multiplier < 0.97 else
+                   "intervals lengthened — memory holds better than the default model"
+                   if multiplier > 1.03 else "no meaningful adjustment needed")})
+
+# ---------------------------------------------------------------- doctor
+
+def cmd_doctor(_args):
+    issues = []
+    info = {"python": "%d.%d.%d" % sys.version_info[:3], "home": home()}
+    os.makedirs(home(), exist_ok=True)
+    info["writable"] = os.access(home(), os.W_OK)
+    if not info["writable"]:
+        issues.append("state dir is not writable")
+    try:
+        load_model()
+        info["model_ok"] = True
+    except SystemExit:
+        info["model_ok"] = False
+        issues.append("learner-model.json unreadable")
+    topics = all_topics()
+    info["topics"] = len(topics)
+    node_count = 0
+    for t in topics:
+        g = read_json(p("graphs", t + ".json"))
+        if g is None:
+            issues.append("graph unreadable: %s" % t)
+            continue
+        node_count += len(g.get("nodes", {}))
+        for nid in g.get("order", []):
+            if nid not in g.get("nodes", {}):
+                issues.append("%s: order references missing node %s" % (t, nid))
+        for nid, node in g.get("nodes", {}).items():
+            if node.get("state") != "new" and not node.get("fsrs", {}).get("due"):
+                issues.append("%s/%s: state=%s but no due date" % (t, nid, node.get("state")))
+    info["nodes"] = node_count
+    info["receipts"] = len(collect_receipts())
+    info["pending_verify"] = len(read_jsonl(p(STASH_FILE)))
+    info["artifacts"] = sum(len(files) for _, _, files in os.walk(p("artifacts")))
+    info["issues"] = issues
+    info["ok"] = not issues
+    emit(info)
+
+# ---------------------------------------------------------------- report
+
+REPORT_CSS = """
+:root{--bg:#faf9f6;--surface:#fff;--ink:#201c26;--muted:#6f697a;--line:#e3e0da;
+--accent:#6d4aa8;--accent-soft:#efe9f8;--good:#3e7d5a;--warn:#9a6b0f;--bad:#ad4f44;
+--good-soft:#e4f0e9;--warn-soft:#f7efdc;}
+@media (prefers-color-scheme:dark){:root{--bg:#171420;--surface:#201c2b;--ink:#eae6f2;
+--muted:#9a93a8;--line:#332e40;--accent:#b29be8;--accent-soft:#2b2440;--good:#7cc49b;
+--warn:#e0b45c;--bad:#e08a82;--good-soft:#1e2f26;--warn-soft:#322a1c;}}
+:root[data-theme=light]{--bg:#faf9f6;--surface:#fff;--ink:#201c26;--muted:#6f697a;
+--line:#e3e0da;--accent:#6d4aa8;--accent-soft:#efe9f8;--good:#3e7d5a;--warn:#9a6b0f;
+--bad:#ad4f44;--good-soft:#e4f0e9;--warn-soft:#f7efdc;}
+:root[data-theme=dark]{--bg:#171420;--surface:#201c2b;--ink:#eae6f2;--muted:#9a93a8;
+--line:#332e40;--accent:#b29be8;--accent-soft:#2b2440;--good:#7cc49b;--warn:#e0b45c;
+--bad:#e08a82;--good-soft:#1e2f26;--warn-soft:#322a1c;}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
+font:15px/1.55 "Iowan Old Style",Palatino,Charter,Georgia,serif;padding:0 20px 64px}
+main{max-width:880px;margin:0 auto}
+h1{font-size:26px;margin:40px 0 4px}h2{font-size:18px;margin:36px 0 10px}
+.sub{color:var(--muted);font-size:13px;margin:0 0 24px}
+.mono,td,th,.chip{font-family:ui-monospace,"SF Mono",Menlo,monospace;
+font-variant-numeric:tabular-nums}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0}
+.chip{font-size:12px;padding:6px 12px;border:1px solid var(--line);border-radius:20px;
+background:var(--surface)}
+.chip b{color:var(--accent)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px;
+padding:16px 18px;margin:12px 0}
+.goal{color:var(--muted);font-size:13px;margin:2px 0 10px}
+.bar{display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--line);margin:8px 0 4px}
+.bar span{display:block;height:100%}
+.legend{font-size:12px;color:var(--muted)}
+table{border-collapse:collapse;width:100%;font-size:12.5px;margin-top:10px}
+th{text-align:left;color:var(--muted);font-weight:500;font-size:11px;
+text-transform:uppercase;letter-spacing:.08em;padding:6px 8px;border-bottom:1px solid var(--line)}
+td{padding:5px 8px;border-bottom:1px solid var(--line)}
+tr:last-child td{border-bottom:none}
+.dot-review{color:var(--good)}.dot-learning{color:var(--warn)}.dot-new{color:var(--muted)}
+.hbar{display:flex;align-items:center;gap:10px;margin:6px 0;font-size:13px}
+.hbar .track{flex:1;height:12px;background:var(--line);border-radius:6px;overflow:hidden}
+.hbar .fill{height:100%;background:var(--accent)}
+.hbar .lab{width:70px}.hbar .val{width:110px;text-align:right;color:var(--muted);font-size:12px}
+.note{color:var(--muted);font-size:13px}
+.flag{color:var(--accent)}
+footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
+color:var(--muted);font-size:12px}
+"""
+
+def cmd_report(args):
+    stats = compute_stats()
+    model = load_model()
+    d = today().isoformat()
+    parts = ["<meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>",
+             "<title>Engram — learning dashboard</title><style>%s</style><main>" % REPORT_CSS,
+             "<h1>Engram</h1><p class='sub'>learning dashboard · generated %s · all data local</p>" % d]
+    chips = [("streak", "%d day%s" % (stats["streak_days"], "s" if stats["streak_days"] != 1 else "")),
+             ("due today", str(stats["due_now"])),
+             ("pending grading", str(stats["pending_verify"])),
+             ("receipts", str(stats["receipts"])),
+             ("open misconceptions", str(stats["misconceptions_open"]))]
+    parts.append("<div class='chips'>" + "".join(
+        "<span class='chip'>%s <b>%s</b></span>" % (escape(k), escape(v)) for k, v in chips) + "</div>")
+
+    for t in all_topics():
+        g = load_graph(t)
+        counts = {"review": 0, "learning": 0, "new": 0}
+        for node in g["nodes"].values():
+            counts[node["state"]] += 1
+        total = max(1, len(g["nodes"]))
+        seg = lambda n, color: ("<span style='width:%.1f%%;background:var(--%s)'></span>"
+                                % (100.0 * n / total, color)) if n else ""
+        parts.append("<div class='card'><h2 style='margin:0'>%s</h2>" % escape(g.get("title") or t))
+        if g.get("goal"):
+            parts.append("<p class='goal'>goal: %s</p>" % escape(g["goal"]))
+        parts.append("<div class='bar'>%s%s</div>" % (seg(counts["review"], "good"),
+                                                      seg(counts["learning"], "warn")))
+        parts.append("<p class='legend'>%d retained · %d learning · %d untouched</p>"
+                     % (counts["review"], counts["learning"], counts["new"]))
+        rows = []
+        for nid in g["order"]:
+            node = g["nodes"][nid]
+            flags = ("<span class='flag'>†</span>" if node.get("threshold") else "") + \
+                    ("<span class='flag'>*</span>" if node.get("arbitrary") else "")
+            s = node["fsrs"].get("s")
+            rows.append("<tr><td class='dot-%s'>%s</td><td>%s %s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+                node["state"], STATE_DOTS[node["state"]], escape(nid), flags,
+                ("%.1fd" % s) if s else "—", node["fsrs"].get("due") or "—",
+                node["fsrs"].get("lapses", 0) or ""))
+        parts.append("<table><tr><th></th><th>concept</th><th>stability</th><th>due</th>"
+                     "<th>lapses</th></tr>%s</table></div>" % "".join(rows))
+
+    parts.append("<h2>Retention by memory strength</h2>")
+    if stats["recall_by_stability"]:
+        for b, label in (("early", "early (S<7d)"), ("week", "week (7–30d)"), ("month+", "month+ (>30d)")):
+            v = stats["recall_by_stability"].get(b)
+            if not v:
+                continue
+            parts.append("<div class='hbar'><span class='lab mono'>%s</span>"
+                         "<span class='track'><span class='fill' style='width:%d%%'></span></span>"
+                         "<span class='val'>%d%% recall · n=%d</span></div>"
+                         % (escape(label), int(v["rate"] * 100), int(v["rate"] * 100), v["n"]))
+        parts.append("<p class='note'>target band ≈ 85%% — much higher means reviews are "
+                     "too easy/late-scheduled matter is absent; much lower means encoding "
+                     "or scheduling needs attention.</p>")
+    else:
+        parts.append("<p class='note'>No review outcomes yet — retention appears here after "
+                     "your first scheduled /review sessions.</p>")
+
+    parts.append("<h2>Calibration</h2>")
+    cal = stats["calibration"]
+    if cal["brier"] is not None:
+        parts.append("<p class='note'>Brier %.3f · bias %+.3f → <b>%s</b> · n=%d "
+                     "(only answers where you actually stated a confidence count)</p>"
+                     % (cal["brier"], cal["bias"], escape(cal["read"]), cal["n"]))
+    else:
+        parts.append("<p class='note'>No honest confidence data yet — confidence is recorded "
+                     "only when you actually say a number before feedback. It is never estimated "
+                     "for you.</p>")
+
+    mis = [m for m in read_json(p("misconceptions.json"), []) if m.get("status") == "open"]
+    if mis:
+        parts.append("<h2>Open misconceptions</h2>")
+        for m in mis:
+            parts.append("<div class='card'><span class='mono' style='font-size:12px'>%s / %s</span>"
+                         "<p style='margin:6px 0 0'>%s</p></div>"
+                         % (escape(m.get("topic") or ""), escape(m.get("node") or ""),
+                            escape(m.get("description") or "")))
+
+    horizon = due_items(horizon_days=7)
+    parts.append("<h2>Next 7 days</h2>")
+    if horizon:
+        per_day = {}
+        for item in horizon:
+            per_day[item["due"]] = per_day.get(item["due"], 0) + 1
+        peak = max(per_day.values())
+        for day in sorted(per_day):
+            n = per_day[day]
+            parts.append("<div class='hbar'><span class='lab mono'>%s</span>"
+                         "<span class='track'><span class='fill' style='width:%d%%'></span></span>"
+                         "<span class='val'>%d node%s</span></div>"
+                         % (escape(day), int(100 * n / peak), n, "s" if n != 1 else ""))
+    else:
+        parts.append("<p class='note'>Nothing scheduled in the next 7 days.</p>")
+
+    parts.append("<footer>state: %s · regenerate: <span class='mono'>python3 engram.py report"
+                 "</span> · Engram never sends data anywhere.</footer></main>" % escape(home()))
+
+    out_path = args.out or p("artifacts", "dashboard.html")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("<!doctype html>\n" + "\n".join(parts) + "\n")
+    emit({"ok": True, "path": out_path})
+
 # ---------------------------------------------------------------- selftest
 
 def approx(a, b, tol=0.02):
     return abs(a - b) <= tol * max(1.0, abs(b))
 
 def cmd_selftest(_args):
+    total = [0]
     failures = []
     def check(name, cond):
+        total[0] += 1
         print("%s %s" % ("PASS" if cond else "FAIL", name))
         if not cond:
             failures.append(name)
 
     check("R(t=S) == 0.9", approx(retrievability(10, 10), 0.9, 0.001))
     check("interval(S, 0.9) == S", interval_for(10, 0.9) == 10)
+    check("interval multiplier scales", interval_for(10, 0.9, 0.5) == 5)
     check("initial stabilities ordered", W[0] < W[1] < W[2] < W[3])
     d, s, r = 5.0, 10.0, 0.9
     s_hard = next_stability_recall(d, s, r, 2)
@@ -604,12 +889,10 @@ def cmd_selftest(_args):
     check("again raises difficulty", next_difficulty(5.0, 1) > 5.0)
     check("easy lowers difficulty", next_difficulty(5.0, 4) < 5.0)
     check("difficulty clamped", next_difficulty(10.0, 1) <= 10.0 and next_difficulty(1.0, 4) >= 1.0)
-    lower_r = retrievability(20, 10)
-    check("R monotonic in elapsed", lower_r < retrievability(5, 10))
+    check("R monotonic in elapsed", retrievability(20, 10) < retrievability(5, 10))
     check("harder material grows slower",
           next_stability_recall(9.0, s, r, 3) < next_stability_recall(2.0, s, r, 3))
 
-    # state roundtrip in a sandbox
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["ENGRAM_HOME"] = tmp
         os.environ["ENGRAM_TODAY"] = "2026-07-05"
@@ -619,36 +902,82 @@ def cmd_selftest(_args):
             "b": {"claim": "B follows from A", "probe": "Derive B.",
                   "edges": {"requires": ["a"]}}}}
         write_json(os.path.join(tmp, "payload.json"), g)
-        sys_argv_backup = None
-        class NS:  # tiny namespace helper
-            pass
-        args = NS(); args.json = None; args.file = os.path.join(tmp, "payload.json"); args.replace = False
-        _capture(cmd_add_topic, args)
+        _capture(cmd_add_topic, _ns(file=os.path.join(tmp, "payload.json")))
         nxt = _capture_json(cmd_next, _ns(topic="t"))
         check("frontier respects requires", nxt["id"] == "a")
         _capture(cmd_rate, _ns(topic="t", node="a", rating="good", confidence=70,
-                               production="because reasons", grade="recalled",
-                               probe=None, source="self", kind="encode"))
+                               production="because reasons", grade="recalled", kind="encode"))
         nxt2 = _capture_json(cmd_next, _ns(topic="t"))
         check("frontier advances after encode", nxt2["id"] == "b")
-        due_today = due_items()
-        check("nothing due immediately after good", len(due_today) == 0)
+        check("nothing due immediately after good", len(due_items()) == 0)
         os.environ["ENGRAM_TODAY"] = "2026-08-05"
         due_later = due_items()
         check("item comes due later", len(due_later) == 1 and due_later[0]["id"] == "a")
         _capture(cmd_rate, _ns(topic="t", node="a", rating="again", confidence=90,
-                               production=None, grade="lapsed", probe=None,
-                               source="self", kind="review"))
+                               production=None, grade="lapsed", kind="review"))
         g2 = load_graph("t")
         check("lapse recorded", g2["nodes"]["a"]["fsrs"]["lapses"] == 1
               and g2["nodes"]["a"]["state"] == "learning")
         stats = _capture_json(cmd_stats, _ns())
         check("stats computes calibration", stats["calibration"]["brier"] is not None)
         check("stats flags overconfident lapse", stats["calibration"]["read"] == "overconfident")
+
+        # receipt ids unique within a fast batch
+        batch = [{"topic": "t", "node": "a", "rating": "good"},
+                 {"topic": "t", "node": "b", "rating": "good"}]
+        write_json(os.path.join(tmp, "batch.json"), batch)
+        _capture(cmd_receipt, _ns(file=os.path.join(tmp, "batch.json")))
+        ids = [r["id"] for r in collect_receipts()]
+        check("receipt ids unique", len(ids) == len(set(ids)))
+
+        # add-interest keeps every value passed in one call
+        _capture(cmd_model, _ns(add_interest=["AAA", "BBB"]))
+        m = read_json(os.path.join(tmp, "learner-model.json"))
+        check("add-interest appends all values", "AAA" in m["interests"] and "BBB" in m["interests"])
+
+        # streak: activity yesterday only → streak 1 (grace day)
+        os.environ["ENGRAM_TODAY"] = "2026-08-06"
+        check("streak grace day", compute_streak(collect_receipts()) >= 1)
+        os.environ["ENGRAM_TODAY"] = "2026-08-05"
+        check("streak same day counts", compute_streak(collect_receipts()) >= 1)
+
+        # stash roundtrip
+        item = {"topic": "t", "node": "b", "probe": "p?", "production": "text"}
+        write_json(os.path.join(tmp, "stash.json"), [item, item])
+        _capture(cmd_stash, _ns(action="add", file=os.path.join(tmp, "stash.json")))
+        check("stash add/count", _capture_json(cmd_stash, _ns(action="count"))["pending"] == 2)
+        check("stash surfaces in stats", _capture_json(cmd_stats, _ns())["pending_verify"] == 2)
+        _capture(cmd_stash, _ns(action="clear"))
+        check("stash clear", _capture_json(cmd_stash, _ns(action="count"))["pending"] == 0)
+
+        # refit: guarded without data; with forced synthetic bad recall → shorter intervals
+        guard = _capture_json(cmd_refit, _ns(force=False))
+        check("refit guarded on thin data", guard["ok"] is False)
+        for i in range(30):
+            append_jsonl(os.path.join(tmp, "receipts", "t.jsonl"),
+                         {"id": "syn%d" % i, "ts": "2026-08-01", "topic": "t", "node": "a",
+                          "kind": "review", "rating": ("again" if i < 12 else "good"),
+                          "retrievability": 0.9})
+        refit = _capture_json(cmd_refit, _ns(force=True))
+        check("refit shortens intervals when recall worse than predicted",
+              refit["ok"] and refit["interval_multiplier"]["after"] < 1.0)
+        m2 = read_json(os.path.join(tmp, "learner-model.json"))
+        check("refit persists multiplier", m2["memory"]["interval_multiplier"] < 1.0)
+
+        # report generates a self-contained file
+        rep = _capture_json(cmd_report, _ns(out=os.path.join(tmp, "dash.html")))
+        html_text = open(rep["path"], encoding="utf-8").read()
+        check("report written", rep["ok"] and "<title>" in html_text)
+        check("report self-contained", "http://" not in html_text and "https://" not in html_text)
+
+        # doctor runs clean on this state
+        doc = _capture_json(cmd_doctor, _ns())
+        check("doctor ok on healthy state", doc["ok"] is True)
+
         os.environ.pop("ENGRAM_HOME", None)
         os.environ.pop("ENGRAM_TODAY", None)
 
-    print("\n%d/%d checks passed" % (18 - len(failures), 18))
+    print("\n%d/%d checks passed" % (total[0] - len(failures), total[0]))
     sys.exit(1 if failures else 0)
 
 def _ns(**kw):
@@ -658,7 +987,9 @@ def _ns(**kw):
     defaults = dict(topic=None, node=None, rating=None, confidence=None,
                     production=None, grade=None, probe=None, source="self",
                     kind="review", json=None, file=None, replace=False,
-                    limit=None, set=None, add_interest=None)
+                    limit=None, set=None, add_interest=None, action=None,
+                    id=None, verdict=None, description=None, force=False,
+                    out=None, mode=None, minutes=None, items=None, notes=None)
     defaults.update(kw)
     for k, v in defaults.items():
         setattr(ns, k, v)
@@ -680,12 +1011,8 @@ def main():
     ap = argparse.ArgumentParser(prog="engram", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("init")
-    sub.add_parser("path")
-    sub.add_parser("session-start")
-    sub.add_parser("topics")
-    sub.add_parser("selftest")
-    sub.add_parser("stats")
+    for name in ("init", "path", "session-start", "topics", "selftest", "stats", "doctor"):
+        sub.add_parser(name)
 
     sp = sub.add_parser("add-topic")
     sp.add_argument("--json"); sp.add_argument("--file"); sp.add_argument("--replace", action="store_true")
@@ -709,8 +1036,13 @@ def main():
     sp = sub.add_parser("receipt")
     sp.add_argument("--json"); sp.add_argument("--file")
 
+    sp = sub.add_parser("stash")
+    sp.add_argument("action", choices=("add", "list", "count", "clear"))
+    sp.add_argument("--json"); sp.add_argument("--file")
+
     sp = sub.add_parser("model")
-    sp.add_argument("--set", action="append"); sp.add_argument("--add-interest")
+    sp.add_argument("--set", action="append")
+    sp.add_argument("--add-interest", action="append")
 
     sp = sub.add_parser("misconception")
     sp.add_argument("action", choices=("add", "list", "resolve"))
@@ -727,14 +1059,22 @@ def main():
     sp.add_argument("--minutes", type=int); sp.add_argument("--items", type=int)
     sp.add_argument("--notes")
 
+    sp = sub.add_parser("refit")
+    sp.add_argument("--force", action="store_true")
+
+    sp = sub.add_parser("report")
+    sp.add_argument("--out")
+
     args = ap.parse_args()
     handlers = {
         "init": cmd_init, "path": cmd_path, "session-start": cmd_session_start,
         "topics": cmd_topics, "add-topic": cmd_add_topic, "next": cmd_next,
         "topic-status": cmd_topic_status, "due": cmd_due, "rate": cmd_rate,
-        "receipt": cmd_receipt, "model": cmd_model, "misconception": cmd_misconception,
-        "experiment": cmd_experiment, "log-session": cmd_log_session,
-        "stats": cmd_stats, "selftest": cmd_selftest,
+        "receipt": cmd_receipt, "stash": cmd_stash, "model": cmd_model,
+        "misconception": cmd_misconception, "experiment": cmd_experiment,
+        "log-session": cmd_log_session, "stats": cmd_stats,
+        "refit": cmd_refit, "doctor": cmd_doctor, "report": cmd_report,
+        "selftest": cmd_selftest,
     }
     handlers[args.cmd](args)
 

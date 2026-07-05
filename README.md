@@ -66,8 +66,53 @@ There is no other configuration. The first `/learn` **is** the diagnostic; the s
 Verify the deterministic core anytime:
 
 ```bash
-python3 scripts/engram.py selftest    # FSRS math + state machine, 18 checks
+python3 scripts/engram.py selftest    # FSRS math + state machine, 33 checks
 ```
+
+## What a session feels like
+
+```
+you    /learn kalman filters
+engram [30-second intake: your goal, your prior exposure, your interests]
+       [curriculum agent builds a first-principles concept map — shown as a progress-bar map]
+       [3-probe pretest — attempting before learning measurably improves retention]
+       [per concept: predict → struggle a little → resolve → explain it back → verified cold]
+       [an independent assessor grades your answers blind; a receipt strip closes the session]
+
+next day
+engram [engram] 6 reviews due (kalman-filters: 6) · ~4 min · /review to clear
+you    /review          ← free recall, ~2 minutes, everything reschedules itself
+weekly /coach dashboard ← retention curves, calibration, mastery maps (local HTML)
+```
+
+Threshold concepts additionally get a generated **interactive explorable** (self-contained HTML: prediction gates, a manipulable model, embedded retrieval) under `~/.claude/learning/artifacts/`.
+
+## CLI reference (`scripts/engram.py`)
+
+The deterministic core — the model never does calendar math, this does:
+
+| Command | Purpose |
+|---|---|
+| `init` / `doctor` / `path` | create state · diagnose problems · print state location |
+| `topics` / `topic-status --topic T` | list topics · mastery map with progress bar |
+| `next --topic T` / `due` | next frontier concept · due review queue (interleaved) |
+| `rate` / `receipt --file F` | apply one rating · apply assessor receipt batch |
+| `stash add\|list\|count\|clear` | crash-safe queue of productions awaiting grading |
+| `model` / `misconception` / `experiment` | open learner model · error catalog · n-of-1 trials |
+| `stats` / `report` | telemetry JSON · self-contained HTML dashboard |
+| `refit` | fit review intervals to your measured recall (guarded, ≥50 reviews) |
+| `session-start` / `log-session` | ambient nudge (hook) · session telemetry |
+| `selftest` | 33 checks over the FSRS math and state machine |
+
+## Troubleshooting
+
+- Anything weird → `python3 scripts/engram.py doctor` (checks state files, paths, python).
+- Skills resolve the plugin root via `${CLAUDE_PLUGIN_ROOT}`; for a dev clone outside the plugin cache, set `ENGRAM_ROOT=/path/to/engram`.
+- Update to the latest release: `claude plugin update engram`.
+
+## Your data
+
+Everything lives in `~/.claude/learning/` as human-readable JSON you own — the learner model, concept graphs, receipts, misconceptions, artifacts. Nothing is ever sent anywhere. Two honesty guarantees are enforced by design: **confidence is only recorded when you actually state one** (never estimated for you), and **no mastery claim exists without a graded receipt**.
 
 ## Repository layout
 
@@ -94,3 +139,5 @@ Separation of powers, enforced by construction: the **tutor** (the main conversa
 ---
 
 ¹ *An engram is the physical trace a memory leaves in neural tissue (Semon 1904; experimentally located by Josselyn, Tonegawa et al. in the 2010s). Building durable engrams is literally this plugin's job. Alternative names considered: Paideia, Myelin, Chisel, Dojo.*
+
+*License: MIT. Changelog: [CHANGELOG.md](CHANGELOG.md).*
