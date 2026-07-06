@@ -1,0 +1,14 @@
+{
+  "name": "engram",
+  "description": "Evidence-based learning for Codex — learn anything, verify by free recall, schedule with FSRS, adapt from your own retention data.",
+  "owner": {
+    "name": "Quan Duong"
+  },
+  "plugins": [
+    {
+      "name": "engram",
+      "source": "./",
+      "description": "Evidence-based learning engine: learn anything, verify by free recall, schedule with FSRS, adapt from your own retention data. Shares the same skills/ and scripts/ as the Claude Code plugin."
+    }
+  ]
+}

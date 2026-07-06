@@ -25,6 +25,8 @@ Then, inside Claude Code:
 
 That's the whole onboarding. No config, no account, no cards to write. Requires `python3` (stock macOS/Linux one is fine — stdlib only).
 
+> **On OpenAI Codex?** Engram is an omni-repo — the same skills and engine run there too (`codex plugin marketplace add nagisanzenin/engram`). See **[INSTALL-CODEX.md](INSTALL-CODEX.md)**.
+
 ---
 
 ## Wait — what *is* this?
@@ -219,16 +221,17 @@ The model never does calendar math; this does:
 | `stats` / `report` | telemetry JSON · self-contained HTML dashboard |
 | `refit` | fit review intervals to your measured recall (guarded, ≥50 reviews) |
 | `session-start` / `log-session` | ambient nudge (hook) · session telemetry |
-| `selftest` | 33 checks over the FSRS math and state machine |
+| `selftest` | 63 checks over the FSRS math, state machine, and every hardened boundary |
 
 </details>
 
 <details>
 <summary><b>Troubleshooting & updating</b></summary>
 
-- Anything weird → `python3 scripts/engram.py doctor` (checks state files, paths, python).
+- Anything weird → `python3 scripts/engram.py doctor` (checks state files, paths, python, quarantined files).
 - Update: `claude plugin marketplace update engram && claude plugin update engram@engram`, then restart or `/reload-plugins`.
-- Skills resolve the plugin root via `${CLAUDE_PLUGIN_ROOT}`; for a dev clone outside the plugin cache, set `ENGRAM_ROOT=/path/to/engram`.
+- Skills resolve the plugin root via `${CLAUDE_PLUGIN_ROOT}` (or `${CODEX_PLUGIN_ROOT}` on Codex); for a dev clone outside the plugin cache, set `ENGRAM_ROOT=/path/to/engram`.
+- Corrupt a state file by hand? It's quarantined to a `.corrupt.<date>` sibling (never silently discarded) and `doctor` will point at it — your other topics keep working.
 
 </details>
 
@@ -236,13 +239,18 @@ The model never does calendar math; this does:
 <summary><b>Repository layout & design lineage</b></summary>
 
 ```
-.claude-plugin/     plugin.json, marketplace.json
+.claude-plugin/     plugin.json, marketplace.json          (Claude Code)
+.codex-plugin/      plugin.json                            (Codex)
+.agents/plugins/    marketplace.json                       (Codex marketplace)
 skills/             learn / review / coach  (+ _shared: dialogue grammar, Explorable Contract)
-agents/             engram-curriculum-architect · engram-assessor · engram-artifact-smith
-hooks/              SessionStart re-anchor (due-review nudge; silent when nothing is due)
+agents/             engram-curriculum-architect · engram-assessor · engram-artifact-smith  (Claude Code)
+codex/agents/       *.toml ports of the three subagents     (Codex)
+hooks/              SessionStart re-anchor (self-resolving; silent when nothing is due)
 scripts/engram.py   deterministic core: FSRS-4.5, state, receipts, stats, dashboard, selftest
-docs/               theory · prior art · architecture · roadmap
+docs/               theory · prior art · architecture · roadmap  ·  INSTALL-CODEX.md
 ```
+
+One codebase, two agents: `skills/` and `scripts/engram.py` are shared verbatim; each agent gets its own thin manifest + subagent format. See [INSTALL-CODEX.md](INSTALL-CODEX.md).
 
 Separation of powers, enforced by construction: the **tutor** teaches but never grades; the **assessor** grades from a fresh context without seeing the lesson; the **coach** adapts only from receipts; and `engram.py` — never the model — computes every date and stability value. Verification patterns (oracle-driven loops, receipts, re-anchoring) inherited from [claude-code-production-grade-plugin](https://github.com/nagisanzenin/claude-code-production-grade-plugin), transposed from software verification to learning verification.
 

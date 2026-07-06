@@ -6,5 +6,11 @@
     "name": "Quan Duong"
   },
   "homepage": "https://github.com/nagisanzenin/engram",
-  "keywords": ["learning", "education", "spaced-repetition", "fsrs", "tutor", "memory"]
+  "keywords": ["learning", "education", "spaced-repetition", "fsrs", "tutor", "memory"],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Engram",
+    "category": "learning"
+  }
 }
