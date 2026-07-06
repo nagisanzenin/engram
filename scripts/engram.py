@@ -18,6 +18,7 @@ import itertools
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import time
@@ -27,6 +28,10 @@ from html import escape
 SCHEMA = 1
 RETENTION_DEFAULT = 0.90
 INTERVAL_MAX = 365
+RETENTION_MIN, RETENTION_MAX = 0.70, 0.97   # sane desired-retention bounds
+MULTIPLIER_MIN, MULTIPLIER_MAX = 0.5, 1.5   # matches refit clamp
+CAL_MIN_N = 10          # calibration verdict floor: below this, "insufficient-data"
+PRODUCTION_MAX = 800    # receipt production cap (chars)
 
 # FSRS-4.5 default parameters (open-spaced-repetition). w[0..3] are initial
 # stabilities for Again/Hard/Good/Easy; the rest shape difficulty and growth.
@@ -38,8 +43,45 @@ FACTOR = 19.0 / 81.0  # chosen so R(t=S) = 0.9
 RATINGS = {"again": 1, "hard": 2, "good": 3, "easy": 4}
 GRADES = ("recalled", "partial", "lapsed")
 NODE_STATES = ("new", "learning", "review")
+# grade <-> rating are a bijection (dialogue-grammar rating map); used for the
+# calibration outcome fallback and grade/rating mismatch warnings.
+GRADE_OF_RATING = {"again": "lapsed", "hard": "partial", "good": "recalled", "easy": "recalled"}
+OUTCOME_OF_GRADE = {"recalled": 1.0, "partial": 0.5, "lapsed": 0.0}
 
 _SEQ = itertools.count()
+
+# ------------------------------------------------------ untrusted-input guards
+
+_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+def slug_ok(s):
+    """A safe filename component: no separators, no traversal, no absolute/hidden."""
+    return (isinstance(s, str) and bool(_SLUG_RE.match(s))
+            and s not in (".", "..") and not s.startswith(".")
+            and "/" not in s and "\\" not in s and "\x00" not in s)
+
+def require_slug(s, what="topic"):
+    if not slug_ok(s):
+        die("invalid %s %r (allowed: letters, digits, . _ - ; no slashes or '..')"
+            % (what, s if isinstance(s, str) else type(s).__name__))
+    return s
+
+def safe_date(s):
+    """Parse an ISO date, tolerating missing/garbled values (returns None)."""
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        return None
+
+def as_number(x, default=None):
+    """Coerce a JSON scalar to float for math; None if not number-like."""
+    if isinstance(x, bool) or x is None:
+        return default
+    if isinstance(x, (int, float)):
+        return float(x)
+    return default
 
 # ---------------------------------------------------------------- fsrs core
 
@@ -52,6 +94,10 @@ def retrievability(elapsed_days, stability):
     return (1.0 + FACTOR * elapsed_days / stability) ** DECAY
 
 def interval_for(stability, retention, multiplier=1.0):
+    # defensive clamps: a corrupt/edited model must never divide-by-zero or
+    # explode the schedule (retention==0 -> 0**-power; negative multiplier -> <0).
+    retention = clamp(retention, RETENTION_MIN, RETENTION_MAX)
+    multiplier = clamp(multiplier, MULTIPLIER_MIN, MULTIPLIER_MAX)
     days = stability / FACTOR * (retention ** (1.0 / DECAY) - 1.0) * multiplier
     return int(clamp(round(days), 1, INTERVAL_MAX))
 
@@ -63,7 +109,9 @@ def init_difficulty(g):
 
 def next_difficulty(d, g):
     nd = d - W[6] * (g - 3)
-    nd = W[7] * init_difficulty(4) + (1.0 - W[7]) * nd  # mean reversion
+    # FSRS-4.5 mean-reverts toward D0(3) (Good), not D0(4); D0(4) is the FSRS-5
+    # rule and would inflate stability growth ~20% under this 4.5 weight vector.
+    nd = W[7] * init_difficulty(3) + (1.0 - W[7]) * nd
     return clamp(nd, 1.0, 10.0)
 
 def next_stability_recall(d, s, r, g):
@@ -80,16 +128,22 @@ def next_stability_forget(d, s, r):
 def apply_rating(fsrs, rating_name, on_date):
     """Pure transition: fsrs dict + rating -> new fsrs dict (+ receipt fields)."""
     g = RATINGS[rating_name]
-    s0, d0 = fsrs.get("s"), fsrs.get("d")
+    s0, d0 = as_number(fsrs.get("s")), as_number(fsrs.get("d"))
+    if s0 is not None:
+        s0 = clamp(s0, 0.1, 36500.0)   # corrupt s=0 would make s**-w blow up
     last = fsrs.get("last")
-    if s0 is None:  # first exposure
+    if s0 is None:  # first exposure (or unrecoverable s -> treat as first)
         s, d, r = init_stability(g), init_difficulty(g), None
     else:
-        elapsed = max(0, (on_date - date.fromisoformat(last)).days) if last else 0
+        if d0 is None:
+            d0 = init_difficulty(3)     # corrupt difficulty -> re-anchor
+        last_d = safe_date(last)
+        elapsed = max(0, (on_date - last_d).days) if last_d else 0
         r = retrievability(elapsed, s0)
         d = next_difficulty(d0, g)
         s = next_stability_forget(d0, s0, r) if g == 1 else next_stability_recall(d0, s0, r, g)
-    ivl = interval_for(s, fsrs.get("retention", RETENTION_DEFAULT), fsrs.get("im", 1.0))
+    ivl = interval_for(s, as_number(fsrs.get("retention"), RETENTION_DEFAULT),
+                       as_number(fsrs.get("im"), 1.0))
     out = dict(fsrs)
     out.update({
         "s": round(s, 4), "d": round(d, 4),
@@ -114,24 +168,55 @@ def home():
 def p(*parts):
     return os.path.join(home(), *parts)
 
-def read_json(path, default=None):
+def _quarantine(path):
+    """Preserve a corrupt state file instead of letting a writer clobber it."""
+    try:
+        os.replace(path, "%s.corrupt.%s" % (path, today().isoformat()))
+    except OSError:
+        pass
+
+def read_json(path, default=None, quarantine=True):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError:
+        return default
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        if quarantine:
+            _quarantine(path)   # never silently discard corrupt state
         return default
 
+def _require_within_home(path):
+    """Refuse to write outside the state dir (defence in depth vs slug traversal)."""
+    base = os.path.realpath(home())
+    rp = os.path.realpath(path)
+    if rp != base and not rp.startswith(base + os.sep):
+        die("refused write outside state dir: %s" % path)
+    return rp
+
 def write_json(path, obj):
+    _require_within_home(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False, sort_keys=False)
-        f.write("\n")
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, ensure_ascii=False, sort_keys=False)
+            f.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)   # don't leak a .tmp on failure
+        except OSError:
+            pass
+        raise
 
 def append_jsonl(path, obj):
+    _require_within_home(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
+    # O_NOFOLLOW: refuse to append through a pre-planted symlink at the final component.
+    flags = os.O_CREAT | os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o644)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 def read_jsonl(path):
@@ -163,29 +248,70 @@ DEFAULT_MODEL = {
     "accessibility": [],
 }
 
+def _deep_heal(m, default):
+    """Restore missing keys and repair type-mismatched subtrees from DEFAULT_MODEL.
+
+    Makes the learner model self-healing: a hand-edit that deletes `interests`,
+    or a bad `--set memory=5` that replaced a dict with a scalar, is restored to
+    a working shape on next load instead of crashing every command."""
+    if not isinstance(m, dict):
+        return json.loads(json.dumps(default))
+    for k, dv in default.items():
+        if isinstance(dv, dict):
+            if isinstance(m.get(k), dict):
+                _deep_heal(m[k], dv)
+            else:
+                m[k] = json.loads(json.dumps(dv))
+        else:
+            m.setdefault(k, dv)
+    return m
+
 def load_model():
-    m = read_json(p("learner-model.json"))
-    if m is None:
+    raw = read_json(p("learner-model.json"))
+    if raw is None:
         m = json.loads(json.dumps(DEFAULT_MODEL))
         m["created"] = today().isoformat()
         write_json(p("learner-model.json"), m)
-    m.setdefault("memory", {}).setdefault("interval_multiplier", 1.0)
+        return m
+    before = json.dumps(raw, sort_keys=True)
+    m = _deep_heal(raw, DEFAULT_MODEL)
+    if json.dumps(m, sort_keys=True) != before:
+        write_json(p("learner-model.json"), m)   # persist the repair once
     return m
 
 def load_graph(topic):
-    g = read_json(p("graphs", topic + ".json"))
+    require_slug(topic)
+    path = p("graphs", topic + ".json")
+    existed = os.path.exists(path)
+    g = read_json(path)   # quarantines corrupt JSON (renames it) and returns None
     if g is None:
+        if existed:
+            die("topic %s is corrupt — quarantined to a .corrupt file; run `doctor`" % topic)
         die("unknown topic: %s (run `topics` to list)" % topic)
     return g
 
 def save_graph(g):
+    require_slug(g.get("topic"))
     write_json(p("graphs", g["topic"] + ".json"), g)
 
 def all_topics():
     d = p("graphs")
     if not os.path.isdir(d):
         return []
-    return sorted(f[:-5] for f in os.listdir(d) if f.endswith(".json"))
+    return sorted(f[:-5] for f in os.listdir(d)
+                  if f.endswith(".json") and slug_ok(f[:-5]))
+
+def iter_graphs(topic_filter=None):
+    """Yield (topic, graph) for readable graphs; skip corrupt ones without dying.
+
+    Aggregate/read-only views (topics, stats, report, due, session-start) must
+    degrade gracefully when one graph file is unreadable — never brick on it."""
+    for t in all_topics():
+        if topic_filter and t != topic_filter:
+            continue
+        g = read_json(p("graphs", t + ".json"))
+        if g is not None:
+            yield t, g
 
 def die(msg, code=2):
     print("engram: error: " + msg, file=sys.stderr)
@@ -220,19 +346,68 @@ def load_payload(args):
             die("bad --json: %s" % e)
     die("provide --json or --file")
 
+def _fresh_fsrs():
+    return {"s": None, "d": None, "due": None, "last": None, "reps": 0, "lapses": 0}
+
+def _requires_cycle(g):
+    """Return a node-id cycle over `requires` edges, or None. Report-only."""
+    color = {}  # 0=unseen 1=on-stack 2=done
+    def visit(nid, stack):
+        color[nid] = 1
+        for req in g["nodes"].get(nid, {}).get("edges", {}).get("requires", []) or []:
+            if req not in g["nodes"]:
+                continue
+            if color.get(req) == 1:
+                return stack[stack.index(req):] + [req]
+            if color.get(req, 0) == 0:
+                r = visit(req, stack + [req])
+                if r:
+                    return r
+        color[nid] = 2
+        return None
+    for nid in g["nodes"]:
+        if color.get(nid, 0) == 0:
+            r = visit(nid, [nid])
+            if r:
+                return r
+    return None
+
 def cmd_add_topic(args):
     g = load_payload(args)
     for key in ("topic", "title", "nodes", "order"):
         if key not in g:
             die("topic JSON missing key: %s" % key)
-    if not g["nodes"]:
+    require_slug(g["topic"])
+    if not isinstance(g["nodes"], dict) or not g["nodes"]:
         die("topic has no nodes")
+    if not isinstance(g["order"], list):
+        die("order must be a list")
+    for nid in g["nodes"]:
+        require_slug(nid, "node id")
     missing = [n for n in g["order"] if n not in g["nodes"]]
     if missing:
         die("order references unknown nodes: %s" % ", ".join(missing))
-    if os.path.exists(p("graphs", g["topic"] + ".json")) and not args.replace:
+
+    path = p("graphs", g["topic"] + ".json")
+    old = read_json(path) if os.path.exists(path) else None
+    if old is not None and not args.replace:
         die("topic exists: %s (use --replace to overwrite)" % g["topic"])
+    old_nodes = old.get("nodes", {}) if isinstance(old, dict) else {}
+
     warnings = []
+    # dedupe order (keep first occurrence), then append any node missing from it
+    seen, order = set(), []
+    for nid in g["order"]:
+        if nid in seen:
+            warnings.append("duplicate id in order dropped: %s" % nid)
+            continue
+        seen.add(nid); order.append(nid)
+    for nid in g["nodes"]:
+        if nid not in seen:
+            warnings.append("node not in order, appended: %s" % nid)
+            seen.add(nid); order.append(nid)
+    g["order"] = order
+
     for nid, node in g["nodes"].items():
         for key in ("claim", "probe"):
             if not node.get(key):
@@ -243,81 +418,123 @@ def cmd_add_topic(args):
         node.setdefault("threshold", False)
         node.setdefault("rubric", [])
         node.setdefault("transfer_probe", None)
-        node.setdefault("state", "new")
         node.setdefault("artifact", None)
-        node.setdefault("fsrs", {"s": None, "d": None, "due": None, "last": None,
-                                 "reps": 0, "lapses": 0})
+        # The engine OWNS scheduling state — never trust payload-supplied state/fsrs
+        # (mastery advances only through receipts; Article 10). On --replace, carry
+        # the existing schedule forward for surviving node ids so restructuring a
+        # topic is not silent data loss.
+        prev = old_nodes.get(nid)
+        if isinstance(prev, dict) and isinstance(prev.get("fsrs"), dict):
+            node["fsrs"] = prev["fsrs"]
+            node["state"] = prev.get("state", "new")
+        else:
+            node["fsrs"] = _fresh_fsrs()
+            node["state"] = "new"
+        if node["state"] not in NODE_STATES:
+            node["state"] = "new"
         for etype, targets in node.get("edges", {}).items():
+            if not isinstance(targets, list):
+                continue
             for t in targets:
                 if t not in g["nodes"]:
                     warnings.append("%s.%s -> unknown node '%s'" % (nid, etype, t))
+    cyc = _requires_cycle(g)
+    if cyc:
+        warnings.append("requires cycle (topic can stall): %s" % " -> ".join(cyc))
     g.setdefault("schema", SCHEMA)
     g.setdefault("created", today().isoformat())
     g.setdefault("goal", None)
+    preserved = sum(1 for nid in g["nodes"]
+                    if isinstance(old_nodes.get(nid), dict)
+                    and isinstance(old_nodes[nid].get("fsrs"), dict)
+                    and old_nodes[nid]["fsrs"].get("s") is not None)
+    if old is not None:
+        try:
+            write_json(path + ".bak", old)   # snapshot before overwrite
+        except SystemExit:
+            pass
     save_graph(g)
-    emit({"ok": True, "topic": g["topic"], "nodes": len(g["nodes"]), "warnings": warnings})
+    emit({"ok": True, "topic": g["topic"], "nodes": len(g["nodes"]),
+          "schedule_preserved": preserved, "warnings": warnings})
+
+def state_counts(g):
+    counts = {"review": 0, "learning": 0, "new": 0}
+    for node in g.get("nodes", {}).values():
+        st = node.get("state", "new")
+        counts[st] = counts.get(st, 0) + 1
+    return counts
 
 def cmd_topics(_args):
     out = []
-    for t in all_topics():
-        g = load_graph(t)
-        states = {}
+    for t, g in iter_graphs():
+        states = state_counts(g)
         due_count = 0
         for node in g["nodes"].values():
-            states[node["state"]] = states.get(node["state"], 0) + 1
-            d = node["fsrs"].get("due")
-            if node["state"] != "new" and d and date.fromisoformat(d) <= today():
+            dd = safe_date(node.get("fsrs", {}).get("due"))
+            if node.get("state") != "new" and dd and dd <= today():
                 due_count += 1
         out.append({"topic": t, "title": g.get("title"), "goal": g.get("goal"),
                     "nodes": len(g["nodes"]), "states": states, "due": due_count})
     emit(out)
 
-def requires_met(g, node):
-    for req in node.get("edges", {}).get("requires", []):
+def pending_nodes(topic):
+    """Node ids for this topic with a production stashed but not yet graded."""
+    return {e.get("node") for e in read_jsonl(p(STASH_FILE))
+            if e.get("topic") == topic}
+
+def requires_met(g, node, provisional=frozenset()):
+    for req in node.get("edges", {}).get("requires", []) or []:
         other = g["nodes"].get(req)
-        if other is not None and other["state"] == "new":
+        if other is not None and other.get("state") == "new" and req not in provisional:
             return False
     return True
 
 def cmd_next(args):
     g = load_graph(args.topic)
+    stashed = pending_nodes(args.topic)  # already-produced, awaiting the assessor
     for nid in g["order"]:
-        node = g["nodes"][nid]
-        if node["state"] == "new" and requires_met(g, node):
-            req_claims = {r: g["nodes"][r]["claim"]
-                          for r in node.get("edges", {}).get("requires", [])
-                          if r in g["nodes"]}
+        node = g["nodes"].get(nid)
+        if node is None or node.get("state") != "new" or nid in stashed:
+            continue  # skip a node whose production is already stashed
+        # A stashed-but-ungraded prerequisite counts as provisionally met, so the
+        # batch-graded /learn flow can keep advancing instead of dead-ending.
+        if requires_met(g, node, stashed):
+            reqs = [r for r in node.get("edges", {}).get("requires", []) or [] if r in g["nodes"]]
             emit({"topic": args.topic, "id": nid, "node": node,
-                  "requires_claims": req_claims,
-                  "remaining_new": sum(1 for n in g["nodes"].values() if n["state"] == "new")})
+                  "requires_claims": {r: g["nodes"][r].get("claim") for r in reqs},
+                  "provisional_requires": [r for r in reqs
+                                           if r in stashed and g["nodes"][r].get("state") == "new"],
+                  "pending_verify": len(stashed),
+                  "remaining_new": sum(1 for n in g["nodes"].values() if n.get("state") == "new")})
             return
-    emit({"topic": args.topic, "id": None,
-          "note": "no frontier nodes: everything is encoded (or blocked by unmet requires)"})
+    emit({"topic": args.topic, "id": None, "pending_verify": len(stashed),
+          "note": ("frontier nodes remain but are awaiting assessor grading — "
+                   "grade the stash to advance" if stashed else
+                   "no frontier nodes: everything is encoded (or blocked by unmet requires)")})
 
 def due_items(topic_filter=None, limit=None, horizon_days=0):
     per_topic = {}
     cutoff = today() + timedelta(days=horizon_days)
-    for t in all_topics():
-        if topic_filter and t != topic_filter:
-            continue
-        g = load_graph(t)
+    for t, g in iter_graphs(topic_filter):
         items = []
         for nid in g["order"]:
-            node = g["nodes"][nid]
-            d = node["fsrs"].get("due")
-            if node["state"] == "new" or not d:
+            node = g["nodes"].get(nid)
+            if node is None:
+                continue  # ghost id in order (hand-edited/adversarial graph)
+            fsrs = node.get("fsrs", {})
+            due_d = safe_date(fsrs.get("due"))
+            if node.get("state") == "new" or not due_d:
                 continue
-            due_d = date.fromisoformat(d)
             if due_d <= cutoff:
                 items.append({
-                    "topic": t, "id": nid, "probe": node["probe"],
-                    "claim": node["claim"], "rubric": node.get("rubric", []),
+                    "topic": t, "id": nid, "probe": node.get("probe"),
+                    "claim": node.get("claim"), "rubric": node.get("rubric", []),
                     "threshold": node.get("threshold", False),
                     "arbitrary": node.get("arbitrary", False),
-                    "due": d,
+                    "due": fsrs.get("due"),
                     "overdue_days": (today() - due_d).days,
-                    "s": node["fsrs"].get("s"), "reps": node["fsrs"].get("reps", 0),
-                    "lapses": node["fsrs"].get("lapses", 0),
+                    "s": fsrs.get("s"), "reps": fsrs.get("reps", 0),
+                    "lapses": fsrs.get("lapses", 0),
                 })
         items.sort(key=lambda x: -x["overdue_days"])
         if items:
@@ -328,23 +545,35 @@ def due_items(topic_filter=None, limit=None, horizon_days=0):
         for t in list(per_topic):
             if per_topic[t]:
                 merged.append(per_topic[t].pop(0))
-    if limit:
+    if limit is not None:
         merged = merged[:limit]
     return merged
 
 def cmd_due(args):
     emit(due_items(args.topic, args.limit))
 
+def gen_id(prefix):
+    # pid + monotonic seq: unique within and across processes, even same-ms.
+    return "%s_%d_%d_%03d" % (prefix, int(time.time() * 1000), os.getpid(), next(_SEQ))
+
+def clean_confidence(conf):
+    """0-100 int, or None. Never crashes on a bad type; never invents a number."""
+    v = as_number(conf)
+    if v is None:
+        return None
+    return int(round(clamp(v, 0.0, 100.0)))
+
 def make_receipt(item, extra, kind):
-    conf = item.get("confidence")
-    return {
-        "id": "r_%d_%03d" % (int(time.time() * 1000), next(_SEQ)),
+    prod = item.get("production") or ""
+    truncated = len(prod) > PRODUCTION_MAX
+    receipt = {
+        "id": gen_id("r"),
         "ts": today().isoformat(),
         "topic": item["topic"], "node": item["node"],
         "kind": kind,
         "probe": item.get("probe"),
-        "production": (item.get("production") or "")[:800] or None,
-        "confidence": (int(conf) if conf is not None else None),
+        "production": (prod[:PRODUCTION_MAX] or None),
+        "confidence": clean_confidence(item.get("confidence")),
         "grade": item.get("grade"),
         "rating": item["rating"],
         "misconceptions": item.get("misconceptions", []),
@@ -352,21 +581,46 @@ def make_receipt(item, extra, kind):
         "source": item.get("source", "self"),
         **extra,
     }
+    if truncated:
+        receipt["production_truncated"] = True
+    return receipt
+
+def validate_item(item):
+    """Raise (die) if an item can't be applied. Lets a batch fail before any write."""
+    for key in ("topic", "node", "rating"):
+        if key not in item:
+            die("receipt item missing %s: %s" % (key, json.dumps(item)[:120]))
+    require_slug(item["topic"])
+    if item["rating"] not in RATINGS:
+        die("bad rating %r (use again|hard|good|easy)" % item["rating"])
+    if item.get("grade") is not None and item["grade"] not in GRADES:
+        die("bad grade %r (use recalled|partial|lapsed)" % item["grade"])
+
+def drop_stash(topic, node):
+    """Remove applied (topic, node) entries so the stash self-drains as receipts land."""
+    path = p(STASH_FILE)
+    entries = read_jsonl(path)
+    keep = [e for e in entries if not (e.get("topic") == topic and e.get("node") == node)]
+    if len(keep) != len(entries):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        for e in keep:
+            append_jsonl(path, e)
 
 def apply_item(item, kind):
+    validate_item(item)
     g = load_graph(item["topic"])
     node = g["nodes"].get(item["node"])
     if node is None:
         die("unknown node %s in topic %s" % (item["node"], item["topic"]))
     rating = item["rating"]
-    if rating not in RATINGS:
-        die("bad rating %r (use again|hard|good|easy)" % rating)
-    if item.get("grade") is not None and item["grade"] not in GRADES:
-        die("bad grade %r (use recalled|partial|lapsed)" % item["grade"])
     model = load_model()
-    node["fsrs"]["retention"] = model["memory"].get("desired_retention", RETENTION_DEFAULT)
-    node["fsrs"]["im"] = model["memory"].get("interval_multiplier", 1.0)
-    was_new = node["fsrs"].get("s") is None
+    node.setdefault("fsrs", _fresh_fsrs())
+    node["fsrs"]["retention"] = as_number(model["memory"].get("desired_retention"), RETENTION_DEFAULT)
+    node["fsrs"]["im"] = as_number(model["memory"].get("interval_multiplier"), 1.0)
+    was_new = as_number(node["fsrs"].get("s")) is None
     node["fsrs"], extra = apply_rating(node["fsrs"], rating, today())
     node["fsrs"].pop("retention", None)
     node["fsrs"].pop("im", None)
@@ -376,11 +630,17 @@ def apply_item(item, kind):
         node["state"] = "learning"
     else:
         node["state"] = "review"
-    save_graph(g)
+    # Evidence before state (Article 10): write the receipt first, so a crash can
+    # only ever cost a harmless re-review — never advance mastery without a receipt.
     receipt = make_receipt(item, {**extra, "due_next": node["fsrs"]["due"]}, kind)
     append_jsonl(p("receipts", item["topic"] + ".jsonl"), receipt)
-    return {"node": item["node"], "rating": rating, "state": node["state"],
-            "due": node["fsrs"]["due"], **extra}
+    save_graph(g)
+    drop_stash(item["topic"], item["node"])
+    result = {"node": item["node"], "rating": rating, "state": node["state"],
+              "due": node["fsrs"]["due"], **extra}
+    if item.get("grade") and GRADE_OF_RATING.get(rating) != item["grade"]:
+        result["grade_rating_mismatch"] = "grade=%s but rating=%s" % (item["grade"], rating)
+    return result
 
 def cmd_rate(args):
     item = {"topic": args.topic, "node": args.node, "rating": args.rating,
