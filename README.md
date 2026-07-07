@@ -269,4 +269,13 @@ Separation of powers, enforced by construction: the **tutor** teaches but never 
 
 ---
 
+## More from the same workshop
+
+Two sibling plugins share Engram's discipline — deterministic cores, blind grading, receipts:
+
+- **[claude-code-production-grade-plugin](https://github.com/nagisanzenin/claude-code-production-grade-plugin)** — turns "build me X" into a gated multi-agent pipeline: architecture decisions, tests, security audit, CI/CD, and verifiable receipts for every phase.
+- **[effortmining](https://github.com/nagisanzenin/effortmining)** — benchmark-calibrated reasoning-effort dispatch for Claude Code subagents: 64.7% fewer output tokens at equal quality versus effort inheritance, pre-registered A/B with published failures. Its blind grader is Engram's assessor, transposed.
+
+---
+
 <sub>*An <b>engram</b> is the physical trace a memory leaves in neural tissue (Semon, 1904; experimentally located by Josselyn, Tonegawa et al. in the 2010s). Building durable ones is literally this plugin's job.* · MIT license · [changelog](CHANGELOG.md)</sub>
