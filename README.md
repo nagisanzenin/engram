@@ -278,15 +278,13 @@ Two sibling plugins share Engram's discipline — deterministic cores, blind gra
 
 ---
 
-## Star History
+## Stars
 
-<a href="https://star-history.com/#nagisanzenin/engram&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=nagisanzenin/engram&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=nagisanzenin/engram&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=nagisanzenin/engram&type=Date" />
- </picture>
-</a>
+If Engram earned its keep, a star helps the next person find it.
+
+[![GitHub stars](https://img.shields.io/github/stars/nagisanzenin/engram?style=for-the-badge&logo=github&label=Stars&color=gold)](https://star-history.com/#nagisanzenin/engram&Date)
+
+<sub>GitHub restricted the stargazer-timeline API to repo collaborators, so the live history chart no longer renders inline. Click the badge for the interactive graph.</sub>
 
 ---
 
