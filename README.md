@@ -278,15 +278,6 @@ Five Claude Code plugins from the same workshop. Most share one habit: *let a de
 
 ---
 
-## More from the same workshop
-
-Two sibling plugins share Engram's discipline — deterministic cores, blind grading, receipts:
-
-- **[claude-code-production-grade-plugin](https://github.com/nagisanzenin/claude-code-production-grade-plugin)** — turns "build me X" into a gated multi-agent pipeline: architecture decisions, tests, security audit, CI/CD, and verifiable receipts for every phase.
-- **[effortmining](https://github.com/nagisanzenin/effortmining)** — benchmark-calibrated reasoning-effort dispatch for Claude Code subagents: 64.7% fewer output tokens at equal quality versus effort inheritance, pre-registered A/B with published failures. Its blind grader is Engram's assessor, transposed.
-
----
-
 ## Stars
 
 If Engram earned its keep, a star helps the next person find it.
