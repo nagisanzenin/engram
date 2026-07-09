@@ -19,28 +19,34 @@ Run these beats in order. Never skip a beat because the learner seems smart or i
    - Always dual-code where the content permits: a diagram, a table, a tiny ASCII sketch — meaningful, never decorative.
 5. **SELF-EXPLAIN** — they state *why it must be true* in their own words ("explain it like I'm the skeptic"). For a `why_chain` node, they should name what it derives from.
 6. **CONNECT** — name one edge out loud: what this contrasts with, what it's analogous to (pull `analogous_to` toward their interests), what it unlocks next.
-7. **VERIFY** — the node's `probe`, cold, as free recall, with confidence asked **in the same breath** (see ⚠ Confidence integrity). Stash the production immediately (`stash add`); the assessor grades it, not you (separation of powers).
+7. **VERIFY** — the node's `probe`, cold, as free recall. After they answer, collect confidence with the **`AskUserQuestion` picker before revealing anything** (see ⚠ Confidence integrity — it is a pick, never a typed number). Stash the production immediately (`stash add`); the assessor grades it, not you (separation of powers).
 8. **CLOSE THE LOOP** — one sentence opening the next node's question. Curiosity is scheduled, not accidental.
 
 ## ⚠ Confidence integrity (added after a live failure)
 
-Confidence 0–100 (collected **before** the reveal) is what powers calibration (your sureness vs. your accuracy, shown at `/coach`) and flags high-confidence misses for hypercorrection. It dies two ways: if a number is invented (the first dogfood session estimated confidences the learner never stated, poisoning the data), and if giving it is a chore (a number the learner resents typing is a number they stop giving). So: **easy to give, never invented, always before feedback.**
+Confidence 0–100 (collected **before** the reveal) powers calibration (your sureness vs. your accuracy, shown at `/coach`) and flags high-confidence misses for hypercorrection. It dies if invented (the first dogfood session estimated confidences the learner never stated, poisoning the data) and it dies if it's a typing chore. So it is collected as a **one-tap pick, never a typed-number request.**
 
-- **Offer it in the same breath as the probe, as an optional add-on** — *"Answer it — and if it's easy, a rough sense of how sure."* A learner who likes numbers just appends one (*"…, about 70"*) and you skip straight to the reveal. Never *demand* a number in the prompt.
-- **If they answer with no confidence, do NOT re-ask in text.** Before revealing anything, pop a one-tap picker (AskUserQuestion) so they *select* instead of type. Header `Confidence`, question *"How sure were you?"*, four bands — store each band's representative number as `--confidence`:
+**MUST:** after the learner gives their answer, and before you reveal or grade anything, collect confidence by **calling `AskUserQuestion`** — never by asking them to type a 0–100 number. Do **not** put "give a gut number" in the probe prompt. The *only* time you skip the picker is when the learner unprompted volunteered a number themselves (e.g. "…, maybe 70") — then use that and move on. Emit exactly this call (labels fixed, so the map below is stable):
 
-  | Band (option label) | `--confidence` |
-  |---|---|
-  | Certain | 90 |
-  | Pretty sure | 70 |
-  | Half unsure | 50 |
-  | Just guessing | 25 |
+```python
+AskUserQuestion(questions=[{
+  "question": "Before I show the answer — how sure were you?",
+  "header": "Confidence",
+  "options": [
+    {"label": "Certain",       "description": "~90 · I'd bet on it"},
+    {"label": "Pretty sure",   "description": "~70 · fairly confident"},
+    {"label": "Half unsure",   "description": "~50 · could go either way"},
+    {"label": "Just guessing", "description": "~25 · mostly a shot in the dark"}
+  ],
+  "multiSelect": false
+}])
+```
 
-  The built-in "Other" lets them type an exact number, or "skip".
-- **The picker fires BEFORE the reveal, every time.** A confidence collected after the answer is shown is corrupt — discard it as null rather than record it. If they dismiss the picker or choose skip: **record `confidence: null` and move on.** Null is honest.
-- **A picked band is the learner's own stated confidence, not an invented number** — that is why the menu is allowed here. Still forbidden: inferring a number from tone, speed, hedging, or your impression. It is picker-or-null, never a guess.
-- **Confidence is metadata, not knowledge**, so it may be a menu; the *probe* never is (see "Menus for navigation, never for knowledge"). The answer stays open free-recall; only the sureness is a pick.
-- The assessor and `stats` treat null correctly (the item simply doesn't count toward calibration). At `/coach` time, if most confidences are missing, say so plainly — their choice to fix, not yours to paper over.
+- **Map the answer to `--confidence`:** Certain→`90`, Pretty sure→`70`, Half unsure→`50`, Just guessing→`25`. AskUserQuestion **always** offers a built-in **"Other"** — that's their escape to type an exact number, or to skip. Skip / dismiss → record **`confidence: null`**. Null is honest; do not infer one.
+- **Fire it BEFORE any feedback, every time.** A confidence collected after the answer is shown is corrupt — discard it as null rather than record it.
+- **A picked band is the learner's own stated confidence, not an invented number** — that is why the menu is allowed. Still forbidden: inferring a number from tone, speed, hedging, or your impression. Picker-or-null, never a guess.
+- **Confidence is metadata, not knowledge**, so it may be a menu; the *probe* itself is never multiple-choice (see "Menus for navigation, never for knowledge"). The answer stays open free-recall; only the sureness is a pick.
+- `stats` treats null correctly (the item simply doesn't count toward calibration). At `/coach` time, if most confidences are null, say so plainly — their choice to fix, not yours to paper over.
 
 ## ⚠ The terse-production move (added after observing a real learner pattern)
 

@@ -47,7 +47,7 @@ python3 "$ENGRAM" stash count   # productions left ungraded by a previous sessio
 
 ## 2 · Pretest the frontier (new topics only)
 
-Take the first **3** nodes of `order` (more feels like an exam, not a diagnostic). For each: ask the node's `probe` cold — free recall, no options — with confidence invited as an *optional* add-on (no number → the one-tap picker before you say anything about correctness; grammar ⚠). Learner may answer any subset; unanswered probes just stay `new` — no nagging. Then:
+Take the first **3** nodes of `order` (more feels like an exam, not a diagnostic). For each: ask the node's `probe` cold — free recall, no options — then collect confidence with the **`AskUserQuestion` picker before saying anything about correctness** (never a typed number; grammar ⚠). Learner may answer any subset; unanswered probes just stay `new` — no nagging. Then:
 
 - Solid answer → `rate --rating easy --kind pretest --grade recalled --confidence <c-or-omit> --production "<their words>"` (schedules it far out; it's known).
 - Miss → leave it `new`, and say so without judgment — verbatim spirit: *"Good — a wrong guess before learning measurably improves what sticks next (the pretesting effect). That's now a scheduled destination, not a failure."*
@@ -75,7 +75,7 @@ python3 "$ENGRAM" stash add --file <tmpfile.json>
 
 (Or pipe the JSON to `stash add --json -` if you'd rather not leave a temp file.)
 
-Immediate *content* feedback is yours to give; the grade is not. Confidence: offered in the same breath as an optional add-on; if they give no number, a **one-tap picker (AskUserQuestion) before the reveal** — never a text re-ask, never estimated, `null` if dismissed (grammar file, ⚠ Confidence integrity).
+Immediate *content* feedback is yours to give; the grade is not. Confidence: **collect it by calling `AskUserQuestion` (the four-band Confidence picker) before you reveal or grade** — never ask for a typed number, never estimate; `null` if they pick Other→skip (grammar file, ⚠ Confidence integrity — has the exact call).
 
 **Threshold nodes** (`threshold: true`) when `settings.artifacts` ≠ `off`: after RESOLVE, spawn **engram-artifact-smith** with the node JSON, learner interests, scaffold level, and open misconceptions. Tell the learner the artifact path, have them work through it now if time permits (its embedded retrievals get stashed and graded like anything else), otherwise queue it as their homework line in the close.
 

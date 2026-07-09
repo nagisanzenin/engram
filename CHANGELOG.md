@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.3 — 2026-07-09 · make the confidence picker actually fire
+
+0.4.2 described the confidence picker but left the instruction too soft and framed it
+as a fallback *after* a text ask — so the tutor kept asking for a typed number instead
+of showing the arrow-key box. Fixed by adopting the production-grade pattern: an
+imperative MUST, the explicit `AskUserQuestion(...)` call inlined in the dialogue
+grammar, and no "give a number" wording left in any probe prompt.
+
+### Behavior (grammar + skills; no engine change)
+- The four-band Confidence picker (Certain 90 / Pretty sure 70 / Half unsure 50 /
+  Just guessing 25) is now the **primary, mandatory** way confidence is collected —
+  before the reveal, every item — with the tool's built-in "Other" for an exact number
+  or skip (→ null). The tutor only skips the picker if the learner volunteered a number
+  unprompted. Applied to `/learn` encode, the pretest, and `/review`.
+- Verified live: the picker renders and a selection round-trips to its number.
+
 ## 0.4.2 — 2026-07-09 · confidence UX — pick, don't type
 
 Collecting the 0–100 gut-confidence (which powers calibration and hypercorrection —
