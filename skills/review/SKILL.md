@@ -24,6 +24,11 @@ python3 "$ENGRAM" due --limit <cap>
 
 If stash > 0, settle it first (assessor → `receipt` → `stash clear`, per /learn step 4) with one explanatory line. Caps: `quick` → 5 items; otherwise mode default (Standard ≈ 12). `--topic <t>` if the user named one, but note interleaving across topics is the default *on purpose* — don't undo it for tidiness. Open with the session ticket. Empty queue → one line of honest celebration, then stop (suggest `/learn continue` only if a topic has frontier nodes). Never invent reviews.
 
+**Return-after-absence (the amnesty protocol — the highest-evidence Layer 2 move; `docs/05-affective-layers.md` P14).** If the due queue is large after a gap (roughly `due > 2× the mode cap`, or the last session was many days ago), do **not** dump the debt. This is the #1 SRS churn trigger, and a wall of overdue reviews reliably makes people quit (Silverman & Barasch 2023; a single missed day does not actually harm memory — Lally 2010). Instead, one calm line of amnesty + load renegotiation, then a real choice:
+- Frame it as normal, owed nothing: *"You've got 40 due after the break — that's just spacing doing its job, not a debt. FSRS handles backlog fine."*
+- Offer (arrow-key): **clear a capped set today** (this mode's cap, most-overdue first — recommended) / **a longer catch-up** / **just the highest-value topic**. Never a marathon; the two-minute floor is a floor, not a target.
+- Then run only the chosen cap. What's left stays due and un-guilted. Zero shame in either the offer or the close.
+
 ## 2 · Per item — the retrieval protocol
 
 The `due` payload gives you `probe`, `claim` (canonical answer), and `rubric`. Show a progress marker per item: `[3/6] · residual-stream †`. The order of operations is sacred:
@@ -38,7 +43,7 @@ python3 "$ENGRAM" rate --topic <t> --node <n> --rating <r> --confidence <c-or-om
   --grade <g> --production-file <tmp-answer.txt> --kind review --source self
 ```
 
-Relay the returned due date in passing, not ceremonially ("back in 12 days").
+Relay the returned due date in passing, not ceremonially ("back in 12 days"). **On a genuine gain** (the `rate` output's `s_after` meaningfully exceeds `s_before`, or the node crosses into `retained`), add *one* flat growth line — *"that jumped from ~2 days to ~9; it'll hold now"* — per the Naming-real-growth rules (grammar file, Pillar 13). Only on real growth; a `hard`/`again` gets honest task-feedback, never a manufactured win; stay silent if `settings.momentum` = `off`.
 
 **Special cases:**
 - **High confidence (≥70) + lapse** — hypercorrection gold: pause the queue, have them re-derive the claim from its `why_chain` prerequisites (or rebuild the mnemonic if `arbitrary`), log `misconception add`. Two minutes here is worth ten elsewhere.
@@ -56,4 +61,4 @@ python3 "$ENGRAM" log-session --kind review --mode <mode> --minutes <est> --item
 python3 "$ENGRAM" stats
 ```
 
-Close with the **receipt strip**: items → outcomes, streak, one meaningful number (e.g., month-bucket recall rate), next due date. If the queue was large and they stopped early — fine, say what's left, zero guilt. The two-minute floor exists to protect the habit, not to grow the session.
+Close with the **receipt strip**: items → outcomes, streak, one meaningful number (e.g., month-bucket recall rate), next due date. Prefer a **momentum** number from `stats.momentum` as that meaningful number when there was real growth — *"+31 days of durability added this week"* or *"most durable now: residual-stream, 42 days"* — informational, never a score (Pillar 13). If the queue was large and they stopped early — fine, say what's left, zero guilt. The two-minute floor exists to protect the habit, not to grow the session.

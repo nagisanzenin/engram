@@ -32,6 +32,7 @@ python3 "$ENGRAM" stash count   # productions left ungraded by a previous sessio
 - **If stash > 0:** finish that first — it is a previous session's ungraded work. Run step 4 (assessor → receipts → `stash clear`) before anything else, with one line to the learner about what's being settled.
 - If **due ≥ 5**, offer first (arrow-key choice): *clear reviews first (~N min, recommended — spacing beats bingeing)* / *straight to new material*. Respect the answer without comment.
 - Pick session **mode** if not obvious from the user's words: Sprint (~5 min, 1 node) / Standard (~25 min, 2–3 nodes) / Deep (~60 min, 4–5 nodes or capstone). Default from `settings.default_mode`. Ask at most once per session, arrow-key.
+- **Focus profile** (`settings.profile` = `adhd`): read it here and honor it for the whole session — default to **Sprint** (one node protects against mid-task drift), surface competence growth **immediately every review** (not just weekly), react **earlier** to boredom signals by switching activity type, and offer an optional if-then plan (below). It changes *dials the skills already read*, never the pedagogy, and adds no game (`docs/05-affective-layers.md`, "The ADHD question"). It's a declared need, honored — not a "learning style". Set/clear it in natural language ("I have ADHD" / "turn off focus mode") via `model --set settings.profile=adhd` (or `=null`).
 - Open with the **session ticket** (format in the grammar file).
 
 ## 1 · Resolve the target
@@ -60,6 +61,8 @@ python3 "$ENGRAM" next --topic <topic>
 ```
 
 Run the **dialogue grammar** beats 1–8 on the returned node (gap → predict → struggle → resolve → self-explain → connect → verify → close), with a one-line progress marker between nodes (`node 2/3 · residual-stream †`). Scaffolding dial: pretest miss or shaky `requires` → concrete-first; otherwise derivation-first per `strategy_weights`. `arbitrary: true` → mnemonic + retrieval, no derivation theater.
+
+**Fire the mentor register at its moments** (grammar file, Pillar 14): when they hit real difficulty inside the struggle budget, name struggle as encoding and hold the budget (don't rescue early); if motivation visibly sags, *elicit* the goal-link ("where does this touch what you're building?") rather than preach relevance. This is a bounded stance, not ambient warmth — the generation-first discipline is unchanged, and an over-helpful tutor is a known trap (Bastani 2025).
 
 **At VERIFY, stash immediately — do not rate, do not wait.** Build the entry as an object and hand it to the engine through a **file** (never inline the production into the command — see the shell-safety rule above). Write it with the Write tool, then:
 
@@ -95,7 +98,7 @@ python3 "$ENGRAM" receipt --file <assessor-output.json>
 python3 "$ENGRAM" stash clear
 ```
 
-Relay each `feedback_line` to the learner. If the learner disputes a grade, send the dispute (their argument + original production) back to the assessor once; log the outcome either way — appeals are calibration data.
+Relay each `feedback_line` to the learner. On a `recalled` node, the `receipt` output carries `s_before`/`s_after` — if the gain is real, add one flat growth line (Pillar 13; grammar file), never a score. On a `lapsed`/`partial`, use the absolve-not-pity register (grammar oath): normal, owed nothing, here's the path forward. If the learner disputes a grade, send the dispute (their argument + original production) back to the assessor once; log the outcome either way — appeals are calibration data.
 
 ## 5 · Capstone (when a topic's frontier empties)
 
@@ -107,4 +110,4 @@ When `next` returns no frontier: propose the **build** — a transfer artifact i
 python3 "$ENGRAM" log-session --kind learn --mode <mode> --minutes <est> --items <n> --notes "<one line>"
 ```
 
-End with the **receipt strip** (grammar file format), then exactly: one curiosity gap for the next node (a question, not a summary) + the next due date. No recap walls — the recap is their job, at review time.
+End with the **receipt strip** (grammar file format), then exactly: one curiosity gap for the next node (a question, not a summary) + the next due date. When real progress was made, the strip may carry one momentum line from `stats.momentum` (durability added, or most-durable-now) — information, not a score (Pillar 13). No recap walls — the recap is their job, at review time.

@@ -1,6 +1,6 @@
 {
   "name": "engram",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Evidence-based learning engine: first-principles curricula, generation-first Socratic tutoring, free-recall verification with receipts, FSRS-scheduled memory, and interactive explorable artifacts. Learn anything; keep it.",
   "author": {
     "name": "Quan Duong"

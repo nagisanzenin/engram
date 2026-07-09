@@ -20,7 +20,9 @@ python3 "$ENGRAM" misconception list
 
 ## The check-in (default)
 
-Narrate, in plain language, at most five things — each one a number plus what it means plus (maybe) one offered change:
+Open with **momentum** (Pillar 13, `docs/05-affective-layers.md`) — this is not decoration; *reporting* real progress is itself the motivational intervention (Harkin 2016, d = 0.40, larger when progress is made explicit). Read `stats.momentum` and give one honest line of what genuinely grew this week: reviews cleared, **days of durability added** (`stability_gained_7d`), most-durable memory now (`most_durable`). All real, engine-computed numbers — never a score, never a streak, never a should ("keep it up"). If nothing grew (`stability_gained_7d` ≈ 0, few reviews), say that plainly and move to consistency — don't manufacture a win; a hollow "great progress!" is exactly the controlling praise the oath forbids.
+
+Then narrate, in plain language, at most five things — each one a number plus what it means plus (maybe) one offered change:
 
 1. **Retention vs. the band.** `recall_by_stability` buckets vs. the ~85% target. Early bucket low → encoding problem (offer: more concrete-first, smaller nodes). Month+ bucket high (>95%) → intervals too timid for them (offer: `model --set memory.desired_retention=0.87`, or a `refit` if eligible).
 2. **Calibration — honestly.** If `calibration.brier` is null: say plainly *"no calibration data yet — confidence only counts when you actually say a number before feedback; it is never estimated for you."* Offer nothing else. If present: translate it (*"when you say 80, you hit 62 — overconfident, mostly on derivable nodes"*), with `n` so they know how thin the data is. No fix needed beyond showing it; calibration improves by being seen.

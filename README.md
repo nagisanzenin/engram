@@ -3,9 +3,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.3.0-6D4AA8.svg" alt="Version 0.3.0">
+  <img src="https://img.shields.io/badge/version-0.4.0-6D4AA8.svg" alt="Version 0.4.0">
   <img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="MIT License">
-  <img src="https://img.shields.io/badge/selftest-33%2F33-3E7D5A.svg" alt="33/33 checks">
+  <img src="https://img.shields.io/badge/selftest-68%2F68-3E7D5A.svg" alt="68/68 checks">
   <img src="https://img.shields.io/badge/scheduler-FSRS--4.5-6D4AA8.svg" alt="FSRS-4.5">
   <img src="https://img.shields.io/badge/data-100%25%20local-3E7D5A.svg" alt="100% local">
 </p>
@@ -153,13 +153,16 @@ Engram implements the four most-replicated findings in learning science — and 
 2. **Generation** — the mind keeps what it makes. You predict, attempt, and explain back before being told. Even failed attempts measurably improve what sticks next (the pretesting effect).
 3. **Retention** — testing *is* the learning (not the measurement of it), and spacing beats bingeing. Free recall on an FSRS schedule fitted to your own review history.
 4. **Honest adaptation** — it adapts from your *measured* retention, calibration, and error patterns. Confidence is only recorded when you actually state it; grades only exist as written receipts.
+5. **Motivation & wisdom, honestly** — it makes your *real* competence growth visible at the moment it happens (the memory that now lasts 4× longer — not points or streaks, which backfire on motivated adults), and it carries you through the hard part: struggle named as encoding, lapses absolved not pitied, backlogs met with amnesty. Two new layers, every claim adversarially verified against the primary source — [docs/05-affective-layers.md](docs/05-affective-layers.md).
 
 <details>
 <summary><b>Citations & full theory</b> (for the skeptical — click)</summary>
 
 The load-bearing evidence: retrieval practice (Roediger & Karpicke 2006; Karpicke & Blunt 2011, <i>Science</i>; Dunlosky et al. 2013 "high utility"), distributed practice (Cepeda et al. 2006; Rawson & Dunlosky 2011), desirable difficulties & the fluency illusion (Bjork 1994; Koriat & Bjork 2005), pretesting (Richland, Kornell & Kao 2009), the ~85% difficulty sweet spot (Wilson et al. 2019), self-explanation & ICAP (Chi et al. 1994; Chi & Wylie 2014), multimedia principles behind the explorables (Mayer; Paivio), step-level tutoring ≈ human tutors (VanLehn 2011), FSRS scheduling (open-spaced-repetition, Anki's modern default), and the learning-styles refutation (Pashler, McDaniel, Rohrer & Bjork 2008).
 
-Full treatment with design consequences: [docs/01-foundations.md](docs/01-foundations.md) · what exists and what's missing in every other tool: [docs/02-prior-art.md](docs/02-prior-art.md) · system design: [docs/03-architecture.md](docs/03-architecture.md) · roadmap & constitution: [docs/04-roadmap.md](docs/04-roadmap.md)
+The affective layers (v0.4): competence-as-information (Deci/Koestner/Ryan 1999 — verbal competence feedback lifts *adult* intrinsic motivation d=+0.33, but flips to d=−0.78 when controlling), progress salience (Harkin et al. 2016, 138 RCTs, d=0.40), curiosity's reward circuit (Gruber, Gelman & Ranganath 2014), return-after-absence amnesty (Silverman & Barasch 2023; Lally et al. 2010) — and the refusals it's built on: gamification's motivational effect is the *least* robust (Sailer & Homner 2020) and backfires on already-motivated adults (Hanus & Fox 2015), streaks install a proxy goal, growth-mindset framing is small and context-specific (Sisk 2018; Yeager 2019), sympathy-after-failure reads as a low-ability cue (Graham 1984), and over-helpful AI tutoring harms retention (Bastani 2025). ADHD is honored as an opt-in *Focus profile* that turns up the same universal dials — not a new pedagogy, and pointedly not a game.
+
+Full treatment with design consequences: [docs/01-foundations.md](docs/01-foundations.md) · what exists and what's missing in every other tool: [docs/02-prior-art.md](docs/02-prior-art.md) · system design: [docs/03-architecture.md](docs/03-architecture.md) · roadmap & constitution: [docs/04-roadmap.md](docs/04-roadmap.md) · the motivation & wisdom layers: [docs/05-affective-layers.md](docs/05-affective-layers.md)
 
 </details>
 
@@ -221,7 +224,7 @@ The model never does calendar math; this does:
 | `stats` / `report` | telemetry JSON · self-contained HTML dashboard |
 | `refit` | fit review intervals to your measured recall (guarded, ≥50 reviews) |
 | `session-start` / `log-session` | ambient nudge (hook) · session telemetry |
-| `selftest` | 63 checks over the FSRS math, state machine, and every hardened boundary |
+| `selftest` | 68 checks over the FSRS math, state machine, and every hardened boundary |
 
 </details>
 
@@ -266,6 +269,7 @@ Separation of powers, enforced by construction: the **tutor** teaches but never 
 | [docs/02-prior-art.md](docs/02-prior-art.md) | Literature review: SRS engines, mastery platforms, explorables, ITS research, AI tutors, the Claude Code ecosystem — and the gap |
 | [docs/03-architecture.md](docs/03-architecture.md) | State schemas, the five loops, agent separation of powers, the Explorable Contract, adaptation policy |
 | [docs/04-roadmap.md](docs/04-roadmap.md) | Phased plan with measurable exit criteria, metrics, risks, and the ten-article constitution |
+| [docs/05-affective-layers.md](docs/05-affective-layers.md) | The motivation & wisdom layers (v0.4): two new pillars — competence salience and the mentor stance — each evidence-cited and adversarially checked; the ADHD Focus profile; why no gamification |
 
 ## More from the same workshop
 

@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.4.0 — 2026-07-09 · the affective layers (motivation + wisdom)
+
+Two new layers around the unchanged engine, for the part the first four pillars
+implied but never voiced: *why the learner returns tomorrow*, and *how a wise tutor
+carries them through the part where learning is supposed to hurt*. Every load-bearing
+claim was assembled by an adversarial research pass (100+ searches, primary sources
+fetched, each number verified by a voter told to refute it) and is cited in the new
+theory doc. The design rule throughout: **surface what is already true; invent nothing.**
+
+### Theory
+- **`docs/05-affective-layers.md`** — the constitution extension. Two new pillars:
+  **P13 Competence salience** (making *real* progress visible is a reward without
+  gamification's risks — Harkin 2016 d=0.40; Deci/Koestner/Ryan 1999 competence
+  feedback d=+0.33 for adults, but d=−0.78 when *controlling*) and **P14 The mentor
+  stance** (struggle-as-encoding, absolve-don't-pity, self-generated relevance,
+  return-after-absence amnesty — Silverman & Barasch 2023; D'Mello 2014; Graham 1984).
+  Includes the adversarial backbone (why *not* to gamify: Sailer & Homner 2020;
+  Hanus & Fox 2015; over-helpful AI harms — Bastani 2025) and the ADHD resolution.
+
+### Engine (additive, default-safe — the FSRS core is untouched)
+- **`stats.momentum`** — the deterministic core (never the model — Article 10) now
+  computes a weekly competence-growth block from real receipts: reviews cleared,
+  **days of durability added** (`stability_gained_7d`), genuine recalls, and the
+  most-durable memory now. Purely additive to the `stats` JSON; ignored safely if unused.
+- **Two self-healed settings keys:** `settings.momentum` (`on`/`off`) and
+  `settings.profile` (`null`/`adhd`). A pre-0.4 model missing them is repaired on load
+  (as every settings key already is) — behavior is byte-for-byte v0.3 with momentum off.
+- Selftests 63 → **68** (durability arithmetic in isolation, in-window filtering, the
+  no-negative-growth rule, the momentum block in `stats`, and the settings self-heal).
+
+### Behavior (skills & dialogue grammar — prose, no new commands)
+- **Naming real growth** (`/learn`, `/review`): on a genuine stability gain, one flat
+  informational line from the engine's own `s_before → s_after` ("holds ~9 days now,
+  up from ~2") — never a score, streak, or should-statement; silent when
+  `settings.momentum=off` or the gain isn't real.
+- **The mentor register** (dialogue grammar): a bounded stance fired only at specific
+  moments (difficulty, lapse, return-after-absence, sagging motivation), silence by
+  default. Two new lines in the anti-sycophancy oath: *encouragement is information,
+  never pressure*; *after a lapse, absolve — never pity*.
+- **Return-after-absence amnesty** (`/review`): a large post-gap queue is met with
+  amnesty + load renegotiation and a capped catch-up choice — the highest-evidence
+  Layer-2 move — instead of dumping the debt.
+- **Momentum in the coach** (`/coach`): the check-in opens by *reporting* real progress
+  (the intervention itself — Harkin 2016), honestly saying so when nothing grew.
+- **ADHD Focus profile** (`settings.profile=adhd`): turns up dials the skills already
+  read (Sprint default, immediate growth surfacing, earlier boredom response, optional
+  if-then plan, always-on amnesty). No new pedagogy, no game; a declared need, honored.
+- README: v0.4 science paragraph, new pillar #5, docs table entry, version → 0.4.0.
+
 ## 0.3.0 — 2026-07-06 · bulletproof-foundation hardening + Codex support
 
 A deep hardening pass before new features: every reported bug fixed, plus a full

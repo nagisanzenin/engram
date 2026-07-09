@@ -243,7 +243,8 @@ DEFAULT_MODEL = {
     "interests": [],
     "goals": [],
     "strategy_weights": {"derivation_first": 0.6, "example_first": 0.4},
-    "settings": {"default_mode": "standard", "artifacts": "threshold-only", "ambient": "quiet"},
+    "settings": {"default_mode": "standard", "artifacts": "threshold-only", "ambient": "quiet",
+                 "momentum": "on", "profile": None},
     "rhythms": {},
     "accessibility": [],
 }
@@ -883,6 +884,51 @@ def _calibration(rs):
             "underconfident" if bias < -0.05 else "well-calibrated")
     return {"brier": brier, "bias": bias, "n": len(pairs), "read": read}
 
+MOMENTUM_WINDOW_DAYS = 7
+
+def compute_momentum(receipts):
+    """Real competence-growth signal over the last week, computed here (never by the
+    model — Article 10). Foundations P13: surfacing true progress sustains adult
+    motivation; every field below is an already-earned number, not an invented score.
+
+    - reviews_7d / recalled_7d: retrievals cleared, and genuine wins among them
+    - stability_gained_7d: total DAYS of durability added by successful reviews
+      (sum of max(0, s_after - s_before)); the honest 'your memory got stronger' figure
+    - most_durable: the single most durable memory right now (node id + its stability)
+    - retained_total: nodes currently in the review (retained) state
+    Window is a calendar cutoff; a receipt with an unparseable ts simply doesn't count."""
+    cutoff = today() - timedelta(days=MOMENTUM_WINDOW_DAYS)
+    reviews_7d = recalled_7d = 0
+    gained = 0.0
+    for r in receipts:
+        d = safe_date(r.get("ts"))
+        if d is None or d < cutoff:
+            continue
+        if r.get("kind") == "review" and r.get("rating"):
+            reviews_7d += 1
+            sb, sa = as_number(r.get("s_before")), as_number(r.get("s_after"))
+            if sb is not None and sa is not None and sa > sb:
+                gained += (sa - sb)
+        if r.get("grade") == "recalled":
+            recalled_7d += 1
+    most_durable = None
+    retained_total = 0
+    for _t, g in iter_graphs():
+        for nid, node in g.get("nodes", {}).items():
+            if node.get("state") == "review":
+                retained_total += 1
+            s = as_number((node.get("fsrs") or {}).get("s"))
+            if s is not None and (most_durable is None or s > most_durable["stability_days"]):
+                most_durable = {"node": nid, "stability_days": round(s, 1)}
+    return {
+        "window_days": MOMENTUM_WINDOW_DAYS,
+        "reviews_7d": reviews_7d,
+        "recalled_7d": recalled_7d,
+        "stability_gained_7d": round(gained, 1),
+        "most_durable": most_durable,
+        "retained_total": retained_total,
+    }
+
 def compute_stats():
     receipts = collect_receipts()
     reviews = [r for r in receipts if r.get("kind") == "review" and r.get("rating")]
@@ -914,6 +960,7 @@ def compute_stats():
         "calibration": calibration,
         "calibration_encode": calibration_encode,
         "streak_days": compute_streak(receipts),
+        "momentum": compute_momentum(receipts),
         "due_now": len(due_items()),
         "pending_verify": len(read_jsonl(p(STASH_FILE))),
         "topics": topics,
@@ -1309,6 +1356,36 @@ def cmd_selftest(_args):
               stats["calibration"]["read"] == "insufficient-data")
         check("encode confidence split from review calibration",
               stats["calibration"]["n"] == 1 and stats["calibration_encode"]["n"] == 1)
+
+        # momentum (P13 competence salience) — the engine owns the growth math, not the model
+        check("stats includes momentum block",
+              isinstance(stats.get("momentum"), dict) and stats["momentum"]["window_days"] == 7)
+        check("momentum reports a most-durable memory",
+              stats["momentum"]["most_durable"] is not None
+              and stats["momentum"]["most_durable"]["node"] in ("a", "b"))
+        # unit-test the durability arithmetic in isolation (today == 2026-08-05 here):
+        # only in-window successful reviews count; a shrink contributes 0; old ones excluded.
+        mom = compute_momentum([
+            {"ts": "2026-08-05", "kind": "review", "rating": "good",
+             "s_before": 2.0, "s_after": 9.0, "grade": "recalled"},
+            {"ts": "2026-08-04", "kind": "review", "rating": "hard",
+             "s_before": 5.0, "s_after": 6.5},
+            {"ts": "2026-08-05", "kind": "review", "rating": "again",
+             "s_before": 8.0, "s_after": 3.0},          # lapse: no negative growth
+            {"ts": "2026-06-01", "kind": "review", "rating": "good",
+             "s_before": 1.0, "s_after": 40.0},          # outside 7-day window: excluded
+        ])
+        check("momentum sums only in-window durability gains",
+              mom["reviews_7d"] == 3 and approx(mom["stability_gained_7d"], 8.5, 0.01))
+        check("momentum counts genuine recalls in window", mom["recalled_7d"] == 1)
+
+        # settings self-heal: a model missing the new keys is repaired, not broken
+        healed = _deep_heal({"schema": SCHEMA, "settings": {"default_mode": "sprint"}},
+                            DEFAULT_MODEL)
+        check("settings self-heal adds momentum/profile defaults",
+              healed["settings"]["momentum"] == "on"
+              and healed["settings"]["profile"] is None
+              and healed["settings"]["default_mode"] == "sprint")
 
         # receipt ids unique within a fast batch
         batch = [{"topic": "t", "node": "a", "rating": "good"},
