@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.2 — 2026-07-09 · confidence UX — pick, don't type
+
+Collecting the 0–100 gut-confidence (which powers calibration and hypercorrection —
+kept, because it earns its place) used to force the learner to *type a number* every
+item, then nagged with a text re-ask if they skipped it. Friction the data can't afford.
+
+### Behavior (dialogue grammar + skills; no engine change)
+- **Confidence is now a one-tap pick, not a typed number.** It's offered as an optional
+  add-on in the same breath as the probe (type `…, about 70` if you like). If you give no
+  number, a picker (AskUserQuestion) appears **before the reveal** with four bands —
+  Certain (90) / Pretty sure (70) / Half unsure (50) / Just guessing (25), plus Other for
+  an exact number or skip. Dismiss → `null`, still never estimated.
+- **Guardrails made explicit** so the convenience stays honest and bugless: the picker
+  fires *before* feedback every time (confidence-after-answer is discarded as null); a
+  picked band is the learner's own stated confidence, not an invented one; and confidence
+  is *metadata, not knowledge*, so a menu is allowed there while the probe stays open
+  free-recall. Applied consistently across `/learn` encode, the pretest, and `/review`.
+
 ## 0.4.1 — 2026-07-09 · discoverable Focus mode + release hygiene
 
 Follow-up to 0.4.0: the ADHD Focus profile shipped but was undiscoverable (no README,

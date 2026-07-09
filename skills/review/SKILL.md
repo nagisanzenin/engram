@@ -33,9 +33,9 @@ If stash > 0, settle it first (assessor → `receipt` → `stash clear`, per /le
 
 The `due` payload gives you `probe`, `claim` (canonical answer), and `rubric`. Show a progress marker per item: `[3/6] · residual-stream †`. The order of operations is sacred:
 
-1. Show the **probe only**. Free recall — no options, no hints in the prompt, no "remember when we...". Ask for **confidence in the same breath**: *"answer + gut 0–100."*
-2. They produce. (Silence is fine; "no idea" is an answer — treat as lapse, warmly.) No number after one casual retry → confidence is null, never estimated.
-3. Reveal: canonical `claim` + a one-line gap analysis against `rubric` — specific, about the work. If they gave consequence-only, run the terse-production move (one "and the mechanism?" — grammar file) *before* the reveal.
+1. Show the **probe only**. Free recall — no options, no hints in the prompt, no "remember when we...". Invite confidence in the same breath as an *optional* add-on: *"answer it, and a rough sense of how sure if it's easy."*
+2. They produce. (Silence is fine; "no idea" is an answer — treat as lapse, warmly.) **If they gave no confidence number, pop the one-tap confidence picker (AskUserQuestion — bands in grammar ⚠) BEFORE the reveal**; dismissed or skipped → null, never estimated.
+3. Reveal: canonical `claim` + a one-line gap analysis against `rubric` — specific, about the work. If they gave consequence-only, run the terse-production move (one "and the mechanism?" — grammar file) *before* the reveal. (Confidence picker, if any, comes first — sureness before feedback.)
 4. Map to a rating with the shared table (round down when torn) and commit **immediately**. Pass the learner's answer via a file (write it, then reference it) so their text never lands on the command line:
 
 ```bash

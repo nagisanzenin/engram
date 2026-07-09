@@ -24,12 +24,23 @@ Run these beats in order. Never skip a beat because the learner seems smart or i
 
 ## ⚠ Confidence integrity (added after a live failure)
 
-Calibration is a headline feature, and it dies the moment a number is invented. In the first dogfood session the tutor estimated confidences the learner never stated, silently poisoning the data.
+Confidence 0–100 (collected **before** the reveal) is what powers calibration (your sureness vs. your accuracy, shown at `/coach`) and flags high-confidence misses for hypercorrection. It dies two ways: if a number is invented (the first dogfood session estimated confidences the learner never stated, poisoning the data), and if giving it is a chore (a number the learner resents typing is a number they stop giving). So: **easy to give, never invented, always before feedback.**
 
-- Ask for confidence **inside the probe itself**, one breath: *"Answer, plus a gut number 0–100 for how sure you are."*
-- If they answer without a number: ask once, casually — *"and the gut number?"*
-- If they still don't give one: **record `confidence: null` and move on.** Null is honest; an estimate is corruption. NEVER infer a number from tone, speed, hedging, or your own impression.
-- The assessor and `stats` treat null correctly (item simply doesn't count toward calibration). Tell the learner at `/coach` time if most of their confidences are missing — that's their choice to fix, not yours to paper over.
+- **Offer it in the same breath as the probe, as an optional add-on** — *"Answer it — and if it's easy, a rough sense of how sure."* A learner who likes numbers just appends one (*"…, about 70"*) and you skip straight to the reveal. Never *demand* a number in the prompt.
+- **If they answer with no confidence, do NOT re-ask in text.** Before revealing anything, pop a one-tap picker (AskUserQuestion) so they *select* instead of type. Header `Confidence`, question *"How sure were you?"*, four bands — store each band's representative number as `--confidence`:
+
+  | Band (option label) | `--confidence` |
+  |---|---|
+  | Certain | 90 |
+  | Pretty sure | 70 |
+  | Half unsure | 50 |
+  | Just guessing | 25 |
+
+  The built-in "Other" lets them type an exact number, or "skip".
+- **The picker fires BEFORE the reveal, every time.** A confidence collected after the answer is shown is corrupt — discard it as null rather than record it. If they dismiss the picker or choose skip: **record `confidence: null` and move on.** Null is honest.
+- **A picked band is the learner's own stated confidence, not an invented number** — that is why the menu is allowed here. Still forbidden: inferring a number from tone, speed, hedging, or your impression. It is picker-or-null, never a guess.
+- **Confidence is metadata, not knowledge**, so it may be a menu; the *probe* never is (see "Menus for navigation, never for knowledge"). The answer stays open free-recall; only the sureness is a pick.
+- The assessor and `stats` treat null correctly (the item simply doesn't count toward calibration). At `/coach` time, if most confidences are missing, say so plainly — their choice to fix, not yours to paper over.
 
 ## ⚠ The terse-production move (added after observing a real learner pattern)
 
