@@ -118,9 +118,22 @@ python3 "$ENGRAM" stash clear
 
 Relay each `feedback_line` to the learner. On a `recalled` node, the `receipt` output carries `s_before`/`s_after` — if the durability crosses a threshold (milestone, not every node; grammar file Pillar 13), add one flat growth line, never a score. On a `lapsed`/`partial`, use the absolve-not-pity register (grammar oath): normal, owed nothing, here's the path forward. If the learner disputes a grade, send the dispute (their argument + original production) back to the assessor once; log the outcome either way — appeals are calibration data.
 
-## 5 · Capstone (when a topic's frontier empties)
+## 5 · Capstone — **it is a NODE now, not a paragraph** (v0.8)
 
-When `next` returns no frontier: propose the **build** — a transfer artifact in their real world (feature in their actual repo with `TODO(human)` on the load-bearing parts; a taught lesson; an explorable they author; a memo arguing a position). Grade it via the assessor against the topic's `transfer_probe`s; receipts get `kind: transfer`. This is the point of the whole topic — do not let it silently not happen.
+For four releases this section said *"this is the point of the whole topic — do not let it silently not happen."* **It silently did not happen, every single time**, because it was a line of prose in a skill file, and a tutor running low on context drops a suggestion. It does not drop a DAG.
+
+So the capstone is now **a real node in the graph**. `add-topic` mints it, it `requires` every other concept, and it therefore unlocks *exactly* when the frontier empties — at which point `next` serves it like anything else. **You cannot skip it by forgetting it.**
+
+```bash
+python3 "$ENGRAM" next --topic <t>        # -> id: "capstone", once every concept is encoded
+```
+
+- **It gets NO provisional credit.** An ordinary node advances on a stashed-but-ungraded prerequisite (so you can keep teaching while the assessor works). The capstone does not: it is the claim that the learner can now *use* the topic, and serving it on mastery the assessor has not yet confirmed is exactly the unearned claim the constitution forbids. Settle the stash first.
+- **On a pre-v0.8 topic** (no capstone in the graph), `next` says so and hands you the command. Run it once; it is idempotent: `python3 "$ENGRAM" capstone --topic <t>`
+
+**Serve it as an offer with a real "not now" that costs nothing.** Capstones are expensive and can feel like homework, and the two-minute review floor still outranks them — a learner who declines the build and clears their reviews is doing the *higher-value* thing. Do not nag on repeat.
+
+**What the build is:** a transfer artifact in their *real* world — a feature in their actual repo with `TODO(human)` on the load-bearing parts; a lesson they teach; an explorable they author; a memo arguing a position they have to defend. Grade it via the assessor against the capstone's rubric; the receipt gets `kind: transfer`, and it lands in `stats.transfer` — **never pooled into retention**, because *"the memory survived"* and *"the idea is mine"* are different claims backed by different evidence.
 
 ## 6 · Book the return (v0.6 — the one step that decides whether any of this mattered)
 

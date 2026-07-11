@@ -93,6 +93,13 @@ Then narrate, in plain language, at most five of these — each one a number plu
 
    **And check `retention.grader_unvalidated` before you say any of it (v0.7).** When it is `true`, the number came from an oracle nobody has checked — the `read` string already carries the stamp, and you must not launder it away. Report the figure *and* the fact that its grader is unverified, in the same breath.
 
+1.5. **Transfer — the capability claim, and it is NOT retention (v0.8).** Read `stats.transfer`. Engram has always claimed to build capability and, until v0.8, measured only memory: `transfer_probe` was authored by the architect since v0.1 and **read by nothing.**
+
+   - **`n == 0`** — say it straight: *"no capability has ever been measured here. You've got 7 concepts carrying a transfer probe and 2 are mature enough to be asked it — that's a different question from whether you remember them, and it's the one you actually paid for."* Then offer it; `/review` serves the probe automatically when a due node is `transfer_ready`.
+   - **`n > 0`** — lead with **`rate_fired`** (graded `recalled` — the bar a node must clear to reach `transfer.state: applied`), and report `rate_any` beside it (which also counts `partial`, and is the **same bar retention uses**, so the two are comparable). **Never quote a bare "transfer rate"** — the two bars mean different things and the looser one is the flattering one.
+   - **Never pool it into retention, and never let the learner think you have.** *"You're holding 8 of 10 at the 30-day mark — that's memory. But of the 3 times we asked you to actually apply one, it fired once. Those are different muscles and the second one is the point."*
+   - A transfer lapse is **not** a memory failure. Do not frame it as a setback: it is the first honest measurement of a thing that was never measured.
+
    Then the older, still-useful view: `recall_by_stability` vs. the ~85% band. Early bucket low → encoding problem (offer: more concrete-first, smaller nodes). Month+ bucket high (>95%) → intervals too timid (offer: `model --set memory.desired_retention=0.87`, or a `refit` if eligible).
 2. **Calibration — honestly.** If `calibration.brier` is null: say plainly *"no calibration data yet — confidence only counts when you actually say a number before feedback; it is never estimated for you."* Offer nothing else. If present: translate it (*"when you say 80, you hit 62 — overconfident, mostly on derivable nodes"*), with `n` so they know how thin the data is. No fix needed beyond showing it; calibration improves by being seen.
 3. **Consistency.** Streak and sessions/week — the habit metric that predicts everything. If broken: shrink, don't shame (offer Sprint default, `quick` reviews).

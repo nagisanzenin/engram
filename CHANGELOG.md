@@ -1,5 +1,87 @@
 # Changelog
 
+## 0.8.0 — 2026-07-11 · THE CLAIM — Engram measured memory and claimed capability. Now it measures both.
+
+`transfer_probe` has been authored by the curriculum architect **since v0.1**, stored by the
+engine, and **read by nothing.** On the founder's own graph, **12 of 13 nodes carry one**, and
+`grep transfer_probe scripts/engram.py` found exactly one line: a `setdefault`. **Zero transfer
+receipts existed anywhere, ever.**
+
+`skills/learn` §5 said of the capstone: *"this is the point of the whole topic — do not let it
+silently not happen."* It silently did not happen, every single time, because it was **a line of
+prose in a skill file** — and a tutor running low on context drops a suggestion. It does not drop
+a DAG.
+
+Engram has been a very good memory system wearing a capability system's marketing.
+
+Selftest **167 → 180**.
+
+### The three populations — because there are now genuinely three questions
+
+v0.6.4's bug was **four implementations of one rule**, three of them wrong, and the fix was one
+shared predicate. The temptation now is to bolt transfer onto that predicate — which is the same
+bug from the other end: **one definition covering three questions, and therefore answering none.**
+
+| population | the question it answers | who reads it |
+|---|---|---|
+| `_review_receipts` | *does the memory survive N days?* | **retention (the north star)**, recall_by_stability, calibration, modality, adherence |
+| `_transfer_receipts` | *does the capability fire in new clothes?* | `stats.transfer`, `node.transfer` |
+| `_retrieval_receipts` | *how much durability was actually grown?* | momentum |
+
+**Never pooled.** Retention pooled with transfer would drag the north star down with a harder
+question and answer neither. Momentum *without* transfer would understate real growth — a transfer
+probe advances the FSRS schedule like any other rating, and **undercounting a learner's real
+progress is its own dishonesty**, in the direction that quietly tells them their work did not land.
+
+### Engine
+
+- **`transfer [--topic T]`** — the mature concepts ready for the harder question. Eligible = stability
+  over **21 days** across **3+ retrievals**, a non-null `transfer_probe`, and not probed in the last
+  **30 days** (it is a tool, not a quiz show). Untested first, then coldest.
+- **`node.transfer`** — `untested → probed → applied`. Engine-owned, written only by a transfer
+  receipt, derived from the append-only log. **Computed from the LATEST evidence, not from "ever":**
+  a capability that fired in June and failed in September is not currently owned, and pretending
+  otherwise would be a wrong number in the flattering direction.
+- **`stats.transfer`** — reported beside retention and never inside it.
+- **`capstone --topic T`** — materialize the build as a **real node in the DAG** (idempotent: twice →
+  one node). New topics get one from `add-topic` automatically. It `requires` **every** other
+  concept, so it unlocks exactly when the frontier empties and then arrives in `next` like anything
+  else. **It cannot silently not happen, because it is in the graph.**
+- **The capstone gets NO provisional credit.** An ordinary node advances on a stashed-but-ungraded
+  prerequisite (so the tutor can keep teaching while the assessor works). The capstone does not — it
+  is the claim that the learner can now *use* the topic, and serving it on mastery the assessor has
+  not confirmed is exactly the unearned claim the constitution forbids. *Found by an existing check
+  breaking the moment the capstone entered the DAG.*
+- A payload can no longer **claim** a transfer state or mint its own capstone (invariant #4: state
+  advances only through receipts).
+- `due` now carries `transfer_ready` + `transfer_probe`, so `/review` serves the harder question
+  without a second engine call.
+
+### §4.8 Q1 caught a two-bar bug before the gate even ran
+
+The first cut reported a single `rate` counting anything not-`lapsed` — so a node whose only
+transfer receipt was `partial` read **`rate: 1.0`** while its own state read **`probed`**, because
+`state: applied` requires `recalled`. **Two numbers, one state, two silently different definitions
+of success — and the looser one was the flattering one.**
+
+Now **`rate_fired`** (recalled only — the bar `state: applied` uses) is the headline, because *"is
+this capability mine?"* is a yes/no question and a half-application is not a yes. **`rate_any`**
+(recalled-or-partial) ships beside it, because that is the **same bar retention uses** and the two
+numbers are only comparable if they are measured the same way. **There is no bare `rate` key.**
+
+### The new protocol gates, applied to the release that wrote them
+
+- **§5.5 THE INSTRUMENT GATE** — earned in v0.7.1, where a gold set built to catch a lenient grader
+  turned out to be *rewarding* leniency. `stats.transfer` **certifies** ("this capability is yours"),
+  so a deliberately WRONG subject must score WORSE: a learner who fails every transfer probe now
+  provably reads below one whose capability fires. *A ruler that ranks failure above success is not
+  a lenient ruler; it is a negative one, and every number downstream has its sign flipped.*
+- **§4.8 Q4 — open the dashboard.** `stats.transfer` renders on the HTML page, and **"NO CAPABILITY
+  HAS EVER BEEN MEASURED"** appears there **in red** — not only in the JSON that just a test ever
+  opens. That is the rule v0.7 shipped a bug to learn.
+- **§4.7 — enumerate the read paths from the dispatch table, not from memory.** It caught `transfer`
+  missing from the fuzzer immediately. Fuzz: **0 crashes / 9,600 invocations, 16 read paths.**
+
 ## 0.7.1 — 2026-07-11 · THE GOLD SET FAILED BEFORE THE GRADER DID
 
 Shipped within the hour of v0.7.0, because the post-release review (§7.5) found that **the

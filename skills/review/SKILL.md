@@ -61,6 +61,24 @@ python3 "$ENGRAM" rate --topic <t> --node <n> --rating <r> --confidence <c-or-om
 Relay the returned due date in passing, not ceremonially ("back in 12 days"). **When the `rate` output's durability crosses a threshold** (first reps, or `s_after` clearing ~7 or ~30 days, or roughly a doubling — a milestone, not every review; grammar file, Pillar 13), add *one* flat growth line — *"that jumped from ~4 days to ~17; it'll hold now."* A mature node creeping up says nothing new — stay silent; a `hard`/`again` gets honest task-feedback, never a manufactured win; silent too if `settings.momentum` = `off`.
 
 **Special cases:**
+
+- ### ⭐ `transfer_ready: true` — SERVE THE HARDER QUESTION (v0.8)
+
+  The `due` payload now carries `transfer_ready` and `transfer_probe`. When it is `true`, the node is **mature** (stability over 21 days across 3+ retrievals) and the architect wrote a probe that asks the same idea **wearing different clothes** — usually from the learner's own world.
+
+  **Serve the `transfer_probe` INSTEAD of the `probe`**, and rate it with `--kind transfer`:
+
+  ```bash
+  python3 "$ENGRAM" rate --topic <t> --node <n> --rating <r> --confidence <c-or-omit> \
+    --grade <g> --production-file <tmp-answer.txt> --kind transfer --source self
+  ```
+
+  Say what you're doing, plainly and once: *"You've held this one for a month, so let's not ask you to recite it. Let's see if it fires."*
+
+  **Why this exists, and why it is not decoration.** `transfer_probe` has been authored by the curriculum architect since v0.1 and **read by nothing** — 12 of the 13 nodes in the founder's own graph carry one, and zero transfer receipts existed anywhere, ever. Engram measured *memory* and claimed *capability*. There is a sharper version of that critique which `docs/07` §8 takes seriously rather than deflecting: **transfer-appropriate processing** says practice should match use. If the learner's goal is *to do* — write the code, make the call — and every review is verbal free recall, Engram may be training a different skill from the one that was paid for. This is the answer to that.
+
+  **Grade it honestly, and separately.** A transfer receipt is **never pooled into retention** — `stats.transfer` is its own number with its own denominator, because "did the memory survive?" and "does the capability fire?" are different questions. A lapse here is **not** a memory failure and must never be framed as one: *"you remember it fine — it just doesn't fire yet. That's a different muscle, and it's the one that matters."* Do not manufacture a failure out of a hard question.
+
 - **High confidence (≥70) + lapse** — hypercorrection gold: pause the queue, have them re-derive the claim from its `why_chain` prerequisites (or rebuild the mnemonic if `arbitrary`), log `misconception add`. Two minutes here is worth ten elsewhere.
 - **Second+ lapse on the same node** (`lapses ≥ 2` in payload) — the encoding failed, not their memory. After rating, re-encode *differently*: new analogy (use their interests), a contrast case, or an explorable. The payload's `artifact` flag tells you which case you're in: `true` → the *current explorable also isn't holding* — offer to regenerate it differently (spawn **engram-artifact-smith** in the background with the node's current state + open misconceptions; it re-registers on completion; hand off at the close, never mid-queue); `false` → offer to build one (same background spawn) if `settings.artifacts` ≠ `off` or the learner asks. Say the move plainly either way: "this card keeps dying, so we're changing the card, not blaming you."
 - **Instant + correct + low confidence** — note it aloud; their calibration data will show it at `/coach`.

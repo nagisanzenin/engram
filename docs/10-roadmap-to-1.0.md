@@ -222,7 +222,23 @@ annoys. That asymmetry is correct and it is also **not costless**, and v0.8+ sho
 
 ---
 
-# v0.8 — **The Capability Claim**
+# v0.8 — **The Capability Claim** — ✅ SHIPPED 2026-07-11
+
+> **RESULT.** `transfer_probe` was authored since v0.1 and read by nothing: **12 of 13 nodes on the
+> founder's own graph carry one, and zero transfer receipts existed anywhere, ever.** The engine now
+> serves them (`transfer`), records them (`kind: transfer`), states them (`node.transfer`:
+> untested → probed → applied, from the LATEST evidence), and reports them (`stats.transfer`) —
+> **never pooled into retention**, because "the memory survived" and "the idea is mine" are
+> different claims backed by different evidence.
+>
+> **The capstone is a NODE now, not a paragraph.** It `requires` every other concept, so it unlocks
+> exactly when the frontier empties and arrives in `next` like anything else. For four releases the
+> skill file said "do not let it silently not happen" — and it silently did not happen, every time,
+> because prose is not a DAG.
+>
+> **§4.8 Q1 caught a two-bar bug before the gate ran:** one loose `rate` counted a `partial` as a
+> fired capability while `state: applied` required `recalled`. Now `rate_fired` (strict, the
+> headline) and `rate_any` (the same bar retention uses, for comparability). No bare `rate` key.
 
 > *Engram claims to build capability and measures only recall. `transfer_probe` is authored by
 > the architect, stored by the engine, and read by nothing.*
@@ -256,9 +272,15 @@ adjudicates this; v0.8 is the design response.
 
 ### Done
 
-- [ ] The author's `transformers` topic produces ≥1 `kind: transfer` receipt.
-- [ ] `stats.transfer` reports transfer recall separately, with its own n.
-- [ ] A topic whose frontier empties materializes a capstone node that appears in `next`.
+- [x] `stats.transfer` reports capability separately, with its own n and its own denominators.
+- [x] A topic materializes a capstone node that appears in `next` when the frontier empties
+      (`add-topic` mints it structurally; `capstone --topic T` retrofits a pre-v0.8 graph, idempotent).
+- [x] **The capstone gets NO provisional credit** — unplanned, and found by an existing check breaking
+      the moment the capstone entered the DAG. An ordinary node advances on a stashed-but-ungraded
+      prereq; the capstone may not, because it is the claim that the learner can now USE the topic.
+- [ ] **The author's `transformers` topic produces ≥1 `kind: transfer` receipt.** ← STILL OPEN, and
+      it is the same open thing as always: nothing on that graph is mature (7 encoded, **0 reviewed**).
+      The engine can now ask the question. It cannot make anyone come back to answer it.
 
 ### Selftests
 
