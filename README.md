@@ -3,10 +3,10 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.7.0-6D4AA8.svg" alt="Version 0.7.0">
+  <img src="https://img.shields.io/badge/version-0.7.1-6D4AA8.svg" alt="Version 0.7.1">
   <img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="MIT License">
-  <img src="https://img.shields.io/badge/selftest-163%2F163-3E7D5A.svg" alt="163/163 checks">
-  <a href="gold/assessor-gold.jsonl"><img src="https://img.shields.io/badge/grader%20QWK-0.93-3E7D5A.svg" alt="Grader QWK 0.93 against the public gold set"></a>
+  <img src="https://img.shields.io/badge/selftest-167%2F167-3E7D5A.svg" alt="167/167 checks">
+  <a href="gold/assessor-gold.jsonl"><img src="https://img.shields.io/badge/grader%20never%20inflates-0%2F198-3E7D5A.svg" alt="0 of 198 blind judgments graded up"></a>
   <img src="https://img.shields.io/badge/scheduler-FSRS--4.5-6D4AA8.svg" alt="FSRS-4.5">
   <img src="https://img.shields.io/badge/data-100%25%20local-3E7D5A.svg" alt="100% local">
   <a href="https://discord.gg/temm1e"><img src="https://img.shields.io/badge/discord-community-5865F2.svg" alt="Discord community"></a>
@@ -181,29 +181,39 @@ Engram's central claim is separation of powers: a **blind assessor** grades your
 
 Until v0.7, nobody. The oracle was a vibe — an excellent one, unmeasured. And that hole sat directly under the foundation, because *if the grader is lenient, every number Engram has ever shown you is inflated, and the system has no way to find out.*
 
-So we built the audit and ran it, and here is what it says — including the parts that are not flattering:
+So we built the audit and ran it. **Then the gold set failed before the grader did**, and that turned out to be the more important result.
 
-```
-$ python3 scripts/engram.py grader-health
-```
+### The one number that survives, and it is the one that matters
 
-| | | |
-|---|---|---|
-| **QWK 0.93** | quadratic weighted kappa vs. the gold set | the conventional bar for automated scoring is 0.70 |
-| **leniency bias −0.11** | signed; **+** would mean inflating | it is **harsh**, not lenient |
-| **0 / 198** | judgments where it graded **UP** | across 66 items × 3 independent runs — **it has never once inflated a grade** |
-| **test–retest 0.97** | same answers on re-runs | consistency, which is *not* validity — see below |
-| **verdict `pass`** | so `stats` does **not** stamp `grader_unvalidated` | if it had failed, every retention figure would carry that stamp, and `/coach` would have to say so before quoting one |
+| | |
+|---|---|
+| **0 of 198** | blind judgments — 66 adversarial items × 3 independent runs — where the grader awarded **more** credit than the strict rubric reading. **It has never once inflated a grade.** |
 
-**The gold set is public** — [`gold/assessor-gold.jsonl`](gold/assessor-gold.jsonl), 66 items, **88% adversarial by design**: *fluent-but-empty*, *terse-but-correct*, *confident-and-wrong*, *right-answer-wrong-reason*, *paraphrase*, and *partial-credit boundary* cases, each with a written rationale. Run the audit yourself: `/coach audit`.
+That is a claim about **safety**, and it is the reason the badge above says what it says. A grader that errs low makes you re-drill something you had earned — annoying, and it costs you time. A grader that errs *high* tells you that you know something you do not, and **you stop reviewing.** Only one of those is a trap, and this grader has never walked into it.
 
-**Three things this number is not, and we would rather say them than have you find them:**
+### And now the part we would rather tell you than have you find
 
-- **The gold adjudications are authored, not independently human-adjudicated.** Each has a written rationale you can dispute, and disputing one is a first-class contribution — drop it in `gold/local-gold.jsonl` and it overrides ours. But an authored gold set is a weaker instrument than a human-adjudicated one, and calling it otherwise would be the exact dishonesty this feature exists to kill.
-- **High consistency is not correctness.** The literature records a judge at test–retest **0.992** with a position bias of **0.192** — perfectly reproducible and systematically wrong ([docs/07](docs/07-the-measured-loop.md) §3). Engram's assessor is *prompted* to be a skeptic, so it will be highly self-consistent by construction, which is precisely the profile that failure mode wears. That is why the engine **refuses to certify on consistency**: above 0.95 test–retest it demands the leniency bias be strictly under the ceiling, and fewer than three runs cannot pass at all.
-- **It is measurably weakest on `right-answer-wrong-reason`** (52% agreement, bias −0.48) — productions that reach the correct conclusion through a broken derivation. It grades those *harsher* than we did. Whether the grader or the gold set is right there is genuinely open, and it is written down rather than smoothed over.
+v0.7.0 shipped this section with a **QWK 0.93** badge. Then an independent post-release reviewer ran the one test nobody had thought to run: it graded the gold set with a *correct* grader and with a deliberately *fooled* one.
 
-> *"Our grader agrees with adjudication at QWK 0.93; here is the gold set; run it yourself"* is a sentence almost nobody in AI education can currently say. It is also the only basis on which the rest of this README's numbers are allowed to mean anything.
+**The fooled grader scored higher.** (1.000 vs 0.990.) **The gold set was rewarding leniency.** The instrument was inverted.
+
+The cause was five lenient adjudications by the gold set's own author, every one of the same species: **crediting an adjacent fact as partial credit.** Majority is not intersection. Consonance is not pitch-set arithmetic. The history of a theory is not its mechanism. The grader had caught all five, three runs out of three — *including on a `fluent-but-empty` item*, which means the author was fooled by fluency **in the very category built to catch being fooled by fluency.**
+
+Correcting them moves agreement from 0.889 to 0.965 and QWK to **0.978**. And here is the thing:
+
+> **That rise is not evidence the grader got better. It is evidence the instrument had been measuring the author's inconsistency.**
+
+Worse — the corrections were *prompted by the grader's own disagreements*. So the QWK that follows is **circular**: an authored gold set cannot validate a grader from the same model family, because when the two disagree and the author concedes, the agreement that follows measures only the author's willingness to concede. **The engine now says so on every single audit**, in the `read` string, until someone who is not the author has adjudicated the set.
+
+That is why the badge is no longer a QWK. **`0/198 graded up` is a safety property that does not depend on the gold being perfectly calibrated** — and correcting the gold *downward* only made it a stronger claim, because it lowered the bar the grader had to not exceed. It still never did.
+
+One genuine disagreement (`g_054`) is **deliberately left in**, because the reviewer read both readings and judged the gold's defensible. *An instrument with no disagreement left in it measures nothing.*
+
+**The gold set is public** — [`gold/assessor-gold.jsonl`](gold/assessor-gold.jsonl), 66 items, **88% adversarial**: *fluent-but-empty*, *terse-but-correct*, *confident-and-wrong*, *right-answer-wrong-reason*, *paraphrase*, *partial-credit boundary*. Every corrected item carries a `disputed` record with its original grade, so the correction is auditable rather than laundered. Run it yourself: `/coach audit`. **Dispute an item** — drop it in `gold/local-gold.jsonl` and it overrides ours (the audit will say it did).
+
+**What would actually fix this:** one human, who is not us, adjudicating 66 items. That is the highest-value contribution anyone could make to this repository, and until it happens the engine will keep saying so out loud.
+
+**One more thing the literature insists on, and the engine enforces:** high consistency is *not* correctness. A judge has been measured at test–retest **0.992** with a position bias of **0.192** — perfectly reproducible and systematically wrong ([docs/07](docs/07-the-measured-loop.md) §3). Engram's assessor is *prompted* to be a skeptic, so it is self-consistent by construction — precisely the profile that failure mode wears. So the engine **refuses to certify on consistency**: above 0.95 test–retest it demands the leniency bias be strictly under the ceiling, fewer than three runs cannot pass at all, and three *identical* runs are flagged as measuring nothing.
 
 ---
 
@@ -283,7 +293,7 @@ The model never does calendar math; this does:
 | `stats` / `report` | telemetry JSON (incl. `modality` — explorable vs dialogue retention) · self-contained HTML dashboard |
 | `refit` | fit review intervals to your measured recall (guarded, ≥50 reviews) |
 | `session-start` / `log-session` | ambient nudge (hook) · session telemetry |
-| `selftest` | 163 checks over the FSRS math, state machine, adherence/retention arithmetic, the grader-audit statistics, and every hardened boundary |
+| `selftest` | 167 checks over the FSRS math, state machine, adherence/retention arithmetic, the grader-audit statistics, and every hardened boundary |
 
 </details>
 

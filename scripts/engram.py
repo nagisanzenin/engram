@@ -1230,6 +1230,17 @@ def cmd_artifact(args):
     node = g["nodes"].get(args.node)
     if node is None:
         die("unknown node %s in topic %s" % (args.node, args.topic))
+    if not isinstance(node, dict):
+        # The LAST mutator still reading a raw node value. `load_graph` guarantees `nodes` is a
+        # dict; it guarantees nothing about the values, and this one assigned straight into them
+        # (`node["artifact"] = ...` on a list -> TypeError). Worse than an ordinary crash: `doctor`
+        # RECOMMENDS `artifact clear` as the fix for a corrupt artifact field, so the repair the
+        # tool tells you to run was the thing that blew up. (Found by the post-release reviewer —
+        # `apply_item` and `cmd_receipt` both got this guard in v0.7 and `cmd_artifact` was missed,
+        # which is the whole reason §4.7 says to enumerate the surface from the dispatch table.)
+        die("node %s in topic %s is corrupt (an object was expected, found %s) — run `doctor`, "
+            "then fix graphs/%s.json by hand"
+            % (args.node, args.topic, type(node).__name__, args.topic))
     if args.action == "set":
         if not args.path:
             die("artifact set needs --path")
@@ -1565,6 +1576,44 @@ GOLD_SECRET_KEYS = ("gold_grade", "case_type", "rationale")
 # so the audit cannot run — is a false positive that costs more than it saves.
 GOLD_ANSWER_KEYS = ("gold_grade", "case_type")
 
+# ⚠ THE INSTRUMENT'S OWN LIMIT — v0.7's most important finding, and it is not a number.
+#
+# v0.7.0 shipped this gold set and published QWK 0.93. Then a post-release reviewer measured the
+# thing nobody had thought to measure: it ran a CORRECT grader and a deliberately FOOLED one
+# against the set — and **the fooled grader scored higher** (1.000 vs 0.990). The gold set was
+# REWARDING leniency. The instrument was inverted.
+#
+# The cause was five lenient adjudications by the set's own author, all of the same kind:
+# crediting an ADJACENT FACT as partial credit. Majority is not intersection. Consonance is not
+# pitch-set arithmetic. The history of a theory is not its mechanism. The grader had caught every
+# one of them, 3 runs out of 3 — including on a `fluent-but-empty` item, which means **the author
+# was fooled by fluency in the very category built to catch being fooled by fluency.**
+#
+# Correcting them lifts agreement 0.889 -> 0.965. **That rise is not evidence the grader got
+# better. It is evidence the instrument had been measuring the AUTHOR'S inconsistency.** And
+# because the corrections were prompted by the grader's own disagreements, the QWK that follows
+# is CIRCULAR: an authored gold set cannot validate a grader from the same model family, because
+# when the two disagree and the author concedes, the agreement that follows measures only the
+# author's willingness to concede. (One real disagreement, g_054, is deliberately KEPT — an
+# independent reviewer judged the gold defensible there. An instrument with no disagreement left
+# in it measures nothing.)
+#
+# So the engine says this on every audit, until someone who is not the author has adjudicated the
+# set. §4.8 Q4, turned on the instrument itself: a limit only the docs know is a limit nobody reads.
+#
+# **What survives — and is STRONGER for the correction:** `direction.graded_up`. Every authoring
+# error was LENIENT, so fixing them moved the bar DOWN, giving the grader more room to be caught
+# inflating. Across 198 blind judgments it still graded UP exactly zero times. That is a safety
+# property, it does not depend on the gold being perfectly calibrated, and it is the only claim
+# here that was ever worth a badge.
+GOLD_ADJUDICATION = "authored"      # -> "human" only when someone who is NOT the author has done it
+GOLD_CIRCULARITY = (
+    "GOLD SET IS AUTHORED, NOT INDEPENDENTLY HUMAN-ADJUDICATED, and 5 items were corrected after "
+    "the grader disagreed with them. A QWK measured against it CANNOT certify a grader from the "
+    "same model family: when the author concedes to the grader, the agreement that follows "
+    "measures the author. The figure that survives this is `direction.graded_up` — a safety "
+    "property that does not depend on the gold being perfectly calibrated.")
+
 def _plugin_root():
     """The plugin/repo root — the dir holding scripts/ and gold/. realpath, so a
     symlinked install still finds the bundled gold set."""
@@ -1852,6 +1901,11 @@ def cmd_assessor_audit(args):
     # and then had a second go. Same class as a dropped sid, so it lands in the same guard.
     coverage_complete = bool(gold) and not ungraded and not unknown and not dupes
     reasons = []
+    # The instrument's own limit, on every audit, first. It is not a caveat about this run — it is
+    # a caveat about what a QWK from THIS gold set can mean at all, and it must outlive any
+    # particular verdict. When someone who is not the author adjudicates the set, this goes away.
+    if GOLD_ADJUDICATION != "human" and not getattr(args, "gold", None):
+        reasons.append(GOLD_CIRCULARITY)
     if gold_meta["modified"]:
         reasons.append(
             "GROUND TRUTH IS NOT THE SHIPPED GOLD SET: %s. This verdict is not comparable to "
@@ -1930,6 +1984,20 @@ def cmd_assessor_audit(args):
         read = ("grader validated: QWK %s over %d adjudicated items, %d runs; leniency %s; "
                 "test-retest %s"
                 % (_fmt(qwk), n, len(runs), _fmt(leniency_bias, sign=True), _fmt(retest)))
+        # …AND THE CAVEATS COME WITH IT. `pass` was the ONLY verdict that built a fresh read and
+        # threw `reasons` away — and `pass` is the only verdict where the teeth are off, so it is
+        # the one place a caveat has to survive. Three copy-pasted runs produced
+        # `identical_runs: true`, the engine wrote "test-retest measures nothing here" into
+        # `reasons`, and then the read it printed said **"test-retest 1.00"** as a validated
+        # figure. The most reassuring number in the payload, quoted as evidence, by the branch
+        # that had just discarded the note explaining it was evidence of nothing.
+        #
+        # Bug class #4 — a guard nobody reads — reproduced INSIDE the release built to catch it.
+        # And the selftest for it green-checked `reasons`, a key no runtime surface consumed:
+        # a check can assert a field exists and still prove nothing about whether anyone reads it.
+        # (Found by the independent post-release reviewer. §4.8 Q4, again, the hard way.)
+        if reasons:
+            read += " — BUT: " + "; ".join(reasons)
     elif qwk is not None:
         read = "QWK %.2f (n=%d, %d runs) — %s" % (qwk, n, len(runs), "; ".join(reasons))
     else:
@@ -1969,6 +2037,7 @@ def cmd_assessor_audit(args):
         # silently re-adjudicated every item. A provenance field that lies is worse than none,
         # because it is believed. `load_gold` now counts the overrides and this reports them.
         "gold_source": gold_meta["source"],
+        "gold_adjudication": GOLD_ADJUDICATION,   # "authored" | "human" — the instrument's limit
         "gold_modified": gold_meta["modified"],
         "gold_local_overrides": gold_meta["local_overrides"],
         "gold_local_added": gold_meta["local_added"],
@@ -2062,7 +2131,14 @@ def compute_grader_health():
     _num = lambda k: (a.get(k) if isinstance(a.get(k), (int, float))
                       and not isinstance(a.get(k), bool) else None)
     _str = lambda k: (a[k] if isinstance(a.get(k), str) else None)
-    unval = bool(a.get("grader_unvalidated", True))
+    # DERIVE `grader_unvalidated` FROM THE VERDICT — never trust it from the file.
+    # `_latest_audit` already whitelists `verdict`; it never checked that the two agreed. An
+    # audit file carrying `"verdict": "fail"` with `"grader_unvalidated": false` (a hand-edit, a
+    # torn write) silenced the teeth completely: no stamp, no red on the dashboard, retention
+    # reading a clean "30-day recall 100%". This function's own docstring swears it "fails toward
+    # 'we don't know', never toward 'it's fine'" — and it was believing a boolean a corrupt file
+    # handed it. The verdict is the validated field; the flag is a FUNCTION of it, not an input.
+    unval = a.get("verdict") not in ("pass", "warn")
     qwk = _num("qwk")
     if unval:
         stamp = "GRADER UNVALIDATED (%s) — these grades are not trustworthy" % a.get("verdict")
@@ -2077,6 +2153,10 @@ def compute_grader_health():
     else:
         stamp = None
     d = a.get("direction")
+    # `reasons` was computed, written to disk, asserted by a selftest — and returned by NOTHING.
+    # `skills/coach/SKILL.md` says "Read `reasons` aloud"; the key did not exist on this payload.
+    rs = [r for r in (a.get("reasons") or []) if isinstance(r, str)] \
+        if isinstance(a.get("reasons"), list) else []
     return {"audited": True, "ts": _str("ts"), "grader": _str("grader"),
             "n": _num("n"), "runs": _num("runs"), "qwk": qwk,
             "exact_agreement": _num("exact_agreement"),
@@ -2084,8 +2164,10 @@ def compute_grader_health():
             "direction": d if isinstance(d, dict) else None,   # /coach must be able to say "never inflated"
             "by_case_type": (a["by_case_type"] if isinstance(a.get("by_case_type"), dict) else {}),
             "gold_source": _str("gold_source"),   # a verdict is only as good as its ground truth
+            "gold_adjudication": _str("gold_adjudication") or GOLD_ADJUDICATION,
             "gold_modified": bool(a.get("gold_modified")),
             "identical_runs": bool(a.get("identical_runs")),
+            "reasons": rs,                        # ← the caveats reach a narrator at last
             "verdict": a.get("verdict"), "grader_unvalidated": unval,
             "stamp": stamp, "read": _str("read") or "audit present but unreadable"}
 
@@ -3912,6 +3994,89 @@ def cmd_selftest(_args):
                 and "not independent" in " ".join(a["reasons"]))
     check("three IDENTICAL runs are flagged — test-retest cannot certify what it never measured",
           fresh(_identical_runs_are_flagged))
+
+    # -- A `pass` MUST CARRY ITS CAVEATS. `pass` is the ONE verdict where the teeth are off. --
+    # The pass branch built a fresh `read` and threw `reasons` away — and `compute_grader_health`
+    # never returned the key at all, though `skills/coach` is told to "read `reasons` aloud". So
+    # three copy-pasted runs produced `identical_runs: true`, the engine wrote "test-retest
+    # measures nothing here" to disk, and then printed **"test-retest 1.00"** as a validated
+    # figure. The most reassuring number in the payload, quoted as evidence, by the branch that
+    # had just discarded the note saying it was evidence of nothing.
+    #
+    # This is bug class #4 reproduced inside the release built to catch it — and the check above
+    # was complicit: it asserted `reasons` CONTAINED the caveat, which proves nothing about
+    # whether any runtime surface ever reads it. **A field is not a narrator.** So this check
+    # follows the caveat all the way to the strings a human actually sees.
+    def _a_pass_still_carries_its_caveats(h):
+        gold = [_gitem("v%02d" % i, _ORD[i % 3]) for i in range(33)]
+        run = [{"sid": g["sid"], "grade": g["gold_grade"]} for g in gold]
+        a = _audit(h, gold, [run, run, run])                  # perfect, and copy-pasted
+        gh = _capture_json(cmd_grader_health, _ns())
+        return (a["verdict"] == "pass"
+                and "not independent" in a["read"]            # …the AUDIT read says so…
+                and "BUT:" in a["read"]
+                and gh["reasons"]                             # …grader-health EXPOSES them…
+                and any("not independent" in r for r in gh["reasons"])
+                and "not independent" in gh["read"])          # …and its read carries them too
+    check("a PASS carries its caveats into the read (a field nobody narrates is not a guard)",
+          fresh(_a_pass_still_carries_its_caveats))
+
+    # -- the instrument's OWN limit rides on every audit: this gold set cannot certify a peer --
+    def _gold_declares_its_own_circularity(h):
+        gold = [_gitem("u%02d" % i, _ORD[i % 3]) for i in range(33)]
+        run = [{"sid": g["sid"], "grade": g["gold_grade"]} for g in gold]
+        # a --gold OVERRIDE is the caller's own ground truth, so the bundled set's caveat is moot
+        a_over = _audit(h, gold, [run, run, run])
+        # …but the BUNDLED set must always declare it
+        rp = os.path.join(h, "r.json")
+        with open(rp, "w", encoding="utf-8") as f:
+            bundled, _ = load_gold()
+            br = [{"sid": g["sid"], "grade": g["gold_grade"]} for g in bundled]
+            json.dump({"runs": [br, br, br]}, f)
+        a_bundled = _capture_json(cmd_assessor_audit, _ns(file=rp, json=None, gold=None))
+        gh = _capture_json(cmd_grader_health, _ns())
+        return (a_bundled["gold_adjudication"] == "authored"
+                and any("AUTHORED" in r for r in a_bundled["reasons"])
+                and "AUTHORED" in a_bundled["read"]           # …it reaches the narrator…
+                and gh["gold_adjudication"] == "authored"
+                and any("AUTHORED" in r for r in gh["reasons"])
+                and not any("AUTHORED" in r for r in a_over["reasons"]))   # …but not on --gold
+    check("the gold set declares its OWN circularity on every audit (authored != adjudicated)",
+          fresh(_gold_declares_its_own_circularity))
+
+    # -- `grader_unvalidated` is DERIVED from the verdict, never trusted from the file --
+    def _teeth_derive_from_the_verdict(h):
+        os.makedirs(p("audits"), exist_ok=True)
+        write_json(p("audits", "2026-07-11-01.json"), {
+            "ts": "2026-07-11", "verdict": "fail", "qwk": 0.20, "n": 60, "runs": 3,
+            "grader_unvalidated": False,          # ← the LIE, hand-edited or torn
+            "read": "r", "reasons": []})
+        gh = _capture_json(cmd_grader_health, _ns())
+        return (gh["verdict"] == "fail"
+                and gh["grader_unvalidated"] is True          # derived, not believed
+                and "GRADER UNVALIDATED" in (gh["stamp"] or ""))
+    check("grader_unvalidated is DERIVED from the verdict — a file cannot switch the teeth off",
+          fresh(_teeth_derive_from_the_verdict))
+
+    # -- `artifact set|clear` refuses a corrupt node instead of crashing on it --
+    # The last mutator reading a raw node value. And `doctor` RECOMMENDS `artifact clear` as the
+    # fix for a corrupt artifact field — so the repair the tool told you to run was the thing
+    # that blew up.
+    def _artifact_refuses_a_corrupt_node(h):
+        _add_ab()
+        g = load_graph("t")
+        g["nodes"]["b"] = ["not", "a", "node"]
+        save_graph(g)
+        for action in ("clear", "set"):
+            try:
+                _capture(cmd_artifact, _ns(action=action, topic="t", node="b",
+                                           path=p("payload.json")))
+                return False                                  # it crashed or half-wrote
+            except SystemExit:
+                pass                                          # a guarded refusal: correct
+        return load_graph("t")["nodes"]["b"] == ["not", "a", "node"]   # untouched
+    check("`artifact set|clear` REFUSES a corrupt node (doctor recommends it as the fix — it must not crash)",
+          fresh(_artifact_refuses_a_corrupt_node))
 
     # -- a corrupt node must not TEAR a receipt batch in half (receipts are append-only) --
     def _corrupt_node_does_not_tear_the_batch(h):

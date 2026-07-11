@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.7.1 — 2026-07-11 · THE GOLD SET FAILED BEFORE THE GRADER DID
+
+Shipped within the hour of v0.7.0, because the post-release review (§7.5) found that **the
+instrument built to catch a lenient grader was itself rewarding leniency.** Everything below was
+found in *shipped* code, by a reviewer who was not the author.
+
+### The finding, and it is more important than any number here
+
+The reviewer ran the one test nobody had thought to run: it graded the gold set with a **correct**
+grader and with a deliberately **fooled** one.
+
+| grader | QWK |
+|---|---|
+| says `lapsed` on `g_009` (**correct** — 0 of 3 rubric criteria met) | 0.990 |
+| says `partial` on `g_009` (**fooled** by a fluent-but-empty production) | **1.000** |
+
+**The fooled grader scored higher. The gold set was ranking leniency above correctness.** The
+instrument was inverted.
+
+The cause: **five lenient adjudications by the gold set's own author**, every one the same
+species — *crediting an adjacent fact as partial credit.* Majority is not intersection
+(`g_034`). Consonance is not pitch-set arithmetic (`g_038`). The history of a theory is not its
+mechanism (`g_009`). *"It's ambiguous, break the tie"* is not *"the vectors assert concurrency"*
+(`g_039`). *"You don't need inference any more"* is not *"the likelihood dominates"* (`g_032`).
+
+**The grader had caught all five, three runs out of three** — including on a `fluent-but-empty`
+item, which means **the author was fooled by fluency in the very category built to catch being
+fooled by fluency.**
+
+### What that does to the number
+
+Correcting them moves agreement **0.889 → 0.965** and QWK **0.93 → 0.978**.
+
+> **That rise is not evidence the grader got better. It is evidence that the instrument had been
+> measuring the AUTHOR'S inconsistency, not the grader's validity.**
+
+And the corrections were *prompted by the grader's own disagreements* — so the QWK that follows is
+**circular**. An authored gold set cannot validate a grader from the same model family: when the
+two disagree and the author concedes, the agreement that follows measures only the author's
+willingness to concede.
+
+- **The engine now says this on every audit** (`gold_adjudication: "authored"`, and the caveat
+  rides in the `read` string), until someone who is not the author adjudicates the set.
+- **The QWK badge is gone.** Replaced by **`grader never inflates · 0/198`** — the one claim that
+  survives, and that the correction made *stronger*: every authoring error was LENIENT, so fixing
+  them moved the bar **down**, giving the grader more room to be caught inflating. Across 198 blind
+  judgments it still graded UP exactly zero times. That is a **safety property**, and it does not
+  depend on the gold being perfectly calibrated.
+- **One genuine disagreement (`g_054`) is deliberately KEPT.** The reviewer read both readings and
+  judged the gold's defensible. Correcting an item to match the grader *when an independent party
+  says the gold was right* is exactly the fitting that turns a measurement into a mirror.
+  **An instrument with no disagreement left in it measures nothing.**
+- Every corrected item carries a `disputed` record with its original grade, so the correction is
+  **auditable rather than laundered**.
+- `by_case_type["fluent-but-empty"]` — the canary v0.7.0 told v0.8 to watch for harshness drift —
+  was reading **90% / −0.10** when the truth was **100% / +0.00**. A maintainer could have "fixed"
+  a harshness that did not exist by loosening the grader on precisely the case the separation of
+  powers exists to protect.
+
+### And three more, all in shipped code
+
+1. **A `pass` threw away its own caveats — and `pass` is the ONE verdict where the teeth are off.**
+   The pass branch built a fresh `read` and never joined `reasons`; `grader-health` never returned
+   the key at all, though `skills/coach` is told to *"read `reasons` aloud."* So three copy-pasted
+   runs produced `identical_runs: true`, the engine wrote *"test-retest measures nothing here"* to
+   disk — and then printed **"test-retest 1.00"** as a validated figure. The most reassuring number
+   in the payload, quoted as evidence, by the branch that had just discarded the note explaining it
+   was evidence of nothing. **Bug class #4 — a guard nobody reads — reproduced inside the release
+   built to catch it.** And the selftest was complicit: it asserted `reasons` *contained* the
+   caveat, which proves nothing about whether any surface ever reads it. **A field is not a
+   narrator.**
+2. **`grader_unvalidated` was believed from the file instead of derived from the verdict.** An
+   audit carrying `"verdict": "fail"` with `"grader_unvalidated": false` silenced the teeth
+   completely — no stamp, no red on the dashboard, retention reading a clean *"30-day recall 100%"* —
+   in the one function whose docstring swears it *"fails toward 'we don't know', never toward
+   'it's fine'."* It is now a **function of the verdict**, not an input.
+3. **`cmd_artifact set|clear` was the last mutator reading a raw node value** — `TypeError` on a
+   corrupt node. Worse than an ordinary crash: **`doctor` recommends `artifact clear` as the fix
+   for a corrupt artifact field**, so the repair the tool told you to run was the thing that blew up.
+
 ## 0.7.0 — 2026-07-11 · THE ORACLE — the grader that writes every receipt has now itself been graded
 
 The blind assessor's verdict drives mastery, retention, calibration, and the schedule. Its
