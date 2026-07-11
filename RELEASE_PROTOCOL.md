@@ -213,6 +213,18 @@ for fn in (compute_stats, cmd_adherence, cmd_retention, cmd_decay, cmd_topics, c
 > ```
 >
 > Every name it prints is a read path. Every one of them goes in the fuzzer.
+>
+> **⚠ AND THEN THE AMENDMENT, because this rule had the same hole it was written to close.**
+> The script above enumerates **commands**, and `experiment` is a *mutating* command — so its
+> **read sub-actions** (`experiment status`, `experiment list`) never appeared in the list, and
+> had never been fuzzed. The first time they were: **72 crashes in 600 states.**
+>
+> **A command with sub-actions has a read path PER SUB-ACTION.** Add every read-only sub-action
+> by hand — the dispatch table cannot see them, and neither will you, unless you look:
+>
+> ```bash
+> grep -nE 'args\.action ==|add_argument\("action"' scripts/engram.py
+> ```
 
 **The doctrine, and it is already written in `iter_graphs`' docstring:** aggregate/read-only
 views must degrade gracefully — never brick. `doctor` is the thing that **reports** corruption

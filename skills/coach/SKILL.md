@@ -134,13 +134,56 @@ python3 "$ENGRAM" refit
 
 Guarded: needs ≥50 review receipts with recorded predictions; before that it refuses with an honest reason — relay it and move on. When it runs, it compares predicted vs. observed recall and rescales intervals (a single multiplier, clamped 0.5–1.5); explain the result in one sentence (*"your memory held better than the default model — intervals stretched 12%"*). This is the v1 coarse fit; full per-parameter FSRS optimization is future work and says so in the README.
 
-## `experiment` — n-of-1 strategy trials (Constitution art. 7)
+## `experiment` — n-of-1 strategy trials, done properly (v0.9)
 
-The honest replacement for "learning styles". Protocol:
+The honest replacement for "learning styles". **Until v0.9 the machinery was not sound enough to support the claims it exists to make**: assignment was *round-robin* (not randomized), *unstratified* (so the material rode along with the arm — `docs/06` open-Q2 disclosed that confound honestly and never fixed it), *underpowered* (6 per arm, ~2.5× under the SCED requirement), and **the verdict was written by the model.** A confounded, unpowered trial settled by narration is not evidence. It is a vibe with a JSON file.
 
-1. **Design** with the learner: one question ("derivation-first vs. example-first for *math* topics?"), two arms, metric = 7-day recall on first review, minimum 6 nodes per arm. Guardrails: one experiment active at a time; arms differ in *strategy*, never in whether retrieval/spacing happen (the engine is not experimental).
-2. **Start:** `python3 "$ENGRAM" experiment start --json '{"question": "...", "arms": ["derivation_first", "example_first"], "metric": "7d_first_review_recall", "min_per_arm": 6}'`. `/learn` calls `experiment assign` per new node and teaches per the arm.
-3. **Settle** when both arms have ≥6 first-reviews ≥5 days out: compare recall rates from receipts (join `experiments.json` assignments to receipts by topic+node, kind=review, first occurrence). State the verdict with the actual numbers and honest uncertainty (n is small; say "suggestive," not "proven"). On consent: update `strategy_weights` via `model --set`, then `experiment settle --id <id> --verdict "<one sentence with numbers>"`.
+### 1 · Pre-register. The design file IS the pre-registration.
+
+Write it **before a single datum exists** — question, arms, metric, seed, strata, power. One experiment active at a time; arms differ in *strategy*, never in whether retrieval/spacing happen (the engine itself is not experimental).
+
+```bash
+python3 "$ENGRAM" experiment start --json '{
+  "question":   "does derivation-first beat example-first for me, on math?",
+  "arms":       ["derivation_first", "example_first"],
+  "metric":     "first_review_recall",
+  "seed":       "20260801",
+  "stratify_by": ["threshold", "viz.affordance"],
+  "min_per_arm": 15
+}'
+```
+
+- **`seed`** — recorded, so **every assignment is recomputable by anyone holding it.** An assignment nobody can reproduce is not an assignment; it is an anecdote.
+- **`stratify_by`** — **this is what kills the confound.** Explorables are routed to the hardest concepts *on purpose*, so an unstratified comparison measures the *material* as much as the medium. Randomize **within** an affordance class and the material stops riding along. (This is what finally makes `docs/06` open-Q2 answerable instead of merely disclosed.)
+- **`min_per_arm`** — defaults to **15** (~30 observations). The old 6 was underpowered by ~2.5× (`docs/07` §9). You may set it lower; the engine will record a `power_note` saying you did, and the settle will read `underpowered`, and it will be right.
+- **`metric`** — an unknown one **dies**. The engine will not guess which number you meant and then report it as fact.
+
+### 2 · Assign — the engine does it, seeded and stratified
+
+`/learn` calls `experiment assign --topic T --node N` per new node and teaches per the returned arm. Balanced blocks within each stratum: the *order* inside a block is random (from the seed), and every arm appears exactly once. **An arm never moves under a node** — re-assigning returns the same one.
+
+```bash
+python3 "$ENGRAM" experiment status      # n per arm vs the power floor; are we there yet?
+```
+
+### 3 · Settle — **the engine computes the verdict. You narrate it.**
+
+```bash
+python3 "$ENGRAM" experiment settle --id <id>
+```
+
+**`--verdict` is refused.** It used to write whatever the model said straight into the log — a direct violation of invariant #2 (*the engine owns every number*) in the one command whose entire purpose is a number nobody is allowed to make up.
+
+The engine returns per-arm n and means, the effect, an **exact randomization test** p-value (labels shuffled — valid *by construction*, because the engine randomized them itself), a bootstrap 95% CI, the per-stratum balance, and a `read`. **Relay it. Do not improve it.**
+
+**Three things to say, and one never to:**
+
+- **`powered: false`** → *"underpowered"* is **not** a null result. Say the difference out loud: **it is an ABSENCE of a result.** A coin flipped twice does not disprove the coin.
+- **p < 0.05** → *"suggestive, and it is n-of-1"* — true about **you**, on **this** material. Not a law. Never "proven".
+- **p ≥ 0.05 with power** → *"we cannot tell"*, **not** *"they are the same"*.
+- **Never** report an effect the engine did not compute, and never round a p-value toward the story.
+
+On consent, update `strategy_weights` via `model --set`, quoting the engine's numbers back.
 
 ## `schedule`
 

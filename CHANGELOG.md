@@ -1,5 +1,81 @@
 # Changelog
 
+## 0.9.0 — 2026-07-11 · THE METHOD — the experiment machinery was not sound enough to support the claims it exists to make
+
+Article 7 (*"adapt on evidence, never taxonomy"*) is the article that replaces learning styles with
+real n-of-1 measurement. **Four defects, all in shipped code, and the last one is the worst thing in
+this repository's history:**
+
+| # | the defect | what it means |
+|---|---|---|
+| 1 | `arm = arms[len(assignments) % len(arms)]` | **ROUND-ROBIN, not randomized.** Perfectly predictable. |
+| 2 | unstratified | Explorables are routed to the hardest concepts **on purpose**, so the comparison carried the **material** as well as the medium. `docs/06` open-Q2 disclosed that confound *honestly* — and never fixed it. |
+| 3 | `min_per_arm: 6` | The SCED alternating-treatments literature puts sufficient power at ~28–30 observations. Six per arm is **underpowered by ~2.5×** (`docs/07` §9). |
+| 4 | **`exp["verdict"] = args.verdict`** | **THE MODEL COMPUTED THE VERDICT.** A payload said *"derivation-first won"* and the engine wrote it down. A direct violation of **invariant #2 — the engine owns every number** — in the one command whose entire purpose is a number nobody is allowed to make up. |
+
+**A confounded, unpowered, round-robin trial settled by narration is not evidence. It is a vibe
+with a JSON file.**
+
+Selftest **191 → 201** (this release merges the v0.8.1 fixes).
+
+### What it is now
+
+- **Randomized, and reproducible.** Balanced **block randomization** keyed on `(seed, stratum)`:
+  within each block the order is random, and every arm appears exactly once. Not `random.choice`
+  (which randomizes and never balances — a 20-node run could land 14/6 and the effect would be
+  measured over an arm that barely exists). Not round-robin (which balances and never randomizes —
+  which is what shipped). **The seed is recorded, so every assignment is recomputable by anyone who
+  holds it.** An assignment nobody can reproduce is not an assignment; it is an anecdote.
+- **Stratified — and this is the part that kills the confound.** Randomize the medium *within* one
+  affordance class and the material stops riding along with it. `docs/06`'s open question 2 is
+  finally *answerable* instead of merely disclosed.
+- **Pre-registered.** The design file **is** the pre-registration: question, arms, metric, seed,
+  strata, power, analysis — written before a single datum exists. An **unknown metric dies**: the
+  engine will not guess which number you meant and then report it as fact.
+- **Powered.** `min_per_arm` defaults to **15** (~30 observations). You may set it lower — the engine
+  records a `power_note` saying you chose to, and the settle reads `underpowered`, and it is right.
+- **THE ENGINE COMPUTES THE VERDICT.** `settle --verdict` is now **refused, loudly.** The engine
+  returns per-arm n and means, the effect, an **exact randomization test** p-value (shuffle the arm
+  labels — valid *by construction*, because the engine randomized them itself), a bootstrap 95% CI,
+  and the per-stratum balance. The model narrates it. It does not make it up.
+- **`experiment status`** — progress against the power floor, so nobody settles early by accident.
+- **p is never 0.** Add-one correction: with 10,000 permutations the floor is 1/10,001. A p-value of
+  exactly zero is a claim no finite test can make, and this engine does not make claims it cannot.
+
+### `stats.modality`'s floor moved with it — and that SUPPRESSES a number some learners can see today
+
+`MODALITY_MIN_N` was **6**, inherited from the same underpowered convention, and `docs/10` predicted
+this exactly: *"stats.modality's identical ≥6 floor inherits the same defect and moves with it."* It
+is now **15**.
+
+**This means some existing learners will lose a number their dashboard used to show.** That is
+correct. **The number was never earned.** Suppressing an unearned number is not a regression — it is
+the product.
+
+### The §4.7 rule that found the bug had a hole, and the hole was the same shape
+
+The protocol says: *enumerate the read paths from the **dispatch table**, not from memory.* But
+`experiment` lives in `mutating` (start/assign/settle write) — so its **read sub-actions**
+(`status`, `list`) were **invisible to the enumeration** and had never been fuzzed. The first time
+they were: **72 crashes in 600 states.** `arms` as an int, `arms` absent, `arms` holding a dict
+(unhashable, and it poisoned the dict it was used as a key in).
+
+**A command with sub-actions has a read path PER SUB-ACTION.** Fixed at one gate (`_exp_arms`), and
+the rule is amended.
+
+### `as_number` let infinity through — the numeric gate for the entire engine
+
+`Infinity` and `NaN` are **not valid JSON** — and Python's `json` module parses them anyway. An
+`inf` sailed through every `isinstance(x, float)` check and then died on the first `int()`
+(`OverflowError`), and a `NaN` **compares False to everything, including itself**, so it poisons
+every comparison it touches without raising anything at all.
+
+Three crashes in `decay` and `experiment status`, in code with no other flaw. **Fixed at the gate**
+— `as_number` is the funnel for every scheduler leaf, every metric, every threshold in the engine.
+One line here; forty at the call sites, and the forty-first is the one that ships.
+
+Fuzz: **0 crashes / 13,500 invocations across 18 read paths.**
+
 ## 0.8.1 — 2026-07-11 · THE RULER WAS NEVER TESTED, ONLY THE SUBJECT
 
 The post-release review (§7.5) found **11 defects in shipped v0.8.0**, and the two worst are the

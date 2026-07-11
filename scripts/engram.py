@@ -18,6 +18,7 @@ import itertools
 import json
 import math
 import os
+import random          # v0.9: SEEDED randomization only — every draw is recomputable from the seed
 import re
 import shlex
 import sys
@@ -83,15 +84,16 @@ def safe_date(s):
 def as_number(x, default=None):
     """Coerce a JSON scalar to float for math; the default if not number-like.
 
-    **NON-FINITE IS NOT A NUMBER.** `Infinity` and `NaN` are not valid JSON — and Python's `json`
-    module PARSES them anyway. So a hand-edited state file can hand this engine an `inf` that
-    sails through every `isinstance(x, float)` check and then blows up the moment anything calls
-    `int()` on it (`OverflowError`), or silently poisons every comparison it touches (`NaN`
-    compares False to everything, including itself, and never raises at all).
+    **NON-FINITE IS NOT A NUMBER.** `Infinity` and `NaN` are not valid JSON, but Python's `json`
+    module PARSES them by default — so a hand-edited state file can hand this engine an `inf`
+    that sails through every `isinstance(x, float)` check and then blows up the moment anything
+    calls `int()` on it (`OverflowError: cannot convert float infinity to integer`), or silently
+    poisons every comparison it touches (`NaN` compares False to everything, including itself).
+    Found by fuzzing: 3 crashes in `decay` and `experiment status`, in code with no other flaw.
 
     This is THE numeric gate for the whole engine — every scheduler leaf, every metric, every
-    threshold funnels through it. One line here; forty at the call sites, and the forty-first is
-    the one that ships."""
+    threshold funnels through it. Fixing it here is one line; fixing it at the call sites is
+    forty, and forty-first is the one that ships."""
     if isinstance(x, bool) or x is None:
         return default
     if isinstance(x, (int, float)):
@@ -1451,46 +1453,321 @@ def cmd_misconception(args):
         write_json(path, items)
     emit([it for it in items if args.topic in (None, it.get("topic"))])
 
+# ============================================================= THE METHOD (v0.9)
+# Article 7 ("adapt on evidence, never taxonomy") is the article that replaces learning styles
+# with real n-of-1 measurement — and the machinery implementing it was not sound enough to
+# support the claims it exists to make. Four defects, all of them in the shipped code:
+#
+#   1. `arm = arms[len(assignments) % len(arms)]`  -> ROUND-ROBIN, not randomized. Perfectly
+#      predictable, and therefore assignable by anything that knows the order things happen in.
+#   2. Unstratified -> `docs/06` open-Q2 already documented the consequence: explorables are
+#      routed to the hardest concepts ON PURPOSE, so the medium comparison carries the MATERIAL
+#      as well as the medium. The document disclosed the confound honestly. It did not fix it.
+#   3. `min_per_arm: 6` -> the SCED alternating-treatments literature puts sufficient power at
+#      ~28-30 observations. Six per arm is underpowered by roughly 2.5x (`docs/07` §9).
+#   4. `exp["verdict"] = args.verdict` -> **THE MODEL COMPUTED THE VERDICT.** A payload said
+#      "derivation-first won" and the engine wrote it down. That is a direct violation of
+#      invariant #2 — *the engine owns every number* — in the one command whose entire purpose
+#      is to produce a number nobody is allowed to make up.
+#
+# A confounded, unpowered, round-robin trial settled by narration is not evidence. It is a
+# vibe with a JSON file.
+
+EXPERIMENT_MIN_PER_ARM = 15      # ~30 total: SCED alternating-treatments power (docs/07 §9)
+EXPERIMENT_PERMUTATIONS = 10000  # exact randomization test — no scipy, no distributional prayer
+EXPERIMENT_BOOTSTRAP = 2000
+EXPERIMENT_METRICS = ("first_review_recall",)
+
+def _stratum_of(node, keys):
+    """The stratum a node belongs to, from the pre-registered `stratify_by` keys.
+
+    This is what kills the confound that broke `stats.modality`: randomize the medium WITHIN one
+    affordance class and the material stops riding along with the medium."""
+    parts = []
+    for k in keys:
+        cur = node
+        for seg in k.split("."):
+            cur = cur.get(seg) if isinstance(cur, dict) else None
+        parts.append("%s=%s" % (k, cur if isinstance(cur, (str, int, bool, float)) else "none"))
+    return "|".join(parts) or "all"
+
+def _arm_sequence(arms, seed, stratum, n):
+    """Deterministic, reproducible, BALANCED randomization: shuffled blocks, one arm each.
+
+    Not `random.choice` — that would randomize and never balance, so a 20-node run could land
+    14/6 and the effect would be measured over an arm that barely exists. Not round-robin either
+    — that balances and never randomizes, which is what shipped. Blocks give both: within each
+    block of len(arms), the ORDER is random (seeded) and every arm appears exactly once.
+
+    Keyed on (seed, stratum) so the whole sequence is recomputable by anyone holding the seed.
+    An assignment nobody can reproduce is not an assignment; it is an anecdote."""
+    rng = random.Random("%s|%s" % (seed, stratum))
+    out = []
+    while len(out) < n + len(arms):
+        block = list(arms)
+        rng.shuffle(block)
+        out.extend(block)
+    return out[:n + len(arms)]
+
+def _exp_arms(exp):
+    """The experiment's arms — string-only, deduped. THE GATE for every experiment read.
+
+    `experiments.json` is hand-editable JSON like everything else, and `exp["arms"]` was read
+    RAW: an `arms` that is an int raised TypeError, a missing one raised KeyError, and an `arms`
+    holding a dict blew up on `arm not in out` (unhashable). **72 crashes in 600 fuzzed states**
+    — found the moment `experiment status`/`list` were finally fuzzed.
+
+    They had never been fuzzed because §4.7 says to enumerate the read paths from the DISPATCH
+    TABLE, and `experiment` lives in `mutating` (start/assign/settle write) — so its READ
+    sub-actions were invisible to the enumeration. **A command with sub-actions has a read path
+    per sub-action.** The rule that found this is the rule that had the hole; both are now fixed."""
+    arms = exp.get("arms") if isinstance(exp, dict) else None
+    if not isinstance(arms, list):
+        return []
+    out = []
+    for a in arms:
+        if isinstance(a, str) and a and a not in out:
+            out.append(a)
+    return out
+
+def _exp_min_per_arm(exp):
+    n = as_number((exp or {}).get("min_per_arm"), EXPERIMENT_MIN_PER_ARM)
+    return max(1, int(n if n is not None else EXPERIMENT_MIN_PER_ARM))
+
+def _experiment_outcomes(exp):
+    """{arm: [outcome…]} — engine-computed, from RECEIPTS. Never from a payload.
+
+    `first_review_recall`: the node's FIRST genuine review (not its encoding — v0.6.1), scored
+    recalled=1.0 / partial=0.5 / lapsed=0.0 (`_outcome`, the shared predicate)."""
+    by = _by_node(collect_receipts())
+    out = {arm: [] for arm in _exp_arms(exp)}
+    detail = []
+    assignments = exp.get("assignments") if isinstance(exp, dict) else None
+    for a in (assignments if isinstance(assignments, list) else []):
+        if not isinstance(a, dict):
+            continue
+        arm, tp, nid = a.get("arm"), a.get("topic"), a.get("node")
+        if not isinstance(arm, str) or arm not in out:
+            continue                       # an unhashable/absent arm is not an assignment
+        if not isinstance(tp, str) or not isinstance(nid, str):
+            continue
+        slot = by.get((tp, nid))
+        if not slot or not slot["reviews"]:
+            continue                       # assigned, not yet reviewed: no datum, not a zero
+        r = slot["reviews"][0]
+        out[arm].append(_outcome(r))
+        detail.append({"topic": tp, "node": nid, "arm": arm,
+                       "outcome": _outcome(r), "ts": r.get("ts"),
+                       "days_since_encode": r.get("days_since_encode")})
+    return out, detail
+
+def _spread(groups):
+    """The test statistic: max(arm mean) - min(arm mean). Reduces to the plain difference for
+    two arms, and generalizes to more without inventing an F distribution we cannot justify."""
+    means = [sum(v) / len(v) for v in groups.values() if v]
+    return (max(means) - min(means)) if len(means) >= 2 else 0.0
+
+def _randomization_test(groups, seed):
+    """Exact-ish randomization test: shuffle the ARM LABELS, recompute the spread, count how
+    often chance beats what we saw. Pre-declared in the design, computed here, narrated nowhere.
+
+    This is the honest test for an n-of-1: it assumes nothing about the distribution, only that
+    under the null the labels were exchangeable — which is TRUE BY CONSTRUCTION, because the
+    engine randomized them itself."""
+    pool = [v for vs in groups.values() for v in vs]
+    sizes = [(arm, len(vs)) for arm, vs in groups.items()]
+    if len([1 for _, n in sizes if n]) < 2 or len(pool) < 2:
+        return None
+    observed = _spread(groups)
+    rng = random.Random("perm|%s" % seed)
+    hits = 0
+    for _ in range(EXPERIMENT_PERMUTATIONS):
+        rng.shuffle(pool)
+        i, perm = 0, {}
+        for arm, n in sizes:
+            perm[arm] = pool[i:i + n]
+            i += n
+        if _spread(perm) >= observed - 1e-12:
+            hits += 1
+    return round((hits + 1) / float(EXPERIMENT_PERMUTATIONS + 1), 4)   # add-one: never claims p=0
+
+def _bootstrap_ci(groups, seed):
+    """Percentile bootstrap CI on the spread. Wide is the honest answer at these n — and saying
+    so is the whole point of computing it."""
+    named = [(arm, vs) for arm, vs in groups.items() if vs]
+    if len(named) < 2:
+        return None
+    rng = random.Random("boot|%s" % seed)
+    stats = []
+    for _ in range(EXPERIMENT_BOOTSTRAP):
+        res = {arm: [vs[rng.randrange(len(vs))] for _ in vs] for arm, vs in named}
+        stats.append(_spread(res))
+    stats.sort()
+    lo = stats[int(0.025 * len(stats))]
+    hi = stats[min(len(stats) - 1, int(0.975 * len(stats)))]
+    return [round(lo, 3), round(hi, 3)]
+
 def cmd_experiment(args):
     path = p("experiments.json")
-    items = read_json(path, [])
+    items = _as_list(read_json(path, []))
     if args.action == "start":
         exp = load_payload(args)
+        if not isinstance(exp, dict):
+            die("experiment design must be an object")
         for key in ("question", "arms", "metric"):
             if key not in exp:
                 die("experiment missing %s" % key)
-        if not isinstance(exp["arms"], list) or len(exp["arms"]) < 2:
-            die("experiment needs an arms list with at least 2 arms")
-        if any(e.get("status") == "active" for e in items):
+        if not isinstance(exp["arms"], list) or len(exp["arms"]) < 2 \
+                or not all(isinstance(a, str) and a for a in exp["arms"]) \
+                or len(set(exp["arms"])) != len(exp["arms"]):
+            die("experiment needs >=2 distinct string arms")
+        if exp["metric"] not in EXPERIMENT_METRICS:
+            die("unknown metric %r — the engine will not silently compute a different one "
+                "(supported: %s)" % (exp["metric"], ", ".join(EXPERIMENT_METRICS)))
+        if any(e.get("status") == "active" for e in items if isinstance(e, dict)):
             die("an experiment is already active — settle it before starting another "
                 "(one active experiment at a time; see /coach)")
-        exp.update({"id": gen_id("x"),
-                    "started": today().isoformat(), "status": "active",
-                    "assignments": [], "verdict": None})
+        strat = exp.get("stratify_by")
+        if strat is not None and not (isinstance(strat, list)
+                                      and all(isinstance(s, str) for s in strat)):
+            die("stratify_by must be a list of node-field paths (e.g. [\"threshold\"])")
+        mpa = as_number(exp.get("min_per_arm"), EXPERIMENT_MIN_PER_ARM)
+        # THE DESIGN IS THE PRE-REGISTRATION. Written before a single datum exists, and the
+        # engine will not let it be edited afterwards (see `assign`/`settle`). Under-powering
+        # is a CHOICE the design has to make in writing, and it is recorded as one.
+        exp.update({
+            "id": gen_id("x"),
+            "seed": (exp["seed"] if isinstance(exp.get("seed"), (int, str)) and exp.get("seed")
+                     else gen_id("s")),        # RECORDED, so every assignment is recomputable
+            "stratify_by": strat or [],
+            "min_per_arm": max(1, int(mpa)),
+            "analysis": "randomization-test (exact); percentile-bootstrap CI on the spread",
+            "randomized": True,
+            "started": today().isoformat(), "status": "active",
+            "assignments": [], "verdict": None,
+        })
+        if exp["min_per_arm"] < EXPERIMENT_MIN_PER_ARM:
+            exp["power_note"] = (
+                "min_per_arm=%d is BELOW the %d this engine considers powered (~%d observations "
+                "total; the SCED alternating-treatments literature puts sufficient power at "
+                "~28-30 — docs/07 §9). The settle will read `underpowered` and it will be right."
+                % (exp["min_per_arm"], EXPERIMENT_MIN_PER_ARM, EXPERIMENT_MIN_PER_ARM * 2))
         items.append(exp)
         write_json(path, items)
         emit(exp)
     elif args.action == "assign":
-        active = [e for e in items if e.get("status") == "active"]
-        if not active or not active[0].get("arms"):
+        active = [e for e in items if isinstance(e, dict) and e.get("status") == "active"]
+        if not active or not _exp_arms(active[0]):
             emit({"arm": None, "note": "no active experiment"})
             return
         exp = active[0]
-        arm = exp["arms"][len(exp["assignments"]) % len(exp["arms"])]
-        exp["assignments"].append({"ts": today().isoformat(), "arm": arm,
+        if not isinstance(exp.get("assignments"), list):
+            exp["assignments"] = []        # a hand-edited log must not take the assigner down
+        if not (isinstance(args.topic, str) and isinstance(args.node, str)):
+            die("experiment assign needs --topic and --node")
+        # already assigned? RETURN THE SAME ARM. An assignment that changes on a re-run is not
+        # an assignment — and /learn can legitimately call this twice for one node.
+        for a in exp["assignments"]:
+            if isinstance(a, dict) and a.get("topic") == args.topic and a.get("node") == args.node:
+                emit({"id": exp["id"], "arm": a.get("arm"), "stratum": a.get("stratum"),
+                      "note": "already assigned — arms never move under a node"})
+                return
+        node = {}
+        try:
+            node = graph_nodes(load_graph(args.topic)).get(args.node) or {}
+        except SystemExit:
+            pass                              # an unknown topic still gets a (default) stratum
+        strat = exp.get("stratify_by")
+        stratum = _stratum_of(node, [s for s in strat if isinstance(s, str)]
+                              if isinstance(strat, list) else [])
+        seen = sum(1 for a in exp["assignments"]
+                   if isinstance(a, dict) and a.get("stratum") == stratum)
+        arm = _arm_sequence(_exp_arms(exp), exp.get("seed"), stratum, seen + 1)[seen]
+        exp["assignments"].append({"ts": today().isoformat(), "arm": arm, "stratum": stratum,
                                    "topic": args.topic, "node": args.node})
         write_json(path, items)
-        emit({"id": exp["id"], "arm": arm})
+        emit({"id": exp["id"], "arm": arm, "stratum": stratum,
+              "seed": exp["seed"], "reproducible": True})
     elif args.action == "settle":
-        if not any(exp.get("id") == args.id for exp in items):
+        # ⚠ THE ENGINE COMPUTES THE VERDICT. The model narrates it. It does not make it up.
+        exp = next((e for e in items
+                    if isinstance(e, dict) and e.get("id") == args.id), None)
+        if exp is None:
             die("no experiment with id %s" % args.id)
-        for exp in items:
-            if exp.get("id") == args.id:
-                exp["status"] = "settled"
-                exp["verdict"] = args.verdict
-                exp["settled"] = today().isoformat()
+        if getattr(args, "verdict", None):
+            die("`--verdict` is refused: the engine computes the verdict (invariant #2 — the "
+                "engine owns every number). Until v0.9 this field wrote whatever the model "
+                "said into the experiment log, which is how a vibe becomes a finding.")
+        groups, detail = _experiment_outcomes(exp)
+        mpa = _exp_min_per_arm(exp)
+        ns = {arm: len(v) for arm, v in groups.items()}
+        means = {arm: (round(sum(v) / len(v), 3) if v else None) for arm, v in groups.items()}
+        powered = all(n >= mpa for n in ns.values()) and len(ns) >= 2
+        p_value = _randomization_test(groups, exp.get("seed"))
+        ci = _bootstrap_ci(groups, exp.get("seed"))
+        effect = round(_spread(groups), 3) if any(ns.values()) else None
+        best = max((a for a in means if means[a] is not None),
+                   key=lambda a: means[a], default=None)
+        # per-stratum balance: the whole reason to stratify is to be able to SHOW it worked
+        balance = {}
+        assigns = exp.get("assignments")
+        for a in (assigns if isinstance(assigns, list) else []):
+            if not isinstance(a, dict):
+                continue
+            st, arm = a.get("stratum"), a.get("arm")
+            if not isinstance(st, str) or not isinstance(arm, str):
+                continue                  # an unhashable stratum/arm would poison the dict itself
+            balance.setdefault(st, {}).setdefault(arm, 0)
+            balance[st][arm] += 1
+        if not powered:
+            read = ("UNDERPOWERED — %s. This is not a null result; it is an ABSENCE of a result, "
+                    "and the difference matters: a coin flipped twice does not disprove the coin. "
+                    "Need >=%d per arm."
+                    % (", ".join("%s n=%d" % (a, n) for a, n in sorted(ns.items())), mpa))
+        elif p_value is not None and p_value < 0.05:
+            read = ("%s leads by %.2f (p=%.3f, randomization test; 95%% CI %s). Suggestive, and "
+                    "it is n-of-1 — it is true about YOU, on THIS material, and it is not a law."
+                    % (best, effect, p_value, ci))
+        else:
+            read = ("no arm separated from the others (spread %.2f, p=%.3f). At this n that means "
+                    "'we cannot tell', not 'they are the same'." % (effect or 0.0, p_value or 1.0))
+        exp.update({
+            "status": "settled", "settled": today().isoformat(),
+            "verdict": {                       # ENGINE-COMPUTED. Every field of it.
+                "n_per_arm": ns, "mean_per_arm": means,
+                "effect_spread": effect, "leader": best,
+                "p_value": p_value, "ci95": ci,
+                "powered": powered, "min_per_arm": mpa,
+                "analysis": exp.get("analysis"),
+                "seed": exp.get("seed"), "balance_by_stratum": balance,
+                "n_observations": sum(ns.values()),
+                "read": read,
+            },
+            "outcomes": detail,
+        })
         write_json(path, items)
-        emit(items)
+        emit(exp["verdict"])
+    elif args.action == "status":
+        exp = next((e for e in items if isinstance(e, dict)
+                    and (e.get("id") == args.id or (args.id is None
+                                                    and e.get("status") == "active"))), None)
+        if exp is None:
+            emit({"active": None, "note": "no active experiment"})
+            return
+        groups, _ = _experiment_outcomes(exp)
+        mpa = _exp_min_per_arm(exp)
+        ns = {arm: len(v) for arm, v in groups.items()}
+        assigns = exp.get("assignments")
+        ready = bool(ns) and len(ns) >= 2 and all(n >= mpa for n in ns.values())
+        emit({"id": exp.get("id"), "question": exp.get("question"),
+              "status": exp.get("status"),
+              "n_per_arm": ns, "min_per_arm": mpa,
+              "assigned": len(assigns) if isinstance(assigns, list) else 0,
+              "ready_to_settle": ready,
+              "read": ("%d/%d per arm — %s"
+                       % (min(ns.values()) if ns else 0, mpa,
+                          "ready to settle" if ready
+                          else "still collecting; settling now would read `underpowered`"))})
     else:
         emit(items)
 
@@ -1604,7 +1881,14 @@ def compute_momentum(receipts):
         "retained_total": retained_total,
     }
 
-MODALITY_MIN_N = 6   # same floor as the n-of-1 experiment convention (min_per_arm)
+# The modality floor inherited the experiment's underpowered `min_per_arm: 6` and, as `docs/10`
+# predicted, it MOVES WITH IT. Six per arm is ~2.5x under the SCED alternating-treatments power
+# requirement (~28-30 observations; docs/07 §9), and a medium comparison that reads a verdict off
+# six data points is not "suggestive" — it is noise with a caveat stapled to it.
+#
+# Raising this SUPPRESSES a number some existing learners can currently see. That is correct: the
+# number was never earned. Suppressing an unearned number is not a regression, it is the product.
+MODALITY_MIN_N = EXPERIMENT_MIN_PER_ARM   # 15 — powered, and it moves with the experiment floor
 
 # Shipped inside the stats block so the narrator cannot forget it (the coach reads
 # this JSON, not the docs). Surfaced live in a dogfood session: explorables are
@@ -3954,10 +4238,11 @@ def cmd_selftest(_args):
           clean_confidence(150) == 100 and clean_confidence(-20) == 0
           and clean_confidence("high") is None and clean_confidence(0.9) == 1)
 
-    # -- NON-FINITE IS NOT A NUMBER (found by fuzzing `decay`) --
+    # -- NON-FINITE IS NOT A NUMBER (v0.9, found by fuzzing `decay` and `experiment status`) --
     # `Infinity`/`NaN` are not valid JSON — and Python's json module parses them anyway. An `inf`
     # sails through every `isinstance(x, float)` check, then dies on the first `int()`
-    # (OverflowError); a `NaN` poisons every comparison it touches and never raises at all.
+    # (OverflowError), and a `NaN` poisons every comparison it touches (it compares False to
+    # everything, including itself). One gate, not forty call sites.
     check("as_number rejects inf/-inf/NaN — non-finite is not a number",
           as_number(float("inf")) is None and as_number(float("-inf")) is None
           and as_number(float("nan")) is None
@@ -4242,6 +4527,219 @@ def cmd_selftest(_args):
     check("decay with nothing due says 'nothing to save today', not 'a difference of 0.0'",
           fresh(_decay_nothing_due))
     check("decay: an unencoded topic has nothing to lose", fresh(_decay_empty))
+
+    # ================================================== THE METHOD (v0.9)
+    # `experiment assign` was ROUND-ROBIN, unstratified, unpowered — and its verdict was written
+    # by the MODEL. A confounded, unpowered trial settled by narration is not evidence; it is a
+    # vibe with a JSON file.
+
+    def _exp_topic(n=36, thresh=lambda i: i % 2 == 0):
+        nodes = {"n%02d" % i: {"claim": "c", "probe": "p", "rubric": ["r"],
+                               "threshold": thresh(i),
+                               "viz": {"affordance": "manip" if thresh(i) else "none"}}
+                 for i in range(n)}
+        pth = p("payload.json")
+        write_json(pth, {"topic": "m", "title": "M", "order": sorted(nodes), "nodes": nodes})
+        _capture(cmd_add_topic, _ns(file=pth, replace=False))
+        return sorted(nodes)
+
+    def _exp_start(seed="S1", strat=("threshold",), mpa=None, arms=("A", "B")):
+        d = {"question": "q", "arms": list(arms), "metric": "first_review_recall",
+             "seed": seed, "stratify_by": list(strat)}
+        if mpa is not None:
+            d["min_per_arm"] = mpa
+        return _capture_json(cmd_experiment, _ns(action="start", json=json.dumps(d), file=None))
+
+    def _exp_assign_all(ids):
+        return {nid: _capture_json(cmd_experiment,
+                                   _ns(action="assign", topic="m", node=nid,
+                                       json=None, file=None, id=None, verdict=None))
+                for nid in ids}
+
+    # -- assignment is RANDOMIZED (not round-robin) AND reproducible from the seed --
+    def _assignment_is_randomized_and_reproducible(h):
+        ids = _exp_topic(24)
+        _exp_start(seed="S1")
+        a1 = _exp_assign_all(ids)
+        seq = [a1[n]["arm"] for n in ids]
+        # ROUND-ROBIN would be strict alternation within the assignment ORDER. Randomized is not.
+        strict_alternation = all(seq[i] != seq[i + 1] for i in range(len(seq) - 1))
+        # …and the SAME seed must reproduce the SAME arms, exactly (an assignment nobody can
+        # recompute is not an assignment; it is an anecdote)
+        def again(_h):
+            ids2 = _exp_topic(24)
+            _exp_start(seed="S1")
+            return [_exp_assign_all(ids2)[n]["arm"] for n in ids2]
+        same_seed = fresh(again)()
+        def other(_h):
+            ids3 = _exp_topic(24)
+            _exp_start(seed="DIFFERENT")
+            return [_exp_assign_all(ids3)[n]["arm"] for n in ids3]
+        diff_seed = fresh(other)()
+        return (not strict_alternation            # NOT round-robin…
+                and seq == same_seed              # …but fully reproducible from the seed…
+                and seq != diff_seed              # …and a different seed gives a different draw
+                and all(a["reproducible"] for a in a1.values()))
+    check("experiment assignment is RANDOMIZED (not round-robin) and reproducible from the seed",
+          fresh(_assignment_is_randomized_and_reproducible))
+
+    # -- STRATIFIED: arms balance WITHIN each stratum, which is what kills the confound --
+    # docs/06 open-Q2: explorables are routed to the hardest concepts ON PURPOSE, so an
+    # unstratified comparison carries the MATERIAL as well as the medium. The doc disclosed the
+    # confound honestly. It did not fix it. This does.
+    def _stratification_balances_within_strata(h):
+        ids = _exp_topic(36)
+        _exp_start(seed="S2", strat=("threshold", "viz.affordance"))
+        a = _exp_assign_all(ids)
+        bal = {}
+        for nid, r in a.items():
+            bal.setdefault(r["stratum"], {}).setdefault(r["arm"], 0)
+            bal[r["stratum"]][r["arm"]] += 1
+        return (len(bal) == 2                                   # two real strata…
+                and all(len(c) == 2 and abs(c["A"] - c["B"]) <= 1   # …each balanced to within 1
+                        for c in bal.values())
+                and all("threshold=" in s and "viz.affordance=" in s for s in bal))
+    check("experiment assignment is STRATIFIED — arms balance WITHIN each stratum (kills the confound)",
+          fresh(_stratification_balances_within_strata))
+
+    # -- an arm NEVER moves under a node: re-assigning returns the same arm --
+    def _arms_never_move(h):
+        ids = _exp_topic(8)
+        _exp_start(seed="S3")
+        first = _exp_assign_all(ids)
+        second = _exp_assign_all(ids)
+        return (all(first[n]["arm"] == second[n]["arm"] for n in ids)
+                and all("already assigned" in (second[n].get("note") or "") for n in ids)
+                and len(_capture_json(cmd_experiment, _ns(action="list", json=None, file=None,
+                                                          id=None, topic=None, node=None,
+                                                          verdict=None))[0]["assignments"]) == 8)
+    check("an arm never moves under a node (re-assign returns the same arm, once)",
+          fresh(_arms_never_move))
+
+    # -- ⚠ THE ENGINE COMPUTES THE VERDICT. The model narrates it. --
+    # Until v0.9, `experiment settle --verdict "derivation-first won!"` wrote whatever the model
+    # said straight into the log. That is a direct violation of invariant #2 (the engine owns
+    # every number) in the ONE command whose entire purpose is a number nobody may make up.
+    def _engine_owns_the_verdict(h):
+        ids = _exp_topic(4)
+        x = _exp_start(seed="S4", mpa=2)
+        _exp_assign_all(ids)
+        try:
+            _capture(cmd_experiment, _ns(action="settle", id=x["id"], verdict="derivation won!",
+                                         json=None, file=None, topic=None, node=None))
+            return False                       # it accepted a narrated verdict
+        except SystemExit:
+            pass
+        exps = _capture_json(cmd_experiment, _ns(action="list", json=None, file=None, id=None,
+                                                 topic=None, node=None, verdict=None))
+        return exps[0]["status"] == "active" and exps[0]["verdict"] is None  # nothing was written
+    check("THE ENGINE OWNS THE VERDICT: `settle --verdict` is REFUSED (invariant #2)",
+          fresh(_engine_owns_the_verdict))
+
+    # -- UNDERPOWERED reads `underpowered`, and says what that is NOT --
+    # 20 nodes -> 10 per arm. Under the shipped floor (15) that is UNDERPOWERED; under the old
+    # floor (6) it would be powered — so this fixture ISOLATES the floor. Six nodes would have
+    # read `underpowered` under either, and the check would have proved nothing (§4.5: ask what
+    # ELSE would make this assertion true).
+    def _underpowered_refuses_to_claim(h):
+        ids = _exp_topic(20)
+        x = _exp_start(seed="S5")               # default min_per_arm = 15
+        _exp_assign_all(ids)
+        for nid in ids:
+            _capture(cmd_rate, _ns(topic="m", node=nid, rating="good", grade="recalled",
+                                   kind="encode", production="x"))
+        os.environ["ENGRAM_TODAY"] = "2026-08-06"
+        for nid in ids:
+            _capture(cmd_rate, _ns(topic="m", node=nid, rating="good", grade="recalled",
+                                   kind="review", production="y"))
+        v = _capture_json(cmd_experiment, _ns(action="settle", id=x["id"], verdict=None,
+                                              json=None, file=None, topic=None, node=None))
+        return (v["powered"] is False and v["min_per_arm"] == EXPERIMENT_MIN_PER_ARM
+                and "UNDERPOWERED" in v["read"]
+                and "ABSENCE of a result" in v["read"]   # …and says what that is NOT
+                and v["leader"] is not None)             # it still reports the raw numbers
+    check("an UNDERPOWERED experiment reads `underpowered` — an absence of a result, not a null one",
+          fresh(_underpowered_refuses_to_claim))
+
+    # -- §5.5 THE INSTRUMENT GATE: does the ruler rank a REAL effect above NO effect? --
+    # `experiment settle` CERTIFIES ("derivation-first won"). v0.7's gold set was an instrument
+    # nobody tested and it turned out to rank a FOOLED grader above a CORRECT one. So: build a
+    # world where an arm genuinely wins, and a world where nothing does, and demand the p-value
+    # can tell them apart.
+    def _experiment_instrument_is_monotone(_h=None):
+        def world(effect):
+            def go(h):
+                # 32 nodes -> two strata of 16 -> 8 blocks of 2 per stratum -> exactly 16/16.
+                # (30 gave 16/14, and one arm missed the power floor: block randomization only
+                # balances to WITHIN a block, so an odd tail is a real, honest imbalance.)
+                ids = _exp_topic(32)
+                x = _exp_start(seed="S6", mpa=15)
+                arms = {n: r["arm"] for n, r in _exp_assign_all(ids).items()}
+                for nid in ids:
+                    _capture(cmd_rate, _ns(topic="m", node=nid, rating="good", grade="recalled",
+                                           kind="encode", production="x"))
+                os.environ["ENGRAM_TODAY"] = "2026-08-06"
+                for i, nid in enumerate(ids):
+                    # arm A recalls; arm B lapses — but ONLY when there is a real effect
+                    win = (arms[nid] == "A") if effect else (i % 2 == 0)
+                    _capture(cmd_rate, _ns(topic="m", node=nid,
+                                           rating="good" if win else "again",
+                                           grade="recalled" if win else "lapsed",
+                                           kind="review", production="y"))
+                return _capture_json(cmd_experiment,
+                                     _ns(action="settle", id=x["id"], verdict=None, json=None,
+                                         file=None, topic=None, node=None))
+            return fresh(go)()
+        real = world(True)      # arm A genuinely wins
+        null = world(False)     # outcome is independent of the arm
+        return (real["powered"] and null["powered"]
+                and real["p_value"] < 0.05 < null["p_value"]      # the ruler tells them apart
+                and real["p_value"] < null["p_value"]
+                and real["leader"] == "A" and real["effect_spread"] > null["effect_spread"]
+                and "leads by" in real["read"]
+                # …and the null world says "we cannot tell", NOT "they are the same"
+                and "cannot tell" in null["read"] and "the same" in null["read"])
+    check("§5.5 THE INSTRUMENT GATE: a REAL effect separates; NO effect reads 'we cannot tell'",
+          _experiment_instrument_is_monotone)
+
+    # -- the randomization test never claims p = 0 (add-one), and the design is PRE-REGISTERED --
+    def _design_is_preregistered_and_p_is_honest(h):
+        _exp_topic(4)
+        x = _exp_start(seed="S7", mpa=2)
+        low = x["min_per_arm"] == 2 and "power_note" in x and "BELOW" in x["power_note"]
+        # p can never be 0: with 10k permutations, add-one bounds it at 1/(N+1)
+        g = {"A": [1.0] * 20, "B": [0.0] * 20}          # the most separated data possible
+        pv = _randomization_test(g, "seed")
+        return (low and x["randomized"] is True and x["seed"] == "S7"
+                and "randomization-test" in x["analysis"]
+                and pv is not None and 0 < pv <= 1.0
+                and pv == round(1.0 / (EXPERIMENT_PERMUTATIONS + 1), 4))
+    check("the design is PRE-REGISTERED (seed+analysis recorded) and p is never 0 (add-one)",
+          fresh(_design_is_preregistered_and_p_is_honest))
+
+    # -- a hand-edited experiments.json must not brick `experiment status|list` --
+    # 72 crashes in 600 fuzzed states, the FIRST time these sub-actions were fuzzed. They had
+    # never been fuzzed because §4.7 enumerates COMMANDS from the dispatch table, and `experiment`
+    # lives in `mutating` — so its READ sub-actions were invisible to the rule written to find
+    # exactly this. A command with sub-actions has a read path per sub-action.
+    def _experiment_reads_survive_garbage(h):
+        write_json(p("experiments.json"), [
+            {"id": "x1", "status": "active", "arms": 7},                    # arms as an int
+            {"id": "x2", "status": "active"},                               # arms absent
+            {"id": "x3", "status": "active", "arms": [{"unhashable": 1}, "A"],
+             "min_per_arm": float("inf"),                                   # inf -> int() -> boom
+             "assignments": [{"arm": ["list"], "stratum": {"d": 1}}, "not-a-dict"]},
+            "not even an object",
+        ])
+        for ns in (_ns(action="status", id=None, json=None, file=None, topic=None,
+                       node=None, verdict=None),
+                   _ns(action="list", id=None, json=None, file=None, topic=None,
+                       node=None, verdict=None)):
+            _capture(cmd_experiment, ns)        # must RETURN, not raise
+        # …and `stats` (which reads the active experiment's question) survives it too
+        return _capture_json(cmd_stats, _ns()) is not None
+    check("`experiment status|list` degrade on a type-corrupt experiments.json (never brick)",
+          fresh(_experiment_reads_survive_garbage))
 
     # ================================================== THE CLAIM (v0.8, corrected in v0.8.1)
     # `transfer_probe` was authored by the architect since v0.1 and read by NOTHING. v0.8.0 wired
@@ -4548,6 +5046,24 @@ def cmd_selftest(_args):
                 and s["adherence"]["loop_closure"]["first_review_done"] == 1)
     check("a transfer receipt is NEVER pooled into retention — and never breaks its coverage",
           fresh(_transfer_is_never_pooled))
+
+    # -- …but momentum DOES count them, because durability is durability --
+    # A transfer probe advances the FSRS schedule exactly like any other successful rating, so
+    # counting only `kind == "review"` here would report LESS durability than the learner actually
+    # built. Undercounting real progress is its own dishonesty — in the direction that quietly
+    # tells someone their work did not land. (Three populations, three questions; this is the one
+    # that asks "how much did you actually grow?")
+    def _momentum_counts_transfer_retrievals(h):
+        _add_transfer_topic()
+        _mature()
+        _probe(grade="recalled", rating="good")       # a SUCCESSFUL transfer: strengthens memory
+        s = _capture_json(cmd_stats, _ns())
+        return (s["momentum"]["reviews_7d"] == 1               # the transfer IS in the window…
+                and s["momentum"]["stability_gained_7d"] > 0   # …and its durability gain counts…
+                and s["reviews"] == 3                          # …while retention sees reviews only
+                and s["transfer"]["n"] == 1)
+    check("momentum counts TRANSFER retrievals too (durability is durability)",
+          fresh(_momentum_counts_transfer_retrievals))
 
     # -- THE CAPSTONE IS A NODE, NOT A HOPE --
     def _capstone_is_in_the_dag(h):
@@ -6102,16 +6618,24 @@ def cmd_selftest(_args):
         return ok
     check("ghost order id + malformed dates survive every read path", fresh(_bad_state_survives))
 
-    # -- experiment guards: >=2 arms, one active at a time (SEC-06) --
+    # -- experiment guards: >=2 DISTINCT arms, a KNOWN metric, one active at a time (SEC-06) --
     def _experiment_guard(h):
-        empty = raises(cmd_experiment, _ns(action="start",
-                       json=json.dumps({"question": "q", "arms": [], "metric": "m"})))
-        _capture(cmd_experiment, _ns(action="start", json=json.dumps(
-            {"question": "q", "arms": ["x", "y"], "metric": "m"})))
-        second = raises(cmd_experiment, _ns(action="start", json=json.dumps(
-            {"question": "q2", "arms": ["x", "y"], "metric": "m"})))
-        return empty and second
-    check("experiment requires >=2 arms and one active at a time", fresh(_experiment_guard))
+        M = "first_review_recall"
+        empty = raises(cmd_experiment, _ns(action="start", file=None,
+                       json=json.dumps({"question": "q", "arms": [], "metric": M})))
+        dupes = raises(cmd_experiment, _ns(action="start", file=None,
+                       json=json.dumps({"question": "q", "arms": ["x", "x"], "metric": M})))
+        # v0.9: an UNKNOWN metric dies rather than being silently computed as something else —
+        # the engine will not guess which number you meant and then report it as fact.
+        unknown = raises(cmd_experiment, _ns(action="start", file=None,
+                         json=json.dumps({"question": "q", "arms": ["x", "y"], "metric": "vibes"})))
+        _capture(cmd_experiment, _ns(action="start", file=None, json=json.dumps(
+            {"question": "q", "arms": ["x", "y"], "metric": M})))
+        second = raises(cmd_experiment, _ns(action="start", file=None, json=json.dumps(
+            {"question": "q2", "arms": ["x", "y"], "metric": M})))
+        return empty and dupes and unknown and second
+    check("experiment requires >=2 distinct arms, a KNOWN metric, one active at a time",
+          fresh(_experiment_guard))
 
     # -- report --out is confined to home unless --allow-outside (SEC-08) --
     def _out_confined(h):
@@ -6200,7 +6724,11 @@ def cmd_selftest(_args):
     check("modality guarded on thin data",
           mod_thin["read"] == "insufficient-data" and mod_thin["explorable"]["n"] == 1)
     syn = []
-    for i in range(6):
+    # v0.9: the floor moved 6 -> 15 (MODALITY_MIN_N == EXPERIMENT_MIN_PER_ARM). Six per arm was
+    # ~2.5x under the SCED power requirement, and a medium verdict read off six data points is
+    # not "suggestive" — it is noise with a caveat stapled to it. The fixture moves with the floor,
+    # and a check BELOW the floor is asserted separately (see the next check).
+    for i in range(MODALITY_MIN_N):
         # every node gets its ENCODE receipt first — a first receipt is never a review
         syn.append({"id": "ee%d" % i, "ts": "2026-06-01", "kind": "encode", "rating": "good",
                     "topic": "t", "node": "e%d" % i, "artifact": True})
@@ -6214,9 +6742,19 @@ def cmd_selftest(_args):
                     "topic": "t", "node": "d%d" % i})
     mod = compute_modality(syn)
     check("modality splits arms on first review only",
-          mod["explorable"]["n"] == 6 and mod["explorable"]["first_review_recall"] == 1.0
-          and mod["dialogue"]["n"] == 6 and mod["dialogue"]["first_review_recall"] == 0.0
+          mod["explorable"]["n"] == MODALITY_MIN_N
+          and mod["explorable"]["first_review_recall"] == 1.0
+          and mod["dialogue"]["n"] == MODALITY_MIN_N
+          and mod["dialogue"]["first_review_recall"] == 0.0
           and mod["read"] == "explorable-encoded ahead")
+    # -- v0.9: the OLD floor (6/arm) must now read insufficient-data, not a verdict --
+    # Raising this SUPPRESSES a number some existing learners can currently see. That is correct:
+    # the number was never earned. Suppressing an unearned number is not a regression; it is the
+    # product. (docs/10 predicted this: "stats.modality's identical >=6 floor inherits the same
+    # defect and moves with it.")
+    check("modality at the OLD 6-per-arm floor now reads insufficient-data (it was never powered)",
+          compute_modality([r for r in syn
+                            if int(r["node"][1:]) < 6])["read"] == "insufficient-data")
     check("stats exposes the modality block",
           fresh(lambda h: _capture_json(cmd_stats, _ns())["modality"]["read"]
                 == "insufficient-data"))
@@ -6492,9 +7030,13 @@ def main():
     sp.add_argument("--description"); sp.add_argument("--id")
 
     sp = sub.add_parser("experiment")
-    sp.add_argument("action", choices=("start", "assign", "settle", "list"))
+    sp.add_argument("action", choices=("start", "assign", "settle", "status", "list"))
     sp.add_argument("--json"); sp.add_argument("--file"); sp.add_argument("--id")
-    sp.add_argument("--verdict"); sp.add_argument("--topic"); sp.add_argument("--node")
+    # `--verdict` is KEPT so the engine can REFUSE it loudly rather than argparse-erroring on an
+    # unknown flag. Until v0.9 this wrote whatever the model said straight into the experiment
+    # log — the one command whose entire purpose is a number nobody is allowed to make up.
+    sp.add_argument("--verdict", help=argparse.SUPPRESS)
+    sp.add_argument("--topic"); sp.add_argument("--node")
 
     sp = sub.add_parser("log-session")
     sp.add_argument("--kind", default="learn"); sp.add_argument("--mode", default="standard")
