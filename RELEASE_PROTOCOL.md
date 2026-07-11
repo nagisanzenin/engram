@@ -21,14 +21,18 @@ ordering of the list is the ordering of the harm.
 | # | Class | Why it's fatal here | The one that taught us |
 |---|---|---|---|
 | **1** | **A wrong number — especially one that is wrong in the *flattering* direction** | Engram's entire value is that its numbers are true. A crash gets fixed because you see it. **A flattering number gets believed.** | `loop_closure` reported `1.0 · "the loop is closing"` for a learner who had never come back once (v0.6.1). `retention` reported *"100% recall, 0 unmeasured"* while the engine's own `decay` put the same concepts at **56% and falling** (v0.6.2). |
-| **2** | **Silent data loss** | The learner's production is the only thing they actually made. Destroying it, silently, is unforgivable. | The normal settle path called `drop_stash(topic, node)` — draining **every** entry for that node — so settling one production destroyed a second, never-graded one (v0.6.2). |
+| **2** | **Silent data loss** | The learner's production is the only thing they actually made. Destroying it, silently, is unforgivable. | The normal settle path called `drop_stash(topic, node)` — draining **every** entry for that node — so settling one production destroyed a second, never-graded one (v0.6.2). **And v0.7: a new `die()` inside `apply_item` that the batch pre-flight didn't screen for wrote item 1's receipt and then aborted — an append-only log, torn in half.** |
 | **3** | **Dead code shipped as a feature** | The CHANGELOG becomes a lie and the guard you're relying on isn't there. | Issue #3's `sid` idempotency guard never fired in production: the assessor's strict output schema didn't carry `sid`, so `apply_item` never saw one (v0.6.0 → fixed in the same release only because a review caught it). |
-| **4** | **A guard nobody reads** | A tripwire that nothing consumes cannot trip. | `retention.coverage` was computed, stored in a nested key, and read by no runtime surface. |
+| **4** | **A guard nobody reads** | A tripwire that nothing consumes cannot trip. | `retention.coverage` was computed, stored in a nested key, and read by no runtime surface. **And v0.7: the grader-unvalidated stamp reached the JSON, the CLI and the skill — and was thrown away by the HTML dashboard, the one surface where a number is most believed.** |
 | **5** | **A metric that silently drops evidence** | Survivorship bias with a progress bar. | Disjoint retention windows swallowed a real day-11 review while reporting *"no reviews yet"*. `unmeasured` exempted any node reviewed even once, ever. |
-| **6** | **A read path that bricks** | `doctor` reports corruption; `stats` is not allowed to *die* of it. | 259 unhandled crashes in 300 fuzzed states. Several predated the release that surfaced them. |
+| **6** | **A read path that bricks** | `doctor` reports corruption; `stats` is not allowed to *die* of it. | 259 unhandled crashes in 300 fuzzed states. Several predated the release that surfaced them. **And 447 more, in SHIPPED code, the day someone finally fuzzed `next` — the command `/learn` calls every session.** |
+| **7** | **A LABEL that lies** ⚠ NEW | The number is right and the reader is still deceived. This is bug class #1 wearing a disguise, and it is *harder* to see, because the arithmetic checks out. | v0.6.4: `retention` said 56% and `decay` said 66% — **both correct, ten points apart, and a user could not tell which to believe.** v0.7: `by_case_type` reported `n: 30` for a case type holding **ten items** (30 was judgments). v0.7: the audit stamped `gold_source: "bundled"` onto a run whose ground truth had been **locally re-adjudicated** — *"a provenance field that lies is worse than none, because it is believed."* |
 
 > **The single sentence to keep:** *a number that is wrong in the direction that reassures the
 > learner is worse than a crash.*
+>
+> **And its corollary, earned in v0.7:** *a number whose LABEL is wrong is a wrong number.* The
+> arithmetic being right is not a defence — nobody reads the arithmetic.
 
 ---
 
@@ -120,14 +124,32 @@ python3 scripts/engram.py selftest | grep "^FAIL"    # must name YOUR check
 cp /tmp/e.bak scripts/engram.py
 ```
 
-The two ways a check turns out fake, both seen in v0.6:
+**The score so far: 3 fake checks in v0.6, 4 more in v0.7.** That rate is not going down, and
+that is the actual lesson — *writing a check that proves nothing is the default outcome, and the
+mutation test is the only thing that has ever caught one.*
+
+The **four** ways a check turns out fake, all seen for real:
 
 - **It asserts a constant, not a behavior.** `check(BUCKETS["30d"] == (15,59))` proves nothing;
   it just restates the source. Exercise the behavior — feed it a day-20 review and demand the
   funnel counts it.
 - **The fixture makes old and new agree by coincidence.** One fixture had two nodes where the
-  old (`>= 25`) and new (`[15,59]`) definitions *both* yielded 1. Build the fixture so the two
-  definitions genuinely **diverge**, or the check cannot see the regression.
+  old (`>= 25`) and new (`[15,59]`) definitions *both* yielded 1. v0.7's coverage check used
+  three **identical** runs — so the union and the intersection of graded sids were the same set,
+  and swapping the honest denominator for the flattering one changed nothing. Build the fixture
+  so the two definitions genuinely **diverge**, or the check cannot see the regression.
+- **The assertion is weaker than the property.** ⚠ NEW. v0.7 asserted *"a 2-step grading error
+  hurts more than a 1-step one"* to pin a **quadratic** weighting — which **linear** weights
+  satisfy just as happily. Ask: *what else would also make this assertion true?* If anything
+  would, you have tested nothing. (Pin an exact hand-computed value instead. And note that a
+  *balanced* fixture would have been useless too: with equal marginals both schemes normalize to
+  the same kappa.)
+- **Another gate already covers it, so reverting the fix leaves it green.** ⚠ NEW. v0.7's
+  raw-agreement check couldn't isolate the QWK floor, because its always-says-`recalled` grader
+  also tripped the *bias* ceiling. Two of its dashboard checks passed with the fix reverted
+  because a *different* element on the page happened to contain the string being grepped.
+  **A check is only real if it fails when ITS OWN fix is reverted.** When several guards overlap,
+  build a fixture where all the others are silent.
 
 ## 4.6 · The adversarial review (never skip; green tests are not evidence)
 
@@ -163,21 +185,49 @@ Throw randomized garbage at **every read command** and demand each one **returns
 
 ```python
 # throwaway ENGRAM_HOME; randomize every field to every JSON type; 500+ states, 2+ seeds
-for fn in (compute_stats, cmd_adherence, cmd_retention, cmd_decay,
-           cmd_topics, cmd_due, cmd_session_start, cmd_report, cmd_doctor):
+for fn in (compute_stats, cmd_adherence, cmd_retention, cmd_decay, cmd_topics, cmd_due,
+           cmd_next, cmd_topic_status,            # <- THE /learn SURFACE. v0.6 FORGOT IT.
+           cmd_gold, cmd_grader_health,
+           cmd_session_start, cmd_report, cmd_doctor):
     fn(...)          # SystemExit (a guarded die()) is fine. An exception is a defect.
 ```
+
+> ### ⚠ ENUMERATE THE READ PATHS FROM THE CODE, NOT FROM MEMORY
+>
+> v0.6's list was written from the `/coach` surface — stats, adherence, retention, decay, report,
+> doctor — and **simply forgot the `/learn` surface**. The first time anyone fuzzed `next` and
+> `topic-status`, they found **447 crashes in 300 states, in already-shipped code**, and `next`
+> is the command `/learn` calls at the **start of every session**. It had been broken since v0.1.
+>
+> **The list you write from memory is the list you already thought of.** Get it from the
+> dispatch table:
+>
+> ```bash
+> python3 - <<'PY'
+> import re
+> src = open("scripts/engram.py").read()
+> block = re.search(r"handlers = \{(.+?)\n    \}", src, re.S).group(1)
+> mutating = set(re.findall(r'"([\w-]+)"', re.search(r"mutating = \{(.+?)\}", src, re.S).group(1)))
+> print(sorted(set(re.findall(r'"([\w-]+)":', block)) - mutating - {"selftest"}))
+> PY
+> ```
+>
+> Every name it prints is a read path. Every one of them goes in the fuzzer.
 
 **The doctrine, and it is already written in `iter_graphs`' docstring:** aggregate/read-only
 views must degrade gracefully — never brick. `doctor` is the thing that **reports** corruption
 and must **never die of what it exists to find**.
 
 Fix at the **gate**, not the call site. Twenty guards smeared across twenty functions is how
-this bug class survives; one shape-check in `iter_graphs` — which every read path funnels
-through — is how it dies.
+this bug class survives; one shape-check in `iter_graphs` is how it dies — **and then check that
+the gate's TWIN has one too.** v0.6 hardened `iter_graphs` (every *aggregate* read) and left
+`load_graph` (every *single-topic* read) with no shape check at all. **A gate is only a gate if
+nothing routes around it.**
 
 Target: **0 crashes / 500 states**. Lock it in with a selftest that feeds every read path a
-deliberately type-corrupt state.
+deliberately type-corrupt state. And **re-fuzz after the release's last commit**, not before:
+v0.7's own dashboard changes introduced 46 fresh crashes on garbage audit files, three gates
+after the fuzz had already come back clean.
 
 ## 4.8 · The numbers audit ⚠ NEW — the most important gate in this file
 
@@ -219,13 +269,33 @@ which are, definitionally, the ones that decayed. That is survivorship bias with
 and Engram shipped it *twice* (once via disjoint buckets, once via an `unmeasured` scoped to
 never-reviewed nodes).
 
-### 4. Does anything actually READ it?
+### 4. Does anything actually READ it? — **and does EVERY SURFACE read it?**
 
 A guard nobody consumes is not a guard. `coverage` was computed, stored, and read by nothing —
 so the anti-data-loss tripwire could not trip.
 
 **Rule: a number's failure state must reach the NARRATOR** — the `read` string, the skill prose,
 the dashboard — not sit in a nested key that only a test ever opens.
+
+> ### ⚠ AND THEN OPEN THE DASHBOARD. ACTUALLY OPEN IT. ⚠ NEW
+>
+> v0.7's `grader_unvalidated` stamp reached the JSON, the CLI, and the skill file. It was
+> **thrown away by the HTML dashboard** — which rendered the retention `read` *only* in the
+> branch that fires when there is **no retention data**. On the happy path it drew the bars and
+> dropped the stamp. A grader that inflated every second item therefore produced a **full-width
+> green bar reading 100%**, with **zero** mentions of the word *grader* anywhere on the page.
+>
+> **Every gate that release ran — selftest, mutation, fuzz, live test, numbers audit, user
+> session — reads JSON.** The dashboard is the one surface a human actually *looks* at, and it
+> was the only one that lied. It was found by an outside reviewer, after everything was green.
+>
+> So, for every number: **`grep` the rendered HTML for its failure state.** If the number can be
+> wrong, the page that shows it must say so:
+>
+> ```bash
+> python3 scripts/engram.py report --out /tmp/d.html
+> grep -ci 'unvalidated\|unaudited\|grader\|<the failure word>' /tmp/d.html   # must be > 0
+> ```
 
 ### 5. Can it be reached from the CLI in a way the skills never take?
 
@@ -236,6 +306,29 @@ defaults to `"review"`, so a bare `rate` wrote a node's only receipt as a review
 Every metric keys off exact literals. **Validate them** (`choices=`, a `KINDS` constant, a check
 in `validate_item`) so a typo dies before any write — receipts are append-only, so a bad one can
 never be corrected.
+
+### 6. Does its LABEL survive contact with a reader? ⚠ NEW — bug class #7
+
+The arithmetic being right is not a defence. **Nobody reads the arithmetic.** Three shipped
+examples, all of them numerically correct and all of them deceiving:
+
+- `retention` said **56%** and `decay` said **66%** — both true, over different populations,
+  ten points apart, and a user could not tell which to believe (v0.6.4).
+- `by_case_type` reported **`n: 30`** for a case type holding **ten items**. The 30 was
+  *judgments* (10 items × 3 runs). Nothing said so, and the skill instructed the narrator to
+  quote it as a sample size (v0.7).
+- The audit wrote **`gold_source: "bundled"`** onto a run whose ground truth had been locally
+  re-adjudicated. Not merely silent — **actively false, in the flattering direction** (v0.7).
+
+**Three rules, and they cost one line each:**
+
+1. **Two different denominators may never share a key name.** `items` and `judgments`, not `n`.
+2. **A provenance field must be computed, never asserted.** If it can be wrong, it will be
+   believed anyway — *a provenance field that lies is worse than no provenance field.*
+3. **A mean hides its own direction.** `leniency_bias: +0.00` is produced by a *perfect* grader
+   and by one that inflates a third of the set and deflates another third. Same number, opposite
+   safety. **Publish the direction counts, not just the mean** (`graded_up` / `graded_down`), and
+   put them in the `read`.
 
 ---
 
@@ -450,8 +543,10 @@ shipped, what the wrinkle was, and how to get it.
 - [ ] **§4** selftest → N/N, N == the badge
 - [ ] **§4.5** every new check **mutation-tested** (revert the fix → that check fails)
 - [ ] **§4.6** `/code-review high`; **no agent errored**; every finding fixed + checked
-- [ ] **§4.7** fuzz: **0 crashes / 500 garbage states**; read paths degrade, `doctor` survives
-- [ ] **§4.8** numbers audit — all five questions answered **in writing** for every new number
+- [ ] **§4.7** fuzz: **0 crashes / 500 garbage states**; read-path list taken **from the dispatch
+      table, not from memory**; re-fuzz **after the last commit**
+- [ ] **§4.8** numbers audit — all **six** questions answered **in writing** for every new number
+- [ ] **§4.8 Q4** the rendered **HTML dashboard** grepped for every failure state
 - [ ] **§5** live test driven; real state read-only and **hash-identical** after
 - [ ] **§5.5** agent dogfood — **uncontaminated** (agents got exactly what the skill gives them)
 - [ ] **§5.6** **USER SESSION run; report written; verdict = ship**
@@ -467,15 +562,21 @@ shipped, what the wrinkle was, and how to get it.
 | Gate | The bug it caught |
 |---|---|
 | **4** selftest | the ordinary stuff — and nothing else |
-| **4.5** mutation test | **3 of our own checks were theatre** (one asserted a constant; one had a fixture where old and new agreed by coincidence) |
-| **4.6** adversarial review | 10 defects behind 79 green checks (v0.5); 9 behind 110 (v0.6) — incl. a concurrency race and a **headline feature that was dead code** |
-| **4.7** fuzz | **259 crashes in 300 states**; several predated the release that found them; a hand-edited file could brick `/coach` |
-| **4.8** numbers audit | `retention` said **100%** while `decay` said **56%** — two commands, one state, contradictory stories, shipped |
+| **4.5** mutation test | **3 fake checks in v0.6, 4 more in v0.7.** The rate is not dropping. One asserted a constant; one had a fixture where old and new agreed by coincidence; one asserted a property *weaker* than the one it was pinning; two were satisfied by a different element on the same page |
+| **4.6** adversarial review | 10 defects behind 79 green checks (v0.5); 9 behind 110 (v0.6); **8 behind 155 (v0.7) — including the teeth never reaching the dashboard, in the release that was ABOUT the teeth** |
+| **4.7** fuzz | 259 crashes in 300 states (v0.6) — and **447 more in v0.7, in already-shipped code**, the first time anyone fuzzed the command `/learn` calls every session |
+| **4.8** numbers audit | `retention` said **100%** while `decay` said **56%** — two commands, one state, contradictory stories, shipped. And v0.7: three defects, **two of them the same unlabelled-denominator bug, found inside the release built to catch unlabelled denominators** |
 | **5** live test | disjoint buckets **silently ate a real day-11 review** while reporting "no reviews yet" |
 | **5.5** dogfood | the pipeline held — and the *first* dogfood **certified a dead feature**, because the prompt handed the assessor the answer |
-| **5.6** user session | the founder encoded 7 concepts and reviewed **0**. Every test was green. The product had already failed. |
+| **5.6** user session | the founder encoded 7 concepts and reviewed **0**. Every test was green. The product had already failed. And in v0.7 it killed a line that put a caveat on a number **that did not exist** |
 | **7.5** post-release review | **2 HIGH bugs in shipped code** — the honest denominator wasn't honest; the normal settle path destroyed the learner's work |
 
 **The pattern, stated once:** *every test you write confirms what you already believe. The things
 that found real bugs were the ones you did not control — a fuzzer, a reviewer, and a real session
 with a real human who did not come back.*
+
+**The v0.7 corollary, and it is the sharpest one yet:** *the gate you build to catch a bug class
+will not catch that bug class in itself.* v0.6's fuzz gate missed `next`. v0.7's numbers audit —
+the gate that exists for unlabelled denominators — **shipped two unlabelled denominators**, and
+the release built to make the grader's failures visible **hid them from the dashboard.** Run every
+gate against the release that adds it, and then have someone else run it again.

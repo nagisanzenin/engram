@@ -119,6 +119,64 @@ And the check harness itself got fixed: **a check that raises now fails BY NAME*
 taking the whole suite down. Every mutation of a crash-guard used to report *"the selftest
 crashed"* — true, unmissable, and useless for locating which guard you just reverted.
 
+### What the independent reviewer found — 8 defects behind 155 green checks
+
+Every gate above is run by the person who wrote the code, on the code they believe is right.
+**That is their structural limit.** §4.6 found eight more, and the worst of them is the one this
+release was supposedly *about*.
+
+1. **THE TEETH NEVER REACHED THE HTML DASHBOARD.** `retention.read` was the only carrier of the
+   grader stamp, and `cmd_report` rendered it **exclusively in the branch that fires when there
+   is no retention data.** On the happy path it drew the bars and threw the stamp away. So a
+   grader that inflated every second item produced a **full-width green bar reading 100%**, with
+   nothing anywhere on the page to say the grade behind it had failed its own audit —
+   `grep -ci 'grader\|unvalidated\|qwk' dashboard.html` → **0**. That is bug class #1 *and* #4, on
+   the single surface where a number is most believed. `compute_retention`'s own comment claimed
+   the dashboard was covered; the dashboard funnelled through the function and discarded the
+   result. **The live test, the fuzz, the numbers audit and the user session all walked straight
+   past it — because every one of them reads JSON.** The dashboard now renders the read
+   unconditionally, stamps it, and carries a full grader block (QWK · leniency · graded-UP).
+2. **`gold_source` — the §4.8 Q5 fix — asserted a provenance that was FALSE.** `gold/local-gold.jsonl`
+   overrides bundled adjudications by `sid`, **on the default path, no flag required.** A local
+   file that re-grades the set to agree with the grader turns `fail` (QWK 0.55, leniency +0.64)
+   into `pass` (QWK 1.00) — and the audit still wrote `"bundled:gold/assessor-gold.jsonl"` into
+   the file. **A provenance field that lies is worse than no provenance field, because it is
+   believed.** Now `load_gold` counts overrides and additions, `gold_source` names them, and a
+   pass against a modified gold set is *stamped as such* on every retention figure.
+3. **A grader could mark its own homework twice and keep the better score.** `_run_grades` was
+   last-wins, so a grader that got 12 items wrong and re-emitted those sids later in the array —
+   *exactly what an LLM self-correcting mid-array produces* — turned `fail` (QWK 0.00, leniency
+   +0.67) into `pass` (QWK 1.00), silently, with `n` intact. The mirror image of the dropped-sid
+   bug the coverage guard already caught: same class, opposite mechanism. **First verdict stands;
+   duplicates are a coverage failure.**
+4. **Three copy-pasted runs are indistinguishable from three independent ones.** `test_retest:
+   1.00` then *asserts* a reproducibility figure nobody measured — and `MIN_AUDIT_RUNS` and the
+   paradox gate, which exist precisely to prevent that, are both satisfied by copy-paste. The
+   engine cannot prove independence, so it now refuses to *claim* it: identical runs are flagged
+   and named in the read.
+5. **The new corrupt-node refusal tore a receipt batch in half.** The `cmd_receipt` pre-flight
+   promised *"confirm every node exists before applying ANY, so a bad item can't half-apply the
+   batch"* — and checked **existence, not shape.** v0.7 added a `die()` inside `apply_item` that
+   the pre-flight didn't screen for, so a 3-item batch with a corrupt middle node **wrote item 1's
+   receipt and then died.** Receipts are append-only. A new refusal must be hoisted into the
+   pre-flight, or it is not a refusal — it is a tear.
+6. **Audit 99 shadowed audit 100.** `sorted()` on `2026-07-11-100.json` puts it *before* `-99.json`,
+   so the 100th audit of a day — a `fail` — would be overruled by the 99th, a `pass`. Improbable
+   and flattering, which is the worst pair. Now sorted numerically.
+7. **The contamination guard falsely accused innocent graders.** It died on any output key named
+   `rationale` — the single most natural key for a grader to invent unprompted — *accusing it of
+   having been shown the answer* and making the audit unrunnable. Narrowed to `gold_grade` and
+   `case_type`, the two keys that could only come from the gold schema.
+8. **`leniency_bias` is measured on an 88%-adversarial set**, so it bounds how far the grader
+   *can* be pushed; it is not an unbiased estimate of its bias on ordinary productions. The read
+   presented it as the latter. Now says so, in the payload.
+
+The reviewer also **independently verified the QWK math** against a closed-form variance
+implementation over 4,000 random matrices (max diff 6.7e-16), confirmed the `GRADES`/`GOLD_SCORE`
+ordinal trap is not hit, reproduced the crash-class fix (**506 → 0** on its own fuzzer), and read
+all 24 `recalled` and all 9 `right-answer-wrong-reason` gold items, finding **no adjudication
+error in the lenient direction.**
+
 ### Behavior
 
 - **`/coach` reports the oracle before any number it produced.** `unaudited` → one calm line,
@@ -127,6 +185,13 @@ crashed"* — true, unmissable, and useless for locating which guard you just re
 - **`/coach audit`** — runs the real assessor on the gold set, three independent times, and
   narrates the engine's verdict. The assessor is **never told it is being audited**: a subject
   that knows it is being tested is not the subject.
+- **The §5.6 user session, run against the founder's own state, killed a line before it shipped.**
+  It read: *"[grader unaudited — QWK unknown; run /coach audit] insufficient-data (no reviews
+  yet)"* — **a caveat on a number that does not exist**, stacked as a second reproach on top of
+  *"THE LOOP HAS NEVER CLOSED"*. That is the wall of debt, and the wall of debt is the churn
+  trigger, not the cure (`docs/05` P14). The flag stays true in the payload; the narrator is no
+  longer handed a disclaimer for a measurement nobody made. **No selftest could have found it. A
+  person had to look at the screen.**
 
 ### Also
 

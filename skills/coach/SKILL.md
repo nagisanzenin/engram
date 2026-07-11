@@ -40,6 +40,12 @@ python3 "$ENGRAM" grader-health
 
 Every grade in this dashboard was written by the blind assessor. **Until v0.7 nobody had ever graded the grader** — and if it is lenient, every retention number Engram has ever shown is inflated and the system could not know. So `stats.retention` now carries `grader_unvalidated`, and it is your job to voice it.
 
+> ### ⚠ First: if `loop_closure.rate == 0`, SKIP this section entirely.
+>
+> When the loop has never closed there are **no retention numbers on the table**, so there is nothing for the grader to have gotten wrong — and saying *"also, the grader is unaudited"* on top of *"you have never once come back"* stacks a second reproach on a learner who is already being told they failed. **That is the wall of debt, and the wall of debt is the churn trigger, not the cure** (`docs/05` P14).
+>
+> Say the one thing that matters, offer the four-minute review, stop. The grader can be audited on a day when its verdict would actually change something. (Found by the §5.6 user session, run against the founder's own state — every test was green and the screen was still wrong.)
+
 - **`verdict: "unaudited"`** (`grader_unvalidated: true`) — the default for anyone who has not run an audit. One calm line, once: *"the grader that writes your receipts hasn't been checked against the gold set on this machine — `/coach audit` measures it in about four minutes."* Then carry on and report the numbers. **Do not withhold the dashboard over it and do not repeat the line every check-in** — it is information, not pressure (P13).
 - **`verdict: "fail" | "incomplete" | "insufficient-runs"`** (`grader_unvalidated: true`) — say it **first, plainly, before any retention number**, and say what it means: *"the grader failed its own audit (QWK 0.42, floor is 0.60). Every recall number below was produced by it, so treat all of them as unearned until it's fixed."* Read `reasons` aloud; they are written for a human.
 - **`verdict: "pass" | "warn"`** — one line with the real numbers: *"grader checks out: QWK 0.93 against the gold set, and it has never once graded UP."* Then move on.
