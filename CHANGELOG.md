@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.2 — 2026-07-11 · a regression my own fix caused
+
+The v1.0.1 verification review confirmed both headline fixes hold (the export leak is closed; the
+power floor is unbuyable) — and found that **v1.0.1's finding-#4 fix introduced a new crash.**
+
+Switching `compute_modality` to the shared `_outcome` predicate was correct — but `_outcome`
+returns `None` on a hand-edited un-scoreable receipt, and `0.0 += None` is a `TypeError` that
+bricked `stats`, and therefore `/coach`. **The same release fixed this exact bug class in `settle`
+(finding #5) and did not carry the guard one function over.** The test gap mirrored the code gap:
+there was a settle-degradation check and no modality one, so 213/213 stayed green over a live brick.
+
+- **Fixed:** modality drops the un-scoreable datum, like every other read path. Reads degrade, they
+  never brick.
+- **The fuzz fixture now includes an un-scoreable FIRST review**, so this class cannot hide again —
+  the gate missed it because no fixture gave a node a `None`-outcome first review, which is the only
+  shape that reaches modality's per-node first-review logic.
+
+Selftest **213 → 214.**
+
 ## 1.0.1 — 2026-07-11 · TWO post-release reviews, and the leak the whole project exists to prevent
 
 Two independent reviewers read shipped code — v1.0.0 (the Commons) and the still-in-`main` v0.9.0

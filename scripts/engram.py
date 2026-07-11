@@ -32,7 +32,7 @@ SCHEMA = 1
 # The one place the engine knows its own version. Read by `export`, so a shared receipt states
 # which engine produced it — a corpus of receipts from unknown engine versions is not a corpus.
 # Pinned against .claude-plugin/plugin.json by a selftest, so it cannot drift.
-ENGRAM_VERSION = "1.0.1"
+ENGRAM_VERSION = "1.0.2"
 RETENTION_DEFAULT = 0.90
 INTERVAL_MAX = 365
 RETENTION_MIN, RETENTION_MAX = 0.70, 0.97   # sane desired-retention bounds
@@ -1969,9 +1969,17 @@ def compute_modality(receipts):
     # agree. Both now use `_outcome`, the shared predicate.
     arms = {"explorable": [0.0, 0], "dialogue": [0.0, 0]}
     for _d, r in first.values():
+        # `_outcome` returns None for a hand-edited receipt with a truthy non-rating and no grade —
+        # and `0.0 += None` is a TypeError that bricked `stats`, and therefore /coach. v1.0.1 added
+        # the switch to `_outcome` (finding #4) AND the drop-guard in `settle` (finding #5) — but
+        # not HERE, one function over. Same bug class, same release, same fix: drop the un-scoreable
+        # datum. Reads degrade, they never brick. (Found by the v1.0.1 verification review.)
+        o = _outcome(r)
+        if o is None:
+            continue
         arm = "explorable" if r.get("artifact") else "dialogue"
         arms[arm][1] += 1
-        arms[arm][0] += _outcome(r)
+        arms[arm][0] += o
     out = {a: {"first_review_recall": (round(ok / n, 3) if n else None), "n": n}
            for a, (ok, n) in arms.items()}
     ex, dg = out["explorable"], out["dialogue"]
@@ -5005,6 +5013,25 @@ def cmd_selftest(_args):
     check("§4.8 Q1: `first_review_recall` scores partial as 0.5 in modality too (agrees with the experiment)",
           fresh(_modality_and_experiment_agree_on_recall))
 
+    # -- modality DEGRADES on an un-scoreable receipt (v1.0.2 — the regression v1.0.1's own fix caused) --
+    # v1.0.1 switched modality to `_outcome` (finding #4) and added the drop-guard to `settle`
+    # (finding #5) — but NOT here, one function over. `0.0 += None` bricked `stats`, and therefore
+    # /coach, on a hand-edited receipt. The verification review caught it, and the tell is that the
+    # test gap mirrored the code gap: there was a settle degradation check and no modality one.
+    def _modality_survives_un_scoreable_first_review(h):
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", grade="recalled",
+                               kind="encode", production="x"))
+        append_jsonl(p("receipts", "t.jsonl"), {         # a's un-scoreable FIRST review
+            "id": "hand", "ts": "2026-07-20", "topic": "t", "node": "a",
+            "kind": "review", "rating": "excellent", "grade": None})
+        _RECEIPTS_CACHE.clear()
+        exercised = _outcome({"rating": "excellent", "grade": None}) is None   # the fixture bites
+        s = _capture_json(cmd_stats, _ns())              # must RETURN, not TypeError
+        return exercised and isinstance(s, dict) and "modality" in s
+    check("modality DEGRADES on an un-scoreable first review (stats/coach never brick)",
+          fresh(_modality_survives_un_scoreable_first_review))
+
     # -- §5.5 THE INSTRUMENT GATE: does the ruler rank a REAL effect above NO effect? --
     # `experiment settle` CERTIFIES ("derivation-first won"). v0.7's gold set was an instrument
     # nobody tested and it turned out to rank a FOOLED grader above a CORRECT one. So: build a
@@ -6955,6 +6982,12 @@ def cmd_selftest(_args):
             f.write("THIS LINE IS NOT JSON\n")
             f.write(json.dumps({"ts": "2026-07-01", "topic": "bad", "node": "a",
                                 "kind": "review", "rating": "good"}) + "\n")
+            # an UN-SCOREABLE first review: truthy non-rating, no grade -> _outcome() is None.
+            # This is the exact receipt that bricked compute_modality (v1.0.2). A read path that
+            # sums _outcome() must drop it, not add it. (`ghost` is a fresh node id so this IS its
+            # first receipt — the case modality's per-node first-review logic actually hits.)
+            f.write(json.dumps({"ts": "2026-06-15", "topic": "bad", "node": "ghost",
+                                "kind": "review", "rating": "excellent", "grade": None}) + "\n")
         write_json(p("misconceptions.json"), "not-a-list")
         write_json(p("experiments.json"), {"not": "a list"})
         # v0.7 surfaces: a hand-edited gold set and a corrupt audit must not brick /coach.
