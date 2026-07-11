@@ -194,12 +194,19 @@ def apply_rating(fsrs, rating_name, on_date):
     ivl = interval_for(s, as_number(fsrs.get("retention"), RETENTION_DEFAULT),
                        as_number(fsrs.get("im"), 1.0))
     out = dict(fsrs)
+    # `reps` and `lapses` were the last two raw arithmetic leaves in the scheduler: every
+    # other one (s, d, retention, im) already went through as_number, and these two did
+    # `fsrs.get("reps", 0) + 1` straight. A hand-edited `"reps": "many"` raised TypeError —
+    # and this runs on the MUTATOR path too, so it took `rate` down, not just `decay`.
+    # Counters are non-negative integers or they are not counters.
+    reps = as_number(fsrs.get("reps"), 0) or 0
+    lapses = as_number(fsrs.get("lapses"), 0) or 0
     out.update({
         "s": round(s, 4), "d": round(d, 4),
         "last": on_date.isoformat(),
         "due": (on_date + timedelta(days=ivl)).isoformat(),
-        "reps": fsrs.get("reps", 0) + 1,
-        "lapses": fsrs.get("lapses", 0) + (1 if (g == 1 and s0 is not None) else 0),
+        "reps": max(0, int(reps)) + 1,
+        "lapses": max(0, int(lapses)) + (1 if (g == 1 and s0 is not None) else 0),
     })
     return out, {"s_before": s0, "s_after": out["s"], "interval_days": ivl,
                  "retrievability": (round(r, 4) if r is not None else None)}
@@ -399,6 +406,25 @@ def read_model():
     return _deep_heal(raw, DEFAULT_MODEL)
 
 def load_graph(topic):
+    """THE GATE for every single-topic command. `iter_graphs` is its multi-topic twin.
+
+    v0.6 put a shape check in `iter_graphs` — which every AGGREGATE read funnels through —
+    and stopped there. `load_graph` had none, so every SINGLE-TOPIC command (`next`,
+    `topic-status`, `rate`, `receipt`, `artifact`, `focus`) read raw, unvalidated JSON. A
+    v0.7 fuzz run found **447 crashes in 300 garbage states on shipped main**, every one of
+    them here: `nodes` as a string, `order` holding a dict (an unhashable key), a node that
+    is a list. `next` is the command /learn calls at the start of EVERY session — the
+    hottest path in the product — and a hand-edited graph could take it down mid-lesson.
+
+    The v0.6 fuzz gate never saw it because its read-path list was written from the /coach
+    surface (stats, adherence, retention, decay, report, doctor) and simply forgot the
+    /learn surface. Every test confirms what you already believe; the list you write is the
+    list you already thought of.
+
+    A structurally unusable graph DIES here — a guarded refusal with a fix path, never an
+    AttributeError, and never a silent half-read. It does NOT drop or rewrite anything:
+    mutators save what they read, so a lossy "repair" here would be a data-loss bug wearing
+    a hard hat. Reads that must tolerate partial garbage use `graph_nodes`/`graph_order`."""
     require_slug(topic)
     path = p("graphs", topic + ".json")
     existed = os.path.exists(path)
@@ -407,7 +433,37 @@ def load_graph(topic):
         if existed:
             die("topic %s is corrupt — quarantined to a .corrupt file; run `doctor`" % topic)
         die("unknown topic: %s (run `topics` to list)" % topic)
+    if not isinstance(g, dict) or not isinstance(g.get("nodes"), dict):
+        die("topic %s has an unusable shape (`nodes` must be an object, got %s) — "
+            "run `doctor`, then fix or delete graphs/%s.json"
+            % (topic, type(g.get("nodes")).__name__ if isinstance(g, dict) else type(g).__name__,
+               topic))
     return g
+
+def graph_nodes(g):
+    """The READ view of a graph's nodes: only the entries that are actually nodes.
+
+    A hand-edited graph can hold `"b": ["not", "a", "node"]` or a non-string key. Reads skip
+    those; `doctor` reports them. Never used by a mutator — dropping a node from a view a
+    mutator then SAVED would delete the learner's work to keep a loop tidy."""
+    return {nid: n for nid, n in g["nodes"].items()
+            if isinstance(nid, str) and isinstance(n, dict)}
+
+def graph_order(g, nodes=None):
+    """A safe iteration order: valid ids from `order` first, then any node it forgot.
+
+    `order` is where the curriculum's pedagogy lives, so it leads. But it can contain a dict
+    (unhashable -> `nid in nodes` raises), an int, or a ghost id — and a node missing from
+    `order` entirely must still be reachable, or it would be invisible to `next` forever."""
+    nodes = graph_nodes(g) if nodes is None else nodes
+    raw = g.get("order") if isinstance(g.get("order"), list) else []
+    seen, out = set(), []
+    for nid in raw:
+        if isinstance(nid, str) and nid in nodes and nid not in seen:
+            seen.add(nid)
+            out.append(nid)
+    out.extend(nid for nid in sorted(nodes) if nid not in seen)
+    return out
 
 def save_graph(g):
     require_slug(g.get("topic"))
@@ -455,7 +511,11 @@ STASH_FILE = "pending-verify.jsonl"
 
 def cmd_init(_args):
     load_model()
-    for sub in ("graphs", "receipts", "artifacts"):
+    # `audits` holds the grader audits (v0.7); `gold` is where a learner drops their own
+    # local-gold.jsonl additions. The bundled gold set is NOT copied here on purpose — a
+    # copy would shadow the plugin's set forever, so a v0.8 gold item would never reach a
+    # v0.7 learner. The plugin's file is the source of truth; local is additive.
+    for sub in ("graphs", "receipts", "artifacts", "audits", "gold"):
         os.makedirs(p(sub), exist_ok=True)
     for f, default in (("misconceptions.json", []), ("experiments.json", [])):
         if read_json(p(f)) is None:
@@ -618,7 +678,10 @@ def cmd_add_topic(args):
 
 def state_counts(g):
     counts = {"review": 0, "learning": 0, "new": 0}
-    for node in (g.get("nodes") or {}).values():
+    nodes = g.get("nodes")
+    if not isinstance(nodes, dict):
+        return counts           # `nodes` as a string is TRUTHY, so `or {}` never fired here
+    for node in nodes.values():
         st = node.get("state", "new") if isinstance(node, dict) else "new"
         if not isinstance(st, str):
             st = "new"          # hand-edited garbage: count it, never crash on it
@@ -641,9 +704,13 @@ def cmd_topics(_args):
     emit(out)
 
 def pending_nodes(topic):
-    """Node ids for this topic with a production stashed but not yet graded."""
-    return {e.get("node") for e in read_jsonl(p(STASH_FILE))
-            if e.get("topic") == topic}
+    """Node ids for this topic with a production stashed but not yet graded.
+
+    A stash line can be any JSON after a hand-edit, and an unhashable `node` (a list) would
+    poison the set itself — so the shape is checked before the id is admitted, not after."""
+    return {e["node"] for e in read_jsonl(p(STASH_FILE))
+            if isinstance(e, dict) and e.get("topic") == topic
+            and isinstance(e.get("node"), str)}
 
 def valid_artifact(node):
     """The node's registered explorable (stored string) — or None.
@@ -659,30 +726,39 @@ def valid_artifact(node):
         return None
     return a if os.path.isfile(a if os.path.isabs(a) else p(a)) else None
 
-def requires_met(g, node, provisional=frozenset()):
-    for req in node.get("edges", {}).get("requires", []) or []:
-        other = g["nodes"].get(req)
+def _requires_of(node):
+    """The node's `requires` edges — string ids only. `edges` can be a string after a
+    hand-edit, and `requires` can hold a dict, which is unhashable and crashes an `in`."""
+    edges = node.get("edges")
+    reqs = edges.get("requires") if isinstance(edges, dict) else None
+    return [r for r in reqs if isinstance(r, str)] if isinstance(reqs, list) else []
+
+def requires_met(g, node, provisional=frozenset(), nodes=None):
+    nodes = graph_nodes(g) if nodes is None else nodes
+    for req in _requires_of(node):
+        other = nodes.get(req)
         if other is not None and other.get("state") == "new" and req not in provisional:
             return False
     return True
 
 def cmd_next(args):
     g = load_graph(args.topic)
+    nodes = graph_nodes(g)
     stashed = pending_nodes(args.topic)  # already-produced, awaiting the assessor
-    for nid in g["order"]:
-        node = g["nodes"].get(nid)
-        if node is None or node.get("state") != "new" or nid in stashed:
+    for nid in graph_order(g, nodes):
+        node = nodes[nid]
+        if node.get("state") != "new" or nid in stashed:
             continue  # skip a node whose production is already stashed
         # A stashed-but-ungraded prerequisite counts as provisionally met, so the
         # batch-graded /learn flow can keep advancing instead of dead-ending.
-        if requires_met(g, node, stashed):
-            reqs = [r for r in node.get("edges", {}).get("requires", []) or [] if r in g["nodes"]]
+        if requires_met(g, node, stashed, nodes):
+            reqs = [r for r in _requires_of(node) if r in nodes]
             emit({"topic": args.topic, "id": nid, "node": node,
-                  "requires_claims": {r: g["nodes"][r].get("claim") for r in reqs},
+                  "requires_claims": {r: nodes[r].get("claim") for r in reqs},
                   "provisional_requires": [r for r in reqs
-                                           if r in stashed and g["nodes"][r].get("state") == "new"],
+                                           if r in stashed and nodes[r].get("state") == "new"],
                   "pending_verify": len(stashed),
-                  "remaining_new": sum(1 for n in g["nodes"].values() if n.get("state") == "new")})
+                  "remaining_new": sum(1 for n in nodes.values() if n.get("state") == "new")})
             return
     emit({"topic": args.topic, "id": None, "pending_verify": len(stashed),
           "note": ("frontier nodes remain but are awaiting assessor grading — "
@@ -777,6 +853,14 @@ def make_receipt(item, extra, kind):
     sid = item.get("sid")
     if isinstance(sid, str) and sid:
         receipt["sid"] = sid
+    # Which grader produced this verdict (v0.7, docs/09 §3.3). Recorded when the assessor
+    # states it, NEVER invented: a model guessing its own model-id is exactly the fabricated
+    # data this repo bans, and v1.0's export must be able to carry each receipt's grader so
+    # a shared finding can be weighted by that grader's MEASURED QWK. No v0.7 number keys
+    # off it, so an assessor that omits it costs nothing today — it just stays honestly null.
+    grader = item.get("grader")
+    if isinstance(grader, str) and grader:
+        receipt["grader"] = grader[:64]
     if truncated:
         receipt["production_truncated"] = True
     return receipt
@@ -865,6 +949,13 @@ def apply_item(item, kind):
     node = g["nodes"].get(item["node"])
     if node is None:
         die("unknown node %s in topic %s" % (item["node"], item["topic"]))
+    if not isinstance(node, dict):
+        # REFUSE, never crash and never coerce: advancing a schedule into a corrupt node
+        # would write FSRS state on top of garbage, and receipts are append-only — the bad
+        # evidence could never be taken back. `doctor` reports it; this declines to make it worse.
+        die("node %s in topic %s is corrupt (an object was expected, found %s) — run `doctor`, "
+            "then fix graphs/%s.json before rating it"
+            % (item["node"], item["topic"], type(node).__name__, item["topic"]))
     # Idempotency (issue #3): a settle that already landed must be a no-op, not a second
     # application. `receipt --file` re-run after a crash between `receipt` and `stash clear`
     # used to double-count reps, append an indistinguishable duplicate receipt, and skew
@@ -950,13 +1041,25 @@ def cmd_rate(args):
 def cmd_receipt(args):
     payload = load_payload(args)
     items = payload if isinstance(payload, list) else [payload]
-    # Validate every item AND confirm every node exists before applying ANY, so a
-    # bad item (e.g. a hallucinated node id) can't half-apply the batch.
+    # Validate every item AND confirm every node exists AND IS USABLE before applying ANY, so a
+    # bad item (a hallucinated node id, a corrupt node) can't half-apply the batch.
+    #
+    # The pre-flight used to check EXISTENCE only. v0.7 then added a `die()` inside `apply_item`
+    # for a corrupt (non-dict) node — a new abort path the pre-flight did not screen for — so a
+    # 3-item batch whose middle node was corrupt wrote item 1's receipt and then died. Receipts
+    # are APPEND-ONLY: a half-applied batch cannot be taken back, and a sid-less batch would
+    # double-apply item 1 on the retry. A new refusal must be hoisted into the pre-flight, or it
+    # is not a refusal — it is a tear. (Found by the independent reviewer.)
     for item in items:
         validate_item(item)
         g = load_graph(item["topic"])
-        if item["node"] not in g.get("nodes", {}):
+        node = g.get("nodes", {}).get(item["node"])
+        if node is None:
             die("unknown node %s in topic %s" % (item["node"], item["topic"]))
+        if not isinstance(node, dict):
+            die("node %s in topic %s is corrupt (an object was expected, found %s) — run "
+                "`doctor`; NOTHING in this batch was applied"
+                % (item["node"], item["topic"], type(node).__name__))
     results = [apply_item(item, item.get("kind", "encode")) for item in items]
     emit(results)
 
@@ -1424,6 +1527,571 @@ def _review_receipts(receipts):
         out.extend(slot["reviews"])
     return out
 
+# ============================================================== THE ORACLE (v0.7)
+# The blind assessor's grade drives mastery, retention, calibration, and the schedule
+# itself — and until now its agreement with any ground truth was UNMEASURED. If it is
+# lenient, every number Engram has ever printed is inflated and nothing in the system
+# could discover it. The constitution says "the oracle is never a vibe"; it has been one.
+#
+# Three numbers from the literature shape every threshold below (docs/07 §3):
+#   - LLM judges hit kappa 0.376-0.511 vs human ground truth. Moderate. Well under 0.70.
+#   - Raw agreement OVERSTATES chance-corrected agreement by 33.8-41.2 points. So raw
+#     agreement is a liar and is never allowed to be the headline. QWK is the headline.
+#   - THE PARADOX: one measured judge scored test-retest 0.992 with position bias 0.192 —
+#     perfectly reproducible and systematically wrong. High self-consistency is NOT
+#     evidence of correctness, and Engram's assessor prompt (skeptic, round down, cite the
+#     rubric) selects for exactly that profile. So consistency alone can never certify.
+
+GOLD_SCORE = {"lapsed": 0, "partial": 1, "recalled": 2}   # ordinal; QWK needs the order
+QWK_FLOOR = 0.60        # below this the grader is not trustworthy at all -> teeth
+QWK_TARGET = 0.70       # the conventional threshold for automated scoring -> pass
+BIAS_MAX = 0.15         # signed leniency ceiling: mean(grader - gold), + = inflating
+MIN_AUDIT_N = 30        # below this, the audit says "insufficient-data", never a verdict
+MIN_AUDIT_RUNS = 3      # test-retest needs >=3 runs; with fewer, the paradox check is blind
+PARADOX_RETEST = 0.95   # above this consistency, leniency must be strictly under BIAS_MAX
+
+# What the assessor is allowed to see of a gold item. A WHITELIST, never a blacklist:
+# the assessor never sees `gold_grade`, `case_type`, or `rationale`, and a field added to
+# the gold schema later cannot leak by being forgotten in a delete-list. This is invariant
+# #5 (the assessor is blind) applied to the audit itself — and RELEASE_PROTOCOL §5.5's
+# hardest lesson: a test that hands the subject the answer is not a test.
+GOLD_ASSESSOR_KEYS = ("topic", "node", "sid", "claim", "rubric", "probe",
+                      "production", "confidence", "kind")
+# Everything the assessor must never see. The whitelist above already makes that structural;
+# this list is what the BLINDNESS selftest asserts is absent.
+GOLD_SECRET_KEYS = ("gold_grade", "case_type", "rationale")
+# …but only these two are DIAGNOSTIC OF A LEAK, and only these kill an audit. `rationale` is a
+# key any grader might invent on its own, and accusing an innocent grader of cheating — fatally,
+# so the audit cannot run — is a false positive that costs more than it saves.
+GOLD_ANSWER_KEYS = ("gold_grade", "case_type")
+
+def _plugin_root():
+    """The plugin/repo root — the dir holding scripts/ and gold/. realpath, so a
+    symlinked install still finds the bundled gold set."""
+    return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+def _valid_gold_item(it):
+    if not isinstance(it, dict):
+        return False
+    if not isinstance(it.get("sid"), str) or not it["sid"]:
+        return False
+    if it.get("gold_grade") not in GRADES:
+        return False
+    for k in ("claim", "probe", "production"):
+        if not isinstance(it.get(k), str) or not it[k]:
+            return False
+    if not isinstance(it.get("rubric"), list) or not it["rubric"]:
+        return False
+    return True
+
+def load_gold(override=None):
+    """(items, meta) — the bundled gold set, plus the learner's own additions, WITH PROVENANCE.
+
+    The bundled file is the source of truth and ships with the plugin, so a plugin update
+    delivers new gold items. `gold/local-gold.jsonl` in the state dir is ADDITIVE (a
+    learner's own disputed grades are gold candidates — docs/10 parallel track) and wins
+    on a sid collision, because a human who disputed an adjudication outranks mine.
+
+    **AND THAT IS A LOADED GUN, so the audit must record exactly where its ground truth came
+    from.** A `local-gold.jsonl` that re-adjudicates the bundled sids to agree with the grader
+    turns a `fail` (qwk 0.55, leniency +0.64) into a `pass` (qwk 1.00) — on the DEFAULT path,
+    no flag required — and the first cut of `gold_source` would still have written
+    `"bundled:gold/assessor-gold.jsonl"` into the audit file. Not merely silent: **actively
+    false**, and false in the flattering direction. (Found by the independent reviewer, in the
+    fix written to answer §4.8 Q5. A provenance field that lies is worse than no provenance
+    field, because it is believed.)
+
+    So: count the overrides, count the additions, and let the caller put both in the read.
+
+    `skipped` is likewise returned and never swallowed: a malformed gold item that silently
+    vanished would shrink the denominator invisibly."""
+    if override:
+        raw = read_jsonl(override)
+        bundled_sids, local_sids = set(), set()
+        source, modified = os.path.abspath(override), True    # not the shipped ground truth
+    else:
+        bundled = read_jsonl(os.path.join(_plugin_root(), "gold", "assessor-gold.jsonl"))
+        local = read_jsonl(p("gold", "local-gold.jsonl"))
+        bundled_sids = {it["sid"] for it in bundled if _valid_gold_item(it)}
+        local_sids = {it["sid"] for it in local if _valid_gold_item(it)}
+        raw = bundled + local
+        source, modified = "bundled:gold/assessor-gold.jsonl", bool(local_sids)
+        if modified:
+            source = ("bundled + gold/local-gold.jsonl (%d re-adjudicated, %d added)"
+                      % (len(local_sids & bundled_sids), len(local_sids - bundled_sids)))
+    items, skipped = {}, 0
+    for it in raw:
+        if _valid_gold_item(it):
+            items[it["sid"]] = it        # later (local) wins on a sid collision
+        else:
+            skipped += 1
+    return list(items.values()), {
+        "source": source,
+        "skipped": skipped,
+        "local_overrides": len(local_sids & bundled_sids),   # bundled adjudications REPLACED
+        "local_added": len(local_sids - bundled_sids),       # brand-new items
+        "modified": modified,          # ← the flag that must reach the narrator
+    }
+
+def cmd_gold(_args):
+    """Emit the gold set SHAPED EXACTLY LIKE `stash list` — a bare array, answer stripped.
+
+    This is what /coach audit feeds the real assessor, and the shape is the point: `gold >
+    f.json` must be a drop-in for `stash list > f.json`, because an audit that hands the
+    grader anything the real skill would not hand it measures a grader that does not exist.
+    v0.6 shipped a dead feature that a dogfood CERTIFIED, purely because the dogfood prompt
+    told the assessor something /learn never tells it (RELEASE_PROTOCOL §5.5).
+
+    So: no envelope, no counts, no instructions — stdout is exactly the payload. The skipped
+    count goes to STDERR (a human sees it; the JSON pipe stays clean) and is re-reported in
+    the audit's own coverage block, so it never goes unsaid."""
+    items, meta = load_gold()
+    if meta["skipped"]:
+        sys.stderr.write("engram: %d malformed gold item(s) skipped\n" % meta["skipped"])
+    if meta["modified"]:
+        sys.stderr.write("engram: ground truth is %s\n" % meta["source"])
+    emit([{k: it.get(k) for k in GOLD_ASSESSOR_KEYS} for it in items])
+
+def _qwk(pairs):
+    """Quadratic weighted kappa over (gold, grader) grade pairs. None if undefined.
+
+    THE headline. Raw agreement overstates chance-corrected agreement by 34-41 points in
+    the measured literature, so it is reported but never quoted alone. Returns None when
+    the expected-disagreement mass is zero (both raters degenerate onto one category) —
+    None, not 1.0: an undefined agreement must never read as a perfect one, because that
+    is a wrong number in the flattering direction, which is bug class #1 in this repo."""
+    k = len(GRADES)
+    n = len(pairs)
+    if not n:
+        return None
+    obs = [[0] * k for _ in range(k)]
+    for gold, grader in pairs:
+        obs[GOLD_SCORE[gold]][GOLD_SCORE[grader]] += 1
+    row = [sum(obs[i]) for i in range(k)]
+    col = [sum(obs[i][j] for i in range(k)) for j in range(k)]
+    num = den = 0.0
+    for i in range(k):
+        for j in range(k):
+            w = ((i - j) ** 2) / float((k - 1) ** 2)
+            num += w * obs[i][j]
+            den += w * (row[i] * col[j] / float(n))
+    if den == 0:
+        return None
+    return 1.0 - num / den
+
+def _fmt(x, sign=False):
+    """A number for a human, or the honest word for its absence. Never crashes on None —
+    an audit read is the one string a learner is guaranteed to see."""
+    if not isinstance(x, (int, float)) or isinstance(x, bool):
+        return "not measured"
+    return ("%+.2f" if sign else "%.2f") % x
+
+def _audit_runs(payload):
+    """Normalize the audit payload into a list of runs (each a list of graded items)."""
+    if isinstance(payload, list):
+        if payload and all(isinstance(x, list) for x in payload):
+            return payload               # [[...], [...], [...]]
+        return [payload]                 # a single run, as the assessor emits it
+    if isinstance(payload, dict):
+        runs = payload.get("runs")
+        if isinstance(runs, list) and all(isinstance(x, list) for x in runs):
+            return runs
+        one = payload.get("run")
+        if isinstance(one, list):
+            return [one]
+    die("audit payload must be the assessor's output array, a list of >=%d such arrays, "
+        "or {\"grader\": \"...\", \"runs\": [[...], ...]}" % MIN_AUDIT_RUNS)
+
+def _run_grades(run):
+    """({sid: grade}, duplicate_sids) for one assessor run.
+
+    **FIRST grade wins on a duplicate sid, and the duplicate is REPORTED.** The first cut did
+    `out[sid] = grade` — last-wins — so a grader that got 12 items badly wrong and then
+    re-emitted those same 12 sids with corrected grades later in the array turned a `fail`
+    (qwk 0.00, leniency +0.67) into a `pass` (qwk 1.00), silently. `n` stayed 33 and nothing
+    said a word.
+
+    That is the mirror image of the dropped-sid bug the coverage guard already catches: same
+    class, opposite mechanism, and an LLM assessor self-correcting mid-array produces it for
+    free. A grader does not get to mark its own homework twice and keep the better score.
+
+    Items without a usable sid+grade are dropped here and counted by the caller — a dropped
+    item is a coverage failure, not a silence."""
+    out, dupes = {}, set()
+    for it in run:
+        if not isinstance(it, dict):
+            continue
+        sid, grade = it.get("sid"), it.get("grade")
+        if isinstance(sid, str) and sid and grade in GRADES:
+            if sid in out:
+                dupes.add(sid)      # keep the FIRST verdict; the re-do is evidence, not a fix
+                continue
+            out[sid] = grade
+    return out, dupes
+
+def cmd_assessor_audit(args):
+    """Measure the grader that writes every receipt. Writes audits/<date>-NN.json.
+
+    ONE denominator for every number in this payload: the set of gold items graded in
+    EVERY run. Per-run denominators would let a grader that dropped half the set report a
+    beautiful QWK over the half it kept — survivorship bias, wearing a lab coat."""
+    payload = load_payload(args)
+    runs = _audit_runs(payload)
+    grader = "engram-assessor"
+    if isinstance(payload, dict) and isinstance(payload.get("grader"), str) and payload["grader"]:
+        grader = payload["grader"][:64]
+
+    # CONTAMINATION GUARD. If the grader's output carries the gold answer, the grader was
+    # shown the gold answer, and the audit is theatre. Die loudly rather than certify.
+    #
+    # NARROWED to the two keys that could ONLY have come from the gold schema. The first cut
+    # also died on `rationale` — which is an extremely natural key for a grader to invent
+    # unprompted, and killing the audit to accuse an innocent grader of cheating is a
+    # false-positive that makes the feature unrunnable. `gold_grade` IS the answer;
+    # `case_type` all but is (terse-but-correct -> recalled 10/10, confident-and-wrong ->
+    # lapsed 10/10). Neither has any business in a grader's output, ever.
+    for run in runs:
+        for it in run:
+            if isinstance(it, dict) and any(k in it for k in GOLD_ANSWER_KEYS):
+                die("audit payload carries %s — the grader was shown the answer, so this "
+                    "audit would be theatre. Feed the assessor `engram.py gold` output "
+                    "verbatim and nothing else (RELEASE_PROTOCOL §5.5)."
+                    % "/".join(k for k in GOLD_ANSWER_KEYS if k in it))
+
+    gold, gold_meta = load_gold(getattr(args, "gold", None))
+    skipped = gold_meta["skipped"]
+    by_sid = {g["sid"]: g for g in gold}
+    parsed = [_run_grades(r) for r in runs]
+    graded = [g for g, _ in parsed]
+    dupes = sorted({sid for _, d in parsed for sid in d})
+
+    # THE HONEST DENOMINATOR: graded in every run, and known to the gold set.
+    matched = sorted(sid for sid in by_sid if all(sid in g for g in graded)) if graded else []
+    ungraded = sorted(sid for sid in by_sid if sid not in matched)
+    unknown = sorted({sid for g in graded for sid in g if sid not in by_sid})
+
+    # Are the runs literally the same object three times? The engine cannot prove independence
+    # — nothing can, from the outside — but it can refuse to ASSERT a reproducibility figure it
+    # may not have measured. Three copy-pasted runs give test_retest 1.00 and satisfy both
+    # MIN_AUDIT_RUNS and the paradox gate, which exist precisely to prevent certification
+    # without a reproducibility measurement. (A genuinely deterministic grader also produces
+    # identical runs, which is why this is a caveat and not a refusal — the ambiguity is real,
+    # so the ambiguity is what gets published.)
+    identical_runs = len(graded) > 1 and all(g == graded[0] for g in graded[1:])
+
+    per_run, confusion, by_case = [], {}, {}
+    up = down = exact_n = 0            # THE DIRECTION OF ERROR — see `direction` below
+    for g in graded:
+        pairs = [(by_sid[sid]["gold_grade"], g[sid]) for sid in matched]
+        if not pairs:
+            per_run.append({"n": 0, "qwk": None, "exact_agreement": None,
+                            "leniency_bias": None})
+            continue
+        exact = sum(1 for a, b in pairs if a == b) / float(len(pairs))
+        bias = sum(GOLD_SCORE[b] - GOLD_SCORE[a] for a, b in pairs) / float(len(pairs))
+        q = _qwk(pairs)
+        per_run.append({"n": len(pairs), "qwk": (round(q, 3) if q is not None else None),
+                        "exact_agreement": round(exact, 3), "leniency_bias": round(bias, 3)})
+        for sid in matched:
+            a, b = by_sid[sid]["gold_grade"], g[sid]
+            confusion["%s->%s" % (a, b)] = confusion.get("%s->%s" % (a, b), 0) + 1
+            if GOLD_SCORE[b] > GOLD_SCORE[a]:
+                up += 1                # graded UP = inflated. THE dangerous direction.
+            elif GOLD_SCORE[b] < GOLD_SCORE[a]:
+                down += 1              # graded DOWN = harsh. Costly, but never flattering.
+            else:
+                exact_n += 1
+            ct = by_sid[sid].get("case_type") or "unclassified"
+            slot = by_case.setdefault(ct, {"items": set(), "judgments": 0, "agree": 0,
+                                           "bias_sum": 0.0})
+            slot["items"].add(sid)
+            slot["judgments"] += 1
+            slot["agree"] += 1 if a == b else 0
+            slot["bias_sum"] += GOLD_SCORE[b] - GOLD_SCORE[a]
+
+    def _mean(key):
+        vals = [r[key] for r in per_run if r.get(key) is not None]
+        return round(sum(vals) / len(vals), 3) if vals else None
+
+    qwk, exact_agreement, leniency_bias = _mean("qwk"), _mean("exact_agreement"), _mean("leniency_bias")
+    qwks = [r["qwk"] for r in per_run if r.get("qwk") is not None]
+    qwk_min = min(qwks) if qwks else None
+
+    # TEST-RETEST: consistency across runs. Reported, and DELIBERATELY never sufficient.
+    retest = None
+    if len(graded) >= 2 and matched:
+        agrees = [sum(1 for sid in matched if a[sid] == b[sid]) / float(len(matched))
+                  for i, a in enumerate(graded) for b in graded[i + 1:]]
+        retest = round(sum(agrees) / len(agrees), 3) if agrees else None
+
+    # ITEMS and JUDGMENTS are different denominators and must never share a key called `n`.
+    # The first cut emitted `n: 30` for a case type that has TEN items — 30 was judgments
+    # (10 items x 3 runs), and nothing said so. That is the v0.6.4 unlabelled-denominator bug
+    # reproduced inside the release built to catch unlabelled denominators (§4.8 Q3). Name it,
+    # count it, publish it beside the rate.
+    by_case_type = {ct: {"items": len(s["items"]), "judgments": s["judgments"],
+                         "agreement": round(s["agree"] / float(s["judgments"]), 3),
+                         "leniency_bias": round(s["bias_sum"] / float(s["judgments"]), 3)}
+                    for ct, s in sorted(by_case.items()) if s["judgments"]}
+
+    # THE DIRECTION OF ERROR — the single most decision-relevant fact in the whole payload,
+    # and the first cut left it derivable-but-unstated inside `confusion`, which nothing reads.
+    # `leniency_bias` is a MEAN: +0.00 is equally consistent with a perfect grader and with one
+    # that inflates half the set and deflates the other half. Only the direction counts
+    # distinguish them, and the difference is the entire safety argument:
+    #   graded UP   -> the learner is told they know something they do not. They stop reviewing.
+    #   graded DOWN -> the learner re-drills something they had earned. Costly, never flattering.
+    direction = {"graded_up": up, "graded_down": down, "exact": exact_n,
+                 "judgments": up + down + exact_n,
+                 "note": ("`graded_up` is the only direction that can flatter a learner into "
+                          "not reviewing. A mean bias near zero does NOT imply zero inflation — "
+                          "it can also mean the grader inflates as often as it deflates.")}
+
+    n = len(matched)
+    # A run that graded the same sid twice did not cover the gold set — it covered part of it
+    # and then had a second go. Same class as a dropped sid, so it lands in the same guard.
+    coverage_complete = bool(gold) and not ungraded and not unknown and not dupes
+    reasons = []
+    if gold_meta["modified"]:
+        reasons.append(
+            "GROUND TRUTH IS NOT THE SHIPPED GOLD SET: %s. This verdict is not comparable to "
+            "the published QWK, and a gold set re-adjudicated to agree with the grader would "
+            "certify anything." % gold_meta["source"])
+    if dupes:
+        reasons.append(
+            "%d sid(s) were graded MORE THAN ONCE in a single run (%s) — the first verdict was "
+            "kept and the re-do discarded. A grader does not get to mark its own homework twice "
+            "and keep the better score."
+            % (len(dupes), ", ".join(dupes[:4])))
+    if identical_runs:
+        reasons.append(
+            "all %d runs returned IDENTICAL grades — so test-retest measures nothing here. "
+            "Either the grader is perfectly deterministic, or the runs were not independent, "
+            "and this figure cannot tell those apart." % len(runs))
+    if ungraded:
+        reasons.append("coverage: %d of %d gold items were not graded in every run (the "
+                       "assessor dropped their sid, or graded them inconsistently across "
+                       "runs) — every number here is computed over the %d that survived"
+                       % (len(ungraded), len(gold), n))
+    if unknown:
+        reasons.append("coverage: %d graded sid(s) are not in the gold set (%s)"
+                       % (len(unknown), ", ".join(unknown[:4])))
+    if skipped:
+        reasons.append("gold set: %d malformed item(s) skipped" % skipped)
+    if qwk is None:
+        reasons.append("QWK undefined — the grader (or the gold set) has no variance to "
+                       "measure agreement against")
+    elif qwk < QWK_FLOOR:
+        reasons.append("QWK %.2f is below the %.2f floor — the grader does not agree with "
+                       "human adjudication well enough to trust any number downstream"
+                       % (qwk, QWK_FLOOR))
+    if leniency_bias is not None and leniency_bias > BIAS_MAX:
+        reasons.append("leniency_bias +%.2f exceeds the +%.2f ceiling — the grader INFLATES, "
+                       "so every retention figure it feeds is too high" % (leniency_bias, BIAS_MAX))
+    # THE PARADOX GATE. High self-consistency is what a reliably-LENIENT grader also looks
+    # like, and Engram's prompt selects for consistency. So consistency may never certify
+    # on its own: above PARADOX_RETEST, leniency must be STRICTLY under the ceiling.
+    paradox = (retest is not None and retest > PARADOX_RETEST
+               and leniency_bias is not None and leniency_bias >= BIAS_MAX)
+    if paradox:
+        reasons.append("THE CONSISTENCY-BIAS PARADOX: test-retest %.2f with leniency +%.2f. "
+                       "A grader this reproducible and this lenient is not a good grader — "
+                       "it is a reliably wrong one (docs/07 §3). Consistency is not validity."
+                       % (retest, leniency_bias))
+
+    teeth = (qwk is None or qwk < QWK_FLOOR
+             or (leniency_bias is not None and leniency_bias > BIAS_MAX) or paradox)
+    if n < MIN_AUDIT_N:
+        verdict = "insufficient-data"
+        reasons.insert(0, "n=%d < %d — not enough adjudicated items to say anything about "
+                          "this grader" % (n, MIN_AUDIT_N))
+    elif not coverage_complete:
+        verdict = "incomplete"          # the QWK is over a subset the GRADER chose. Untrustworthy.
+    elif teeth:
+        verdict = "fail"
+    elif len(runs) < MIN_AUDIT_RUNS:
+        verdict = "insufficient-runs"   # the paradox check never ran, so nothing may be certified
+        reasons.append("only %d run(s) — the consistency-bias paradox cannot be checked "
+                       "below %d, and an unchecked paradox may not be certified as a pass"
+                       % (len(runs), MIN_AUDIT_RUNS))
+    elif qwk < QWK_TARGET:
+        verdict = "warn"
+        reasons.append("QWK %.2f clears the %.2f floor but is under the %.2f conventional "
+                       "target for automated scoring" % (qwk, QWK_FLOOR, QWK_TARGET))
+    else:
+        verdict = "pass"
+
+    if verdict == "pass":
+        # `pass` structurally implies runs >= MIN_AUDIT_RUNS and matched non-empty, so retest
+        # and leniency are real numbers here. Formatted defensively anyway: a %.2f against a
+        # None raises TypeError, and the ONLY thing standing between this line and that crash
+        # is a branch three ifs up the ladder. The §4.5 mutation run found this by bypassing
+        # that branch — a latent landmine for whoever next edits the verdict order.
+        read = ("grader validated: QWK %s over %d adjudicated items, %d runs; leniency %s; "
+                "test-retest %s"
+                % (_fmt(qwk), n, len(runs), _fmt(leniency_bias, sign=True), _fmt(retest)))
+    elif qwk is not None:
+        read = "QWK %.2f (n=%d, %d runs) — %s" % (qwk, n, len(runs), "; ".join(reasons))
+    else:
+        read = "; ".join(reasons) or "no measurement could be made"
+    # The direction of error reaches the NARRATOR, not just a nested key (§4.8 Q4). "It never
+    # once graded up" and "it inflates 1 in 12" are the same mean bias and opposite products.
+    if direction["judgments"]:
+        read += (" · of %d judgments it graded UP %d time%s (the only direction that can flatter) "
+                 "and DOWN %d"
+                 % (direction["judgments"], up, "" if up == 1 else "s", down))
+    # Name the weakest case type ONLY when it is genuinely weak — i.e. worse than the
+    # grader's own average. On a clean audit, "weakest: clear-lapsed (100% agreement)" is
+    # noise that reads like a defect. The whole value of this clause is that it points at
+    # the case type the grader actually fails (docs/09 §4.4: "inflates fluent-but-empty
+    # productions — the exact failure the separation of powers exists to prevent").
+    worst = min(by_case_type.items(), key=lambda kv: kv[1]["agreement"], default=None)
+    if (worst and worst[1]["judgments"] >= 3 and exact_agreement is not None
+            and worst[1]["agreement"] < exact_agreement):
+        read += (" · weakest case type: %s (%.0f%% agreement over %d items, leniency %+.2f)"
+                 % (worst[0], 100 * worst[1]["agreement"], worst[1]["items"],
+                    worst[1]["leniency_bias"]))
+
+    audit = {
+        "ts": today().isoformat(), "grader": grader,
+        "n": n, "gold_n": len(gold), "runs": len(runs),
+        "qwk": qwk,                        # THE headline
+        "qwk_min_run": qwk_min,
+        "exact_agreement": exact_agreement,  # reported, NEVER quoted alone (34-41pt inflation)
+        "leniency_bias": leniency_bias,      # signed; + = inflating
+        "test_retest": retest,               # consistency, NOT correctness
+        "direction": direction,            # ← the safety argument, in three integers
+        "confusion": confusion,            # counts are JUDGMENTS (items x runs), not items
+        "by_case_type": by_case_type,
+        "by_run": per_run,
+        # WHICH ground truth produced this verdict (§4.8 Q5) — reported HONESTLY, which the
+        # first cut did not: it hard-coded "bundled" even when gold/local-gold.jsonl had
+        # silently re-adjudicated every item. A provenance field that lies is worse than none,
+        # because it is believed. `load_gold` now counts the overrides and this reports them.
+        "gold_source": gold_meta["source"],
+        "gold_modified": gold_meta["modified"],
+        "gold_local_overrides": gold_meta["local_overrides"],
+        "gold_local_added": gold_meta["local_added"],
+        "identical_runs": identical_runs,
+        "duplicate_sids": dupes,
+        # The gold set is 88% ADVERSARIAL BY DESIGN, so this bias is measured on the cases where
+        # graders fail — not on the mix of productions a learner actually writes. It is the right
+        # number for "can this grader be fooled"; it is an upper bound on "how wrong are my
+        # receipts". Saying so is cheaper than being quietly misread.
+        "bias_note": ("leniency_bias is measured over a deliberately adversarial gold set "
+                      "(88% trap cases). It bounds how far the grader CAN be pushed; it is not "
+                      "an unbiased estimate of its bias on ordinary productions."),
+        "coverage": {"gold_n": len(gold), "measured": n,
+                     "ungraded": ungraded, "unknown_sids": unknown, "duplicate_sids": dupes,
+                     "gold_skipped_malformed": skipped, "complete": coverage_complete},
+        "thresholds": {"qwk_floor": QWK_FLOOR, "qwk_target": QWK_TARGET,
+                       "bias_max": BIAS_MAX, "min_n": MIN_AUDIT_N,
+                       "min_runs": MIN_AUDIT_RUNS, "paradox_retest": PARADOX_RETEST},
+        "paradox_triggered": paradox,
+        "grader_unvalidated": verdict not in ("pass", "warn"),
+        "verdict": verdict,
+        "reasons": reasons,
+        "read": read,
+    }
+    # Audits are EVIDENCE, so they are append-only like receipts: a same-day re-audit gets
+    # its own file and never overwrites the earlier one. (docs/09 §3.4 said <date>.json;
+    # a second audit that day would have destroyed the first, and destroying evidence to
+    # keep a filename tidy is not a trade this project makes.)
+    os.makedirs(p("audits"), exist_ok=True)
+    seq = 1
+    while os.path.exists(p("audits", "%s-%02d.json" % (audit["ts"], seq))):
+        seq += 1
+    path = p("audits", "%s-%02d.json" % (audit["ts"], seq))
+    write_json(path, audit)
+    emit({**audit, "path": path})
+
+def _audit_sort_key(name):
+    """("2026-07-11", 2) from "2026-07-11-02.json". NUMERIC on the sequence, never lexicographic.
+
+    A plain string sort puts `...-100.json` BEFORE `...-99.json`, so the 100th audit of a day —
+    a `fail` — would be shadowed by the 99th, a `pass`. Improbable and flattering, which is the
+    worst combination: the function's own docstring swears it never serves a stale pass."""
+    stem = name[:-5] if name.endswith(".json") else name
+    head, _, tail = stem.rpartition("-")
+    try:
+        return (head, int(tail))
+    except ValueError:
+        return (stem, -1)          # an unrecognised name sorts before any real audit
+
+def _latest_audit():
+    """The newest audit file, or None. Never falls back to an older one on corruption:
+    a stale `pass` shown because today's audit is unreadable is a flattering lie."""
+    d = p("audits")
+    try:
+        names = sorted((f for f in os.listdir(d) if f.endswith(".json")), key=_audit_sort_key)
+    except OSError:
+        return None
+    if not names:
+        return None
+    latest = names[-1]
+    a = read_json(os.path.join(d, latest), quarantine=False)
+    if not isinstance(a, dict) or a.get("verdict") not in (
+            "pass", "warn", "fail", "incomplete", "insufficient-runs", "insufficient-data"):
+        return {"__unreadable__": latest}
+    return a
+
+def compute_grader_health():
+    """The teeth. An unaudited oracle makes every number downstream unearned.
+
+    `grader_unvalidated` is TRUE until an audit says otherwise — including when no audit
+    has ever run. That is not pessimism, it is the constitution: no unearned claims. It
+    fails toward "we don't know", never toward "it's fine"."""
+    a = _latest_audit()
+    if a is None:
+        return {"audited": False, "verdict": "unaudited", "grader_unvalidated": True,
+                "stamp": "grader unaudited — QWK unknown; run /coach audit",
+                "read": ("the grader that writes every receipt has never itself been "
+                         "graded. Its agreement with human adjudication is unknown, so "
+                         "every number it feeds is unearned. `/coach audit` measures it "
+                         "in about four minutes.")}
+    if "__unreadable__" in a:
+        return {"audited": False, "verdict": "unreadable", "grader_unvalidated": True,
+                "stamp": "latest audit file is corrupt — grader unvalidated",
+                "read": ("audits/%s is unreadable. Refusing to fall back to an older "
+                         "audit: a stale pass is worse than no pass. Re-run /coach audit."
+                         % a["__unreadable__"])}
+    # An audit file whose `verdict` is a valid literal can still hold garbage in every OTHER
+    # field after a hand-edit — and every one of them is now interpolated into the dashboard's
+    # HTML. `escape()` on a list raises AttributeError and takes `report` (and `stats`, and
+    # therefore /coach) down with it. Sanitize at THIS gate, not at the twelve call sites.
+    _num = lambda k: (a.get(k) if isinstance(a.get(k), (int, float))
+                      and not isinstance(a.get(k), bool) else None)
+    _str = lambda k: (a[k] if isinstance(a.get(k), str) else None)
+    unval = bool(a.get("grader_unvalidated", True))
+    qwk = _num("qwk")
+    if unval:
+        stamp = "GRADER UNVALIDATED (%s) — these grades are not trustworthy" % a.get("verdict")
+    elif a.get("gold_modified"):
+        # A `pass` measured against a locally re-adjudicated gold set is not the shipped
+        # measurement, and it must never look like one. A gold set edited to agree with the
+        # grader would certify anything — so the fact rides on the stamp, not in a nested key.
+        stamp = ("grader passed against a MODIFIED gold set (%s) — not the published measurement"
+                 % (_str("gold_source") or "unknown source"))
+    elif a.get("verdict") == "warn":
+        stamp = "grader QWK %s — clears the floor, under the %.2f target" % (_fmt(qwk), QWK_TARGET)
+    else:
+        stamp = None
+    d = a.get("direction")
+    return {"audited": True, "ts": _str("ts"), "grader": _str("grader"),
+            "n": _num("n"), "runs": _num("runs"), "qwk": qwk,
+            "exact_agreement": _num("exact_agreement"),
+            "leniency_bias": _num("leniency_bias"), "test_retest": _num("test_retest"),
+            "direction": d if isinstance(d, dict) else None,   # /coach must be able to say "never inflated"
+            "by_case_type": (a["by_case_type"] if isinstance(a.get("by_case_type"), dict) else {}),
+            "gold_source": _str("gold_source"),   # a verdict is only as good as its ground truth
+            "gold_modified": bool(a.get("gold_modified")),
+            "identical_runs": bool(a.get("identical_runs")),
+            "verdict": a.get("verdict"), "grader_unvalidated": unval,
+            "stamp": stamp, "read": _str("read") or "audit present but unreadable"}
+
+def cmd_grader_health(_args):
+    emit(compute_grader_health())
+
 def compute_adherence():
     """The funnel: encoded -> came due -> was actually reviewed.
 
@@ -1612,7 +2280,29 @@ def compute_retention():
                 "the windows no longer partition [0,inf). Fix RETENTION_BUCKETS before "
                 "believing any number here. (%s)"
                 % (total_reviews - bucketed, total_reviews, read))
+    # THE TEETH (v0.7). Every figure in this block is a count of the ASSESSOR's verdicts, so
+    # it is only as true as the assessor. Stamped HERE, in the one function every caller
+    # funnels through (`stats`, `cmd_retention`, the dashboard), because v0.6.4's lesson was
+    # that a rule implemented in four places is a rule wrong in three. And the stamp reaches
+    # the `read` STRING, not just a nested key: a guard nobody reads cannot trip (§4.8 Q4).
+    #
+    # BUT ONLY WHEN THERE IS A FIGURE TO QUALIFY. The §5.6 user session, run against the
+    # founder's real state, produced this:
+    #
+    #     "[grader unaudited — QWK unknown; run /coach audit] insufficient-data (no reviews yet)"
+    #
+    # A caveat on a number that does not exist. There are no grades to distrust, because there
+    # are no retrievals — and it stacked a second reproach on top of "THE LOOP HAS NEVER
+    # CLOSED", which is precisely the wall-of-debt the constitution forbids (docs/05 P13/P14:
+    # information, never pressure). The flag stays TRUE in the payload — it is a true fact
+    # about the grader, and /coach reads it — but a narrator is not handed a disclaimer for a
+    # measurement nobody made. The moment one retrieval lands, the stamp lands with it.
+    gh = compute_grader_health()
+    if gh.get("stamp") and bucketed:
+        read = "[%s] %s" % (gh["stamp"], read)
     return {
+        "grader_unvalidated": gh["grader_unvalidated"],
+        "grader_verdict": gh["verdict"],
         "buckets": buckets,
         "definition": ("of retrievals attempted N days after a concept was FIRST encoded, the "
                        "fraction graded recalled-or-partial. Windows partition [0, inf): "
@@ -1677,6 +2367,9 @@ def compute_stats():
         # has never closed, nothing below it is real yet (docs/10 v0.6).
         "adherence": compute_adherence(),
         "retention": compute_retention(),
+        # The oracle behind every grade above. /coach reports its verdict BEFORE any
+        # retention number, because an unaudited grader makes all of them unearned.
+        "grader_health": compute_grader_health(),
         "recall_by_stability": recall,
         "calibration": calibration,
         "calibration_encode": calibration_encode,
@@ -1859,25 +2552,29 @@ STATE_DOTS = {"review": "●", "learning": "◐", "new": "·"}
 
 def cmd_topic_status(args):
     g = load_graph(args.topic)
+    nodes = graph_nodes(g)
     counts = state_counts(g)
-    total = max(1, len(g["nodes"]))
+    total = max(1, len(nodes))
     width = 24
     filled = int(round(width * counts["review"] / total))
     half = int(round(width * counts["learning"] / total))
     bar = "█" * filled + "▒" * half + "░" * max(0, width - filled - half)
-    lines = ["%s — %s" % (g["topic"], g.get("title", "")),
+    title = g.get("title")
+    lines = ["%s — %s" % (args.topic, title if isinstance(title, str) else ""),
              "%s  %d retained · %d learning · %d untouched" % (
                  bar, counts["review"], counts["learning"], counts["new"]), ""]
-    for nid in g["order"]:
-        node = g["nodes"].get(nid)
-        if node is None:
-            continue
+    for nid in graph_order(g, nodes):
+        node = nodes[nid]
         fsrs = _fsrs_of(node)
         due = fsrs.get("due") or "—"
         s = as_number(fsrs.get("s"))
         flags = ("†" if node.get("threshold") else "") + ("*" if node.get("arbitrary") else "")
+        st = node.get("state")
         lines.append("%s %-34s%-2s due %-10s S=%s" % (
-            STATE_DOTS.get(node.get("state"), "?"), nid, flags, due,
+            # an UNHASHABLE state (a dict/list after a hand-edit) raises TypeError on the
+            # dict lookup itself — the same crash class state_counts was already guarded for
+            STATE_DOTS.get(st, "?") if isinstance(st, str) else "?",
+            nid, flags, due if isinstance(due, str) else "—",
             ("%.1fd" % s) if s else "—"))
     lines.append("")
     lines.append("● retained (review)   ◐ learning   · untouched   † threshold   * memorize-only")
@@ -2195,6 +2892,7 @@ def cmd_report(args):
     # v0.6: the binding constraint and the north star lead the dashboard, because a
     # dashboard that opens with calibration over a loop that never closed is decor.
     ad, ret = stats["adherence"], stats["retention"]
+    gh = stats["grader_health"]          # v0.7: computed since v0.7, RENDERED since v0.7.1
     lc = ad["loop_closure"]
     parts.append("<h2>The loop</h2>")
     if lc["rate"] is None:
@@ -2212,6 +2910,19 @@ def cmd_report(args):
                      "multiplied by it.</p>" % escape(lc["read"]))
 
     parts.append("<h2>Retention — recall by days since you first learned it</h2>")
+    # THE TEETH, ON THE SCREEN. `ret["read"]` is the ONLY carrier of the grader stamp, and the
+    # first cut rendered it exclusively in the `else` branch — i.e. only when there was NO
+    # retention data to qualify. On the happy path it drew the bars and dropped the stamp, so a
+    # grader that inflated every second item produced a full-width green bar reading 100% with
+    # nothing anywhere to say the grade behind it had failed its own audit.
+    #
+    # That is bug class #1 (a flattering number) and #4 (a guard nobody reads), on the single
+    # surface where a number is MOST believed — and `compute_retention`'s own comment claimed
+    # the dashboard was covered. It funnelled through the function and then threw the result away.
+    # Found by the independent adversarial reviewer; the live test, the fuzz, the numbers audit
+    # and the user session had all walked straight past it, because every one of them reads JSON.
+    if gh.get("stamp"):
+        parts.append("<p class='note' style='color:var(--bad)'><b>%s</b></p>" % escape(gh["stamp"]))
     if any(b["n"] for b in ret["buckets"].values()):
         for key, label in (("early", "0–3d (still encoding)"), ("7d", "4–14d"),
                            ("30d", "15–59d"), ("90d", "60–179d"), ("180d+", "180d+")):
@@ -2222,8 +2933,7 @@ def cmd_report(args):
                          "<span class='track'><span class='fill' style='width:%d%%'></span></span>"
                          "<span class='val'>%d%% · n=%d</span></div>"
                          % (escape(label), int(b["rate"] * 100), int(b["rate"] * 100), b["n"]))
-    else:
-        parts.append("<p class='note'>%s</p>" % escape(ret["read"]))
+    parts.append("<p class='note'>%s</p>" % escape(ret["read"]))   # unconditionally, always
     u = ret["unmeasured"]
     if u["past_due_now"]:
         parts.append("<p class='note' style='color:var(--bad)'><b>%d concept%s past due and "
@@ -2235,8 +2945,28 @@ def cmd_report(args):
                         u["never_reviewed"],
                         int(round((u["projected_recall_now"] or 0) * 100))))
     if not ret["coverage"]["complete"]:
-        parts.append("<p class='note' style='color:var(--bad)'><b>%s</b></p>"
-                     % escape(ret["read"]))
+        parts.append("<p class='note' style='color:var(--bad)'><b>coverage incomplete — see above</b></p>")
+
+    # THE ORACLE (v0.7). Every number above is a count of the assessor's verdicts, so the
+    # dashboard has to say who the assessor is and whether anyone has ever checked it.
+    parts.append("<h2>The grader behind every number above</h2>")
+    # every value here can be garbage from a hand-edited audit file, so str() then escape()
+    if not gh.get("audited"):
+        parts.append("<p class='note'>%s</p>" % escape(str(gh["read"])))
+    else:
+        d = gh.get("direction") or {}
+        up, judged = d.get("graded_up"), d.get("judgments")
+        chips = [("QWK", _fmt(gh.get("qwk"))), ("leniency", _fmt(gh.get("leniency_bias"), sign=True)),
+                 ("test–retest", _fmt(gh.get("test_retest"))), ("items", str(gh.get("n"))),
+                 ("runs", str(gh.get("runs"))), ("verdict", str(gh.get("verdict")))]
+        if isinstance(up, int) and isinstance(judged, int) and judged:
+            chips.insert(2, ("graded UP", "%d / %d" % (up, judged)))
+        parts.append("<div class='chips'>%s</div>" % "".join(
+            "<span class='chip'>%s <b>%s</b></span>" % (escape(str(k)), escape(str(v)))
+            for k, v in chips))
+        parts.append("<p class='note'>%s</p>" % escape(str(gh.get("read") or "")))
+        parts.append("<p class='note'>Raw agreement is never quoted alone: it overstates "
+                     "chance-corrected agreement by 34–41 points. <b>QWK is the headline.</b></p>")
 
     parts.append("<h2>Recall by memory strength <span class='note' style='font-size:13px;font-weight:400'>(the older view — grouped by how durable the memory is, not by how long ago you learned it)</span></h2>")
     if stats["recall_by_stability"]:
@@ -2341,7 +3071,25 @@ def cmd_selftest(_args):
     total = [0]
     failures = []
     def check(name, cond):
+        """`cond` may be a bool, or a zero-arg callable whose EXCEPTION is a failure.
+
+        A check that raises must fail BY NAME, not take the whole suite down with it. Every
+        §4.5 mutation of a crash-guard used to report "the selftest crashed" — true,
+        unmissable, and useless for locating which guard you just reverted, because the
+        traceback names the engine line, not the check. It also meant one broken check hid
+        the verdict of every check after it."""
         total[0] += 1
+        if callable(cond):
+            try:
+                cond = cond()
+            except SystemExit as ex:
+                print("FAIL %s  [engine exited: %s]" % (name, ex))
+                failures.append(name)
+                return
+            except BaseException as ex:
+                print("FAIL %s  [raised %s: %s]" % (name, type(ex).__name__, ex))
+                failures.append(name)
+                return
         print("%s %s" % ("PASS" if cond else "FAIL", name))
         if not cond:
             failures.append(name)
@@ -2554,15 +3302,19 @@ def cmd_selftest(_args):
             return True
 
     def fresh(fn):
-        with tempfile.TemporaryDirectory() as h:
-            os.environ["ENGRAM_HOME"] = h
-            os.environ["ENGRAM_TODAY"] = "2026-07-06"
-            try:
-                _capture(cmd_init, _ns())
-                return fn(h)
-            finally:
-                os.environ.pop("ENGRAM_HOME", None)
-                os.environ.pop("ENGRAM_TODAY", None)
+        """A throwaway ENGRAM_HOME, as a THUNK — so `check` can catch what `fn` raises and
+        fail that check BY NAME instead of the exception killing the whole suite."""
+        def run():
+            with tempfile.TemporaryDirectory() as h:
+                os.environ["ENGRAM_HOME"] = h
+                os.environ["ENGRAM_TODAY"] = "2026-07-06"
+                try:
+                    _capture(cmd_init, _ns())
+                    return fn(h)
+                finally:
+                    os.environ.pop("ENGRAM_HOME", None)
+                    os.environ.pop("ENGRAM_TODAY", None)
+        return run
 
     def _add_ab(replace=False):
         g = {"topic": "t", "title": "T", "order": ["a", "b"], "nodes": {
@@ -2807,6 +3559,591 @@ def cmd_selftest(_args):
     check("decay with nothing due says 'nothing to save today', not 'a difference of 0.0'",
           fresh(_decay_nothing_due))
     check("decay: an unencoded topic has nothing to lose", fresh(_decay_empty))
+
+    # ================================================== THE ORACLE (v0.7)
+    # The grader that writes every receipt, finally graded. Every check below exists because
+    # a grader can be wrong in a way that FLATTERS, and a flattering number gets believed.
+
+    def _gold_file(h, items):
+        path = os.path.join(h, "g.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for it in items:
+                f.write(json.dumps(it) + "\n")
+        return path
+
+    def _gitem(sid, grade, case="synthetic"):
+        return {"sid": sid, "case_type": case, "topic": "t", "node": "n",
+                "claim": "c", "rubric": ["r1"], "probe": "p", "production": "prod",
+                "confidence": 50, "kind": "review", "gold_grade": grade,
+                "rationale": "because %s" % sid}
+
+    def _audit(h, gold_items, runs, grader="g"):
+        gp = _gold_file(h, gold_items)
+        rp = os.path.join(h, "runs.json")
+        with open(rp, "w", encoding="utf-8") as f:
+            json.dump({"grader": grader, "runs": runs}, f)
+        return _capture_json(cmd_assessor_audit, _ns(file=rp, json=None, gold=gp))
+
+    # -- QWK against hand-computed confusion matrices (a behavior, not a restatement) --
+    _ORD = ("lapsed", "partial", "recalled")          # the ORDINAL scale QWK weights against
+    def _from_matrix(m):
+        return [(_ORD[i], _ORD[j]) for i in range(3) for j in range(3) for _ in range(m[i][j])]
+    # A: gold rows / grader cols, errors ALL one step. n=30, num=2.0, den=9.5 -> 1 - 2/9.5.
+    check("QWK matches a hand-computed confusion matrix (all 1-step errors -> 0.789)",
+          approx(_qwk(_from_matrix([[7, 3, 0], [2, 7, 1], [0, 2, 8]])), 0.7895, 0.001))
+    # B: one- AND two-step errors, UNBALANCED marginals. THIS is the fixture that pins the
+    # weighting SCHEME: quadratic -> 0.3827, linear -> 0.4068.
+    #
+    # The first draft of this check was theatre and the §4.5 mutation test caught it. It
+    # asserted only that a 2-step error hurts MORE than a 1-step one — which LINEAR weights
+    # satisfy just as happily, so reverting the fix left the check green. (A balanced matrix
+    # is no good either: with equal marginals the two schemes normalize to the SAME kappa and
+    # prove nothing.) The quadratic penalty is the entire reason lapsed->recalled costs 4x
+    # lapsed->partial — the difference between "the grader is noisy" and "the grader called a
+    # total blank a full recall".
+    check("QWK weights are QUADRATIC, not linear (hand-computed 1-and-2-step matrix -> 0.383)",
+          approx(_qwk(_from_matrix([[8, 4, 3], [1, 9, 2], [0, 1, 2]])), 0.3827, 0.001))
+    check("QWK is 1.0 only on perfect agreement",
+          approx(_qwk([(g, g) for g in _ORD] * 10), 1.0, 1e-9))
+    check("QWK is None (never 1.0) when both raters are degenerate on one category",
+          _qwk([("recalled", "recalled")] * 40) is None)
+
+    # -- THE QWK FLOOR, ISOLATED: a NOISY but UNBIASED grader (the bias gate cannot see it) --
+    # Mutation-testing exposed that the raw-agreement check below does not isolate the floor:
+    # its always-says-recalled grader also trips the BIAS ceiling, so reverting the floor left
+    # it green. This grader is symmetric — it inflates as often as it deflates — so its bias is
+    # exactly 0.00 and the ONLY thing that can catch it is QWK. A grader can be perfectly
+    # unbiased on average and still be worthless, and the floor is what says so.
+    def _qwk_floor_is_load_bearing(h):
+        gold = [_gitem("q%02d" % i, _ORD[i % 3]) for i in range(36)]
+        up = {"lapsed": "partial", "partial": "recalled", "recalled": "recalled"}
+        down = {"lapsed": "lapsed", "partial": "lapsed", "recalled": "partial"}
+        def mk(run):
+            out = []
+            for k, g in enumerate(gold):
+                gr = g["gold_grade"]
+                gr = up[gr] if (k + run) % 2 == 0 else down[gr]   # symmetric noise -> bias 0.00
+                out.append({"sid": g["sid"], "grade": gr})
+            return out
+        a = _audit(h, gold, [mk(0), mk(1), mk(2)])
+        return (a["qwk"] < QWK_FLOOR                       # the only gate that fires
+                and abs(a["leniency_bias"]) <= BIAS_MAX    # bias ceiling silent
+                and a["paradox_triggered"] is False        # paradox silent
+                and a["verdict"] == "fail" and a["grader_unvalidated"] is True)
+    check("a NOISY but perfectly UNBIASED grader still fails (the QWK floor is load-bearing)",
+          fresh(_qwk_floor_is_load_bearing))
+
+    # -- RAW AGREEMENT IS A LIAR: 90% raw, kappa 0.00 -- and it must NOT pass --
+    # The literature's central number: raw accuracy overstates chance-corrected agreement by
+    # 33.8-41.2 points (docs/07 §3). A grader that always says "recalled" against a gold set
+    # that is 90% recalled looks 90% right and has learned nothing.
+    def _raw_agreement_is_a_liar(h):
+        gold = ([_gitem("s%02d" % i, "recalled") for i in range(27)]
+                + [_gitem("s%02d" % i, "lapsed") for i in range(27, 30)])
+        run = [{"sid": g["sid"], "grade": "recalled"} for g in gold]     # always "recalled"
+        a = _audit(h, gold, [run, run, run])
+        return (a["exact_agreement"] == 0.9          # looks excellent
+                and approx(a["qwk"], 0.0, 0.001)     # and is worth nothing
+                and a["verdict"] == "fail"           # and is NOT allowed to pass
+                and a["grader_unvalidated"] is True)
+    check("a grader with 90% RAW agreement and QWK 0.00 fails (raw agreement never certifies)",
+          fresh(_raw_agreement_is_a_liar))
+
+    # -- leniency bias sign convention: POSITIVE = inflating --
+    def _bias_sign(h):
+        gold = [_gitem("s%02d" % i, "partial") for i in range(30)]
+        up = [{"sid": g["sid"], "grade": "recalled"} for g in gold]   # grader inflates
+        down = [{"sid": g["sid"], "grade": "lapsed"} for g in gold]   # grader deflates
+        a_up = _audit(h, gold, [up, up, up])
+        a_dn = _audit(h, gold, [down, down, down])
+        return (a_up["leniency_bias"] == 1.0 and a_dn["leniency_bias"] == -1.0
+                and a_up["grader_unvalidated"] is True
+                and "INFLATES" in " ".join(a_up["reasons"]))
+    check("leniency_bias is signed: + inflates (and only + trips the ceiling)",
+          fresh(_bias_sign))
+
+    # -- THE LENIENCY GATE, ISOLATED: a grader ABOVE the QWK target, failed for bias alone --
+    # The single most important check in this release. This grader scores QWK 0.72 — over the
+    # 0.70 conventional target — is not degenerate, is not inconsistent enough to trip the
+    # paradox, and would sail through any QWK-only audit. It systematically inflates every
+    # other item, so every retention number it feeds is too high. Only the bias ceiling sees
+    # it. (This fixture is also what makes the bias term in `teeth` mutation-testable: the
+    # floor is silent and the paradox is silent, so reverting the bias gate turns this green.)
+    def _bias_gate_is_load_bearing(h):
+        gold = [_gitem("g%02d" % i, ("lapsed", "partial", "recalled")[i % 3]) for i in range(36)]
+        up = {"lapsed": "partial", "partial": "recalled", "recalled": "recalled"}
+        down = {"lapsed": "lapsed", "partial": "lapsed", "recalled": "partial"}
+        def mk(run):
+            out = []
+            for k, g in enumerate(gold):
+                gr = g["gold_grade"]
+                if k % 2 == 0:                     # systematic inflation on every other item
+                    gr = up[gr]
+                elif k % 6 == run:                 # per-run noise -> test-retest 0.89, paradox silent
+                    gr = down[gr]
+                out.append({"sid": g["sid"], "grade": gr})
+            return out
+        a = _audit(h, gold, [mk(0), mk(1), mk(2)])
+        return (a["qwk"] > QWK_TARGET               # would PASS on QWK alone
+                and a["test_retest"] < PARADOX_RETEST    # paradox gate silent
+                and a["paradox_triggered"] is False
+                and a["leniency_bias"] > BIAS_MAX        # …and the ONLY thing that fires
+                and a["verdict"] == "fail" and a["grader_unvalidated"] is True)
+    check("a grader ABOVE the QWK target still FAILS for leniency alone (the bias gate is load-bearing)",
+          fresh(_bias_gate_is_load_bearing))
+
+    # -- THE PARADOX GATE: perfectly consistent AND lenient is a FAIL, not a pass --
+    # This is the failure mode Engram's own prompt design selects for: the assessor is told
+    # to be a skeptic, round down, cite the rubric -> it will be extremely self-consistent.
+    # The literature records a judge at test-retest 0.992 with bias 0.192: perfectly
+    # reproducible, systematically wrong. Consistency is not validity, and may never certify.
+    def _paradox_gate(h):
+        # A grader with a HIGH QWK (0.81 — above the 0.70 target!) that inflates. QWK alone
+        # would have passed it. Only the bias gate and the paradox catch it.
+        gold = ([_gitem("s%02d" % i, "partial") for i in range(10)]
+                + [_gitem("s%02d" % i, "lapsed") for i in range(10, 20)]
+                + [_gitem("s%02d" % i, "recalled") for i in range(20, 34)])
+        up = {"partial": "recalled", "lapsed": "partial", "recalled": "recalled"}
+        run = [{"sid": g["sid"], "grade": up[g["gold_grade"]]} for g in gold]
+        a = _audit(h, gold, [run, run, run])          # identical runs -> test_retest 1.0
+        return (a["test_retest"] == 1.0 and a["leniency_bias"] > BIAS_MAX
+                and a["paradox_triggered"] is True
+                and a["verdict"] == "fail" and a["grader_unvalidated"] is True
+                and "PARADOX" in " ".join(a["reasons"]))
+    check("THE PARADOX: test-retest 1.0 + leniency over the ceiling = fail, never pass",
+          fresh(_paradox_gate))
+
+    # -- consistency alone cannot certify: fewer than 3 runs may not pass, however perfect --
+    def _one_run_cannot_certify(h):
+        gold = [_gitem("s%02d" % i, GRADES[i % 3]) for i in range(33)]
+        run = [{"sid": g["sid"], "grade": g["gold_grade"]} for g in gold]   # perfect
+        a = _audit(h, gold, [run])
+        return (a["qwk"] == 1.0 and a["verdict"] == "insufficient-runs"
+                and a["grader_unvalidated"] is True and a["test_retest"] is None)
+    check("a PERFECT single-run audit cannot certify (the paradox check never ran)",
+          fresh(_one_run_cannot_certify))
+
+    # -- COVERAGE: a grader that drops sids must never report a flattering QWK over the rest --
+    # This is issue #3's bug class aimed at the audit itself: the assessor's strict output
+    # schema once dropped `sid` silently. A grader that answers 46 of 66 perfectly is not a
+    # validated grader; it is an unmeasured one.
+    # Each run drops a DIFFERENT 5 sids. This is deliberate and it is the whole check: with
+    # three identical runs (the first draft) the intersection and the UNION of graded sids are
+    # the same set, so swapping `all(...)` for `any(...)` in the denominator changed nothing
+    # and the check stayed green. The §4.5 mutation test caught it — the second of this
+    # release's three theatre checks, and the same coincidental-fixture failure the protocol
+    # names. Here: union = 45 (looks complete, would PASS), intersection = 30 (the honest
+    # denominator — only these were graded by every run).
+    def _dropped_sids_are_not_a_pass(h):
+        gold = [_gitem("s%02d" % i, _ORD[i % 3]) for i in range(45)]
+        def run(drop):
+            return [{"sid": g["sid"], "grade": g["gold_grade"]}
+                    for k, g in enumerate(gold) if k not in drop]
+        runs = [run(set(range(30, 35))), run(set(range(35, 40))), run(set(range(40, 45)))]
+        a = _audit(h, gold, runs)
+        return (a["qwk"] == 1.0                       # perfect on everything it DID grade
+                and a["n"] == 30 and a["gold_n"] == 45     # intersection, not union
+                and a["verdict"] == "incomplete" and a["grader_unvalidated"] is True
+                and a["coverage"]["complete"] is False
+                and len(a["coverage"]["ungraded"]) == 15
+                and "coverage" in " ".join(a["reasons"]))
+    check("a grader that drops sids reports `incomplete`, not a flattering QWK 1.00 pass",
+          fresh(_dropped_sids_are_not_a_pass))
+
+    # -- n < 30 reads insufficient-data rather than emitting a verdict --
+    def _thin_audit_says_so(h):
+        gold = [_gitem("s%02d" % i, GRADES[i % 3]) for i in range(12)]
+        run = [{"sid": g["sid"], "grade": g["gold_grade"]} for g in gold]
+        a = _audit(h, gold, [run, run, run])
+        return (a["verdict"] == "insufficient-data" and a["grader_unvalidated"] is True
+                and a["n"] == 12)
+    check("an audit with n < 30 reads insufficient-data, never a verdict", fresh(_thin_audit_says_so))
+
+    # -- §4.8 Q3: ITEMS and JUDGMENTS are different denominators and must be named separately --
+    # The first cut of by_case_type emitted `n: 30` for a case type holding TEN items — 30 was
+    # judgments (10 x 3 runs) and nothing said so. That is the v0.6.4 unlabelled-denominator bug,
+    # reproduced INSIDE the release built to catch unlabelled denominators. Found by running the
+    # numbers audit on this release, not by any test written before it.
+    def _items_and_judgments_are_named(h):
+        gold = ([dict(_gitem("c%02d" % i, _ORD[i % 3]), case_type="tricky") for i in range(15)]
+                + [dict(_gitem("d%02d" % i, _ORD[i % 3]), case_type="easy") for i in range(15, 33)])
+        run = [{"sid": g["sid"], "grade": g["gold_grade"]} for g in gold]
+        a = _audit(h, gold, [run, run, run])
+        bc = a["by_case_type"]
+        return ("n" not in bc["tricky"]                       # the ambiguous key is GONE
+                and bc["tricky"]["items"] == 15               # 15 items…
+                and bc["tricky"]["judgments"] == 45           # …but 45 judgments (15 x 3 runs)
+                and bc["easy"]["items"] == 18
+                and bc["easy"]["judgments"] == 54
+                # and the confusion matrix totals JUDGMENTS, which must reconcile with n x runs
+                and sum(a["confusion"].values()) == a["n"] * a["runs"] == 99)
+    check("§4.8 Q3: by_case_type names ITEMS and JUDGMENTS separately (never a bare `n`)",
+          fresh(_items_and_judgments_are_named))
+
+    # -- §4.8 Q4: the DIRECTION of error reaches the narrator (a mean bias of 0.00 hides it) --
+    # THE most decision-relevant fact in the audit, and the first cut left it derivable-but-unsaid
+    # inside `confusion`, which nothing reads. These two graders have the SAME mean leniency bias
+    # (+0.00) and opposite safety profiles: one is perfect, the other inflates 1/3 of the set and
+    # deflates another 1/3. Only `direction` can tell them apart.
+    def _direction_of_error_is_stated(h):
+        gold = [_gitem("e%02d" % i, _ORD[i % 3]) for i in range(33)]
+        perfect = [{"sid": g["sid"], "grade": g["gold_grade"]} for g in gold]
+        up = {"lapsed": "partial", "partial": "recalled", "recalled": "recalled"}
+        down = {"lapsed": "lapsed", "partial": "lapsed", "recalled": "partial"}
+        churn = [{"sid": g["sid"],
+                  "grade": (up if k % 3 == 0 else down if k % 3 == 1 else lambda x: x)[g["gold_grade"]]
+                           if k % 3 < 2 else g["gold_grade"]}
+                 for k, g in enumerate(gold)]
+        a_ok = _audit(h, gold, [perfect] * 3)
+        a_churn = _audit(h, gold, [churn] * 3)
+        clean = (a_ok["direction"]["graded_up"] == 0
+                 and a_ok["direction"]["graded_down"] == 0
+                 and a_ok["direction"]["judgments"] == 99
+                 and "graded UP 0 times" in a_ok["read"])          # …and it SAYS so
+        # the churner inflates AND deflates: near-zero mean bias, real inflation underneath
+        noisy = (a_churn["direction"]["graded_up"] > 0
+                 and a_churn["direction"]["graded_down"] > 0
+                 and abs(a_churn["leniency_bias"]) < 0.10          # the mean HIDES it…
+                 and "graded UP" in a_churn["read"])               # …and the read does not
+        return clean and noisy
+    check("§4.8 Q4: the DIRECTION of error reaches the read string (a mean bias of 0 hides inflation)",
+          fresh(_direction_of_error_is_stated))
+
+    # -- §4.8 Q5: the audit records WHICH ground truth produced the verdict --
+    # The skills always use the bundled gold set. The CLI's `--gold` accepts any file, so a `pass`
+    # against a hand-made 30-item set would otherwise be indistinguishable from a pass against the
+    # shipped adversarial one — and the whole meaning of the number is which set it was measured
+    # against. Every metric keys off exact literals; the CLI has defaults, and they bite (v0.6.1).
+    def _audit_records_its_ground_truth(h):
+        gold = [_gitem("f%02d" % i, _ORD[i % 3]) for i in range(33)]
+        run = [{"sid": g["sid"], "grade": g["gold_grade"]} for g in gold]
+        a = _audit(h, gold, [run, run, run])            # _audit always passes --gold
+        gh = _capture_json(cmd_grader_health, _ns())
+        return (a["gold_source"].endswith("g.jsonl") and os.path.isabs(a["gold_source"])
+                and gh["gold_source"] == a["gold_source"])   # …and it survives to grader-health
+    check("§4.8 Q5: the audit records WHICH gold set produced the verdict (--gold is not the shipped one)",
+          fresh(_audit_records_its_ground_truth))
+
+    # ===== THE INDEPENDENT REVIEWER'S FINDINGS (§4.6) — every one of these shipped-in-branch =====
+
+    # -- THE TEETH ON THE SCREEN: the HTML dashboard rendered the flattered number, unstamped --
+    # `ret["read"]` was the ONLY carrier of the grader stamp, and cmd_report rendered it solely
+    # in the branch that fires when there is NO retention data. On the happy path it drew a
+    # full-width green bar reading 100% — produced by a grader that inflates every second item —
+    # with nothing anywhere to say so. Bug class #1 and #4 at once, on the surface where a number
+    # is MOST believed. The live test, the fuzz, the numbers audit and the user session all
+    # walked past it, because every one of them reads JSON.
+    def _dashboard_carries_the_teeth(h):
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", grade="recalled",
+                               kind="encode", production="x"))      # encoded 2026-07-06
+        os.environ["ENGRAM_TODAY"] = "2026-08-05"                   # +30d -> the HEADLINE bucket
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", grade="recalled",
+                               kind="review", production="y"))      # a real 100% retention bar
+        gold = [_gitem("z%02d" % i, "partial") for i in range(33)]
+        run = [{"sid": g["sid"], "grade": "recalled"} for g in gold]        # inflates everything
+        a = _audit(h, gold, [run, run, run])
+        path = _capture_json(cmd_report, _ns(out=None, allow_outside=False))["path"]
+        html = open(path, encoding="utf-8").read()
+        # Three carriers, asserted SEPARATELY, because a marker that any of them could have
+        # produced tests none of them. (The first draft asserted `"QWK" in html`, which the
+        # static "QWK is the headline" footnote satisfies all by itself — theatre, caught by
+        # §4.5, and the third time this release that a check turned out to prove nothing.)
+        return (a["verdict"] == "fail"
+                # 1. the retention read renders EVEN WHEN there are bars (the actual bug)
+                and "30-day recall 100%" in html
+                # 2. the stamp appears TWICE: once standalone, once inside that read
+                and html.count("GRADER UNVALIDATED") >= 2
+                # 3. …and the grader block itself is on the page
+                and "The grader behind every number above" in html)
+    check("THE DASHBOARD carries the teeth (a failed grader's 100% bar is stamped, not silent)",
+          fresh(_dashboard_carries_the_teeth))
+
+    # -- a local gold set that re-adjudicates the answer must not certify SILENTLY --
+    # `gold/local-gold.jsonl` wins on a sid collision, on the DEFAULT path, no flag required —
+    # so a local file that re-grades every item to agree with the grader turns a `fail` into a
+    # `pass`. The first `gold_source` fix wrote "bundled:gold/assessor-gold.jsonl" into that
+    # audit anyway: not merely silent, but ACTIVELY FALSE, in the flattering direction. A
+    # provenance field that lies is worse than none, because it is believed.
+    def _local_gold_cannot_certify_silently(h):
+        os.makedirs(p("gold"), exist_ok=True)
+        # re-adjudicate two REAL bundled sids, and add one of our own
+        with open(p("gold", "local-gold.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps(dict(_gitem("g_001", "recalled"), case_type="disputed")) + "\n")
+            f.write(json.dumps(dict(_gitem("g_002", "recalled"), case_type="disputed")) + "\n")
+            f.write(json.dumps(_gitem("mine_01", "partial")) + "\n")
+        items, meta = load_gold()
+        return (meta["modified"] is True
+                and meta["local_overrides"] == 2          # two bundled adjudications REPLACED
+                and meta["local_added"] == 1              # one new item
+                and "local-gold.jsonl" in meta["source"]
+                and "bundled:gold/assessor-gold.jsonl" != meta["source"]
+                # the override actually took effect (so the flag is not decorative)…
+                and next(g["gold_grade"] for g in items if g["sid"] == "g_001") == "recalled"
+                # …and the blindness whitelist still holds for the local items
+                and all(set(it) == set(GOLD_ASSESSOR_KEYS)
+                        for it in _capture_json(cmd_gold, _ns())))
+    check("a local gold set that RE-ADJUDICATES the answer is recorded, never passed off as bundled",
+          fresh(_local_gold_cannot_certify_silently))
+
+    # -- a grader may not mark its own homework twice and keep the better score --
+    # The mirror of the dropped-sid bug: `out[sid] = grade` was LAST-WINS, so a grader that got
+    # 12 items wrong and re-emitted those sids later in the array (exactly what an LLM
+    # self-correcting mid-array produces) turned a `fail` into a `pass`, silently, with n intact.
+    def _duplicate_sids_are_a_coverage_failure(h):
+        gold = [_gitem("y%02d" % i, "lapsed") for i in range(33)]
+        wrong = [{"sid": g["sid"], "grade": "recalled"} for g in gold]      # all 33 badly wrong
+        fixed = [{"sid": g["sid"], "grade": "lapsed"} for g in gold[:12]]   # …then "corrected"
+        a = _audit(h, gold, [wrong + fixed] * 3)
+        return (a["verdict"] == "incomplete" and a["grader_unvalidated"] is True
+                and len(a["duplicate_sids"]) == 12
+                and a["coverage"]["complete"] is False
+                and a["leniency_bias"] > BIAS_MAX          # the FIRST verdict is the one that counts
+                and "MORE THAN ONCE" in " ".join(a["reasons"]))
+    check("a grader that grades a sid TWICE gets `incomplete` — the first verdict stands",
+          fresh(_duplicate_sids_are_a_coverage_failure))
+
+    # -- three copy-pasted runs are not three runs, and test-retest may not pretend otherwise --
+    def _identical_runs_are_flagged(h):
+        gold = [_gitem("x%02d" % i, _ORD[i % 3]) for i in range(33)]
+        run = [{"sid": g["sid"], "grade": g["gold_grade"]} for g in gold]
+        a = _audit(h, gold, [run, run, run])       # the same object, three times
+        return (a["identical_runs"] is True and a["test_retest"] == 1.0
+                and "not independent" in " ".join(a["reasons"]))
+    check("three IDENTICAL runs are flagged — test-retest cannot certify what it never measured",
+          fresh(_identical_runs_are_flagged))
+
+    # -- a corrupt node must not TEAR a receipt batch in half (receipts are append-only) --
+    def _corrupt_node_does_not_tear_the_batch(h):
+        _add_ab()
+        g = load_graph("t")
+        g["nodes"]["b"] = ["not", "a", "node"]                     # hand-corrupt the 2nd item
+        save_graph(g)
+        rp = os.path.join(h, "batch.json")
+        with open(rp, "w", encoding="utf-8") as f:
+            json.dump([{"topic": "t", "node": "a", "rating": "good", "grade": "recalled",
+                        "kind": "encode", "production": "x"},
+                       {"topic": "t", "node": "b", "rating": "good", "grade": "recalled",
+                        "kind": "encode", "production": "y"}], f)
+        try:
+            _capture(cmd_receipt, _ns(file=rp, json=None))
+            return False                                   # it must refuse the whole batch
+        except SystemExit:
+            pass
+        # NOTHING was written — not even item 1, which was perfectly valid
+        return (not read_jsonl(p("receipts", "t.jsonl"))
+                and load_graph("t")["nodes"]["a"].get("state") == "new")
+    check("a corrupt node refuses the WHOLE receipt batch (never half-applies an append-only log)",
+          fresh(_corrupt_node_does_not_tear_the_batch))
+
+    # -- the 100th audit of a day must not be shadowed by the 99th (lexicographic sort) --
+    def _audit_seq_sorts_numerically(h):
+        os.makedirs(p("audits"), exist_ok=True)
+        for name, verdict, qwk in (("2026-07-11-99.json", "pass", 0.95),
+                                   ("2026-07-11-100.json", "fail", 0.20)):
+            write_json(p("audits", name), {"ts": "2026-07-11", "verdict": verdict, "qwk": qwk,
+                                           "grader_unvalidated": verdict != "pass", "n": 60,
+                                           "runs": 3, "read": "r"})
+        gh = _capture_json(cmd_grader_health, _ns())
+        return (gh["verdict"] == "fail" and gh["qwk"] == 0.20      # the 100th, not the 99th
+                and gh["grader_unvalidated"] is True)
+    check("audit 100 outranks audit 99 (numeric sequence, never a lexicographic stale pass)",
+          fresh(_audit_seq_sorts_numerically))
+
+    # -- the contamination guard must not FALSELY ACCUSE a grader that invents `rationale` --
+    def _rationale_is_not_an_accusation(h):
+        gold = [_gitem("w%02d" % i, _ORD[i % 3]) for i in range(33)]
+        run = [{"sid": g["sid"], "grade": g["gold_grade"],
+                "rationale": "criterion 2 was missing"}          # a grader may invent this key
+               for g in gold]
+        a = _audit(h, gold, [run, run, run])                     # …and must NOT be killed for it
+        ok = a["verdict"] == "pass"
+        # …but the two keys that could ONLY come from the gold schema still kill it
+        for key in GOLD_ANSWER_KEYS:
+            bad = [{"sid": g["sid"], "grade": g["gold_grade"], key: "x"} for g in gold]
+            gp, rp = _gold_file(h, gold), os.path.join(h, "bad.json")
+            with open(rp, "w", encoding="utf-8") as f:
+                json.dump({"runs": [bad] * 3}, f)
+            try:
+                _capture(cmd_assessor_audit, _ns(file=rp, json=None, gold=gp))
+                return False
+            except SystemExit:
+                pass
+        return ok
+    check("the contamination guard fires on the ANSWER, not on a grader that invents `rationale`",
+          fresh(_rationale_is_not_an_accusation))
+
+    # -- a genuinely good grader passes (the gate is passable, or it is not a gate) --
+    def _good_grader_passes(h):
+        gold = [_gitem("s%02d" % i, GRADES[i % 3]) for i in range(36)]
+        # 3 of 36 wrong by ONE step, in both directions -> unbiased, QWK ~0.87
+        def mk(off):
+            out = []
+            for k, g in enumerate(gold):
+                gr = g["gold_grade"]
+                if k % 12 == off:
+                    gr = {"lapsed": "partial", "partial": "lapsed", "recalled": "partial"}[gr]
+                out.append({"sid": g["sid"], "grade": gr})
+            return out
+        a = _audit(h, gold, [mk(0), mk(1), mk(2)])
+        return (a["verdict"] == "pass" and a["grader_unvalidated"] is False
+                and a["qwk"] >= QWK_TARGET and abs(a["leniency_bias"]) <= BIAS_MAX
+                and "validated" in a["read"])
+    check("a genuinely good grader PASSES (the gate is passable)", fresh(_good_grader_passes))
+
+    # -- CONTAMINATION: an audit payload carrying the answer must DIE, not certify --
+    # RELEASE_PROTOCOL §5.5, in code: v0.6's dogfood certified a dead feature because the
+    # prompt handed the assessor the answer. A grader whose output carries `gold_grade` was
+    # shown `gold_grade`. That audit is theatre and must never write an audits/ file.
+    def _contamination_dies(h):
+        gold = [_gitem("s%02d" % i, GRADES[i % 3]) for i in range(33)]
+        run = [{"sid": g["sid"], "grade": g["gold_grade"], "gold_grade": g["gold_grade"]}
+               for g in gold]
+        gp, rp = _gold_file(h, gold), os.path.join(h, "r.json")
+        with open(rp, "w", encoding="utf-8") as f:
+            json.dump({"runs": [run, run, run]}, f)
+        try:
+            _capture(cmd_assessor_audit, _ns(file=rp, json=None, gold=gp))
+            return False                       # it certified a contaminated audit
+        except SystemExit:
+            return not os.path.isdir(p("audits")) or not os.listdir(p("audits"))
+    check("an audit payload carrying gold_grade DIES (a test that hands over the answer is not a test)",
+          fresh(_contamination_dies))
+
+    # -- BLINDNESS: `gold` can never leak the answer, by construction (whitelist, not blacklist) --
+    def _gold_is_blind(h):
+        items = _capture_json(cmd_gold, _ns())
+        gold, _ = load_gold()
+        blob = json.dumps(items)
+        keys_exact = all(set(it) == set(GOLD_ASSESSOR_KEYS) for it in items)
+        no_secret_key = all(k not in blob for k in GOLD_SECRET_KEYS)
+        # property-based: not one rationale or case_type VALUE may survive into the payload
+        no_values = (all(g["rationale"] not in blob for g in gold)
+                     and all(g["case_type"] not in blob for g in gold))
+        return keys_exact and no_secret_key and no_values and len(items) == len(gold)
+    check("the assessor is BLIND to the gold answer: no gold_grade/case_type/rationale survives `gold`",
+          fresh(_gold_is_blind))
+
+    # -- the audit feeds the assessor EXACTLY what /learn feeds it (uncontaminated dogfood, in code) --
+    def _gold_matches_stash_shape(h):
+        _add_ab()
+        _capture(cmd_stash, _ns(action="add", json=json.dumps([{
+            "topic": "t", "node": "a", "claim": "c", "rubric": ["r"], "probe": "p",
+            "production": "prod", "confidence": 60, "kind": "encode"}]), file=None))
+        stashed = _capture_json(cmd_stash, _ns(action="list", json=None, file=None))
+        gold_items = _capture_json(cmd_gold, _ns())
+        # both are BARE ARRAYS, and every field the assessor reads is present in both
+        return (isinstance(stashed, list) and isinstance(gold_items, list)
+                and set(GOLD_ASSESSOR_KEYS) <= set(stashed[0])
+                and set(GOLD_ASSESSOR_KEYS) == set(gold_items[0]))
+    check("`gold` is shaped exactly like `stash list` (the audit grades the REAL assessor)",
+          fresh(_gold_matches_stash_shape))
+
+    # -- THE TEETH: an unaudited grader stamps retention, and the stamp reaches the READ STRING --
+    # A guard nobody reads cannot trip (§4.8 Q4). `grader_unvalidated` in a nested key that
+    # only a test ever opens is not teeth; it is decoration.
+    def _teeth_reach_the_narrator(h):
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", grade="recalled",
+                               kind="encode", production="x"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-20"           # …and come back to REVIEW it
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", grade="recalled",
+                               kind="review", production="y"))
+        r0 = _capture_json(cmd_retention, _ns())
+        s0 = _capture_json(cmd_stats, _ns())
+        unaudited = (r0["grader_unvalidated"] is True and r0["grader_verdict"] == "unaudited"
+                     and "unaudited" in r0["read"]              # ← the STAMP, on a real figure
+                     and s0["grader_health"]["grader_unvalidated"] is True
+                     and s0["retention"]["grader_unvalidated"] is True)
+        # …and a PASSING audit clears the stamp from the very same read string
+        gold = [_gitem("s%02d" % i, _ORD[i % 3]) for i in range(33)]
+        run = [{"sid": g["sid"], "grade": g["gold_grade"]} for g in gold]
+        a = _audit(h, gold, [run, run, run])
+        r1 = _capture_json(cmd_retention, _ns())
+        cleared = (a["verdict"] == "pass" and r1["grader_unvalidated"] is False
+                   and "unaudited" not in r1["read"] and "UNVALIDATED" not in r1["read"])
+        return unaudited and cleared
+    check("THE TEETH: an unaudited grader stamps retention's READ string; a passing audit clears it",
+          fresh(_teeth_reach_the_narrator))
+
+    # -- …but the stamp NEVER qualifies a figure that does not exist (§5.6 user session) --
+    # Run against the founder's real state (7 encoded, 0 reviewed), the first cut produced:
+    #   "[grader unaudited — QWK unknown; run /coach audit] insufficient-data (no reviews yet)"
+    # A caveat on a measurement nobody made — and a SECOND reproach stacked on top of "THE LOOP
+    # HAS NEVER CLOSED", which is the wall-of-debt the constitution forbids. The flag stays true
+    # in the payload (it is a true fact, and /coach reads it); the narrator is simply not handed
+    # a disclaimer for a number that is not there. No selftest could have found this. A person had
+    # to look at the screen.
+    def _no_disclaimer_without_a_figure(h):
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", grade="recalled",
+                               kind="encode", production="x"))       # encoded…
+        os.environ["ENGRAM_TODAY"] = "2026-08-20"                    # …came due, never reviewed.
+        r = _capture_json(cmd_retention, _ns())                      # THE FOUNDER'S OWN STATE.
+        return (r["grader_unvalidated"] is True                      # the FACT survives…
+                and "unaudited" not in r["read"]                     # …but the read is not scolded
+                and "insufficient-data" in r["read"]
+                and "past due and unretrieved" in r["read"])         # the REAL debt still lands
+    check("the grader stamp never qualifies a figure that does not exist (no reviews -> no disclaimer)",
+          fresh(_no_disclaimer_without_a_figure))
+
+    # -- a FAILED audit stamps retention louder, and /coach cannot miss it --
+    def _failed_audit_stamps_loud(h):
+        _add_ab()                                   # a real retrieval, so there IS a figure
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", grade="recalled",
+                               kind="encode", production="x"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-20"
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", grade="recalled",
+                               kind="review", production="y"))
+        gold = [_gitem("s%02d" % i, "partial") for i in range(33)]
+        run = [{"sid": g["sid"], "grade": "recalled"} for g in gold]     # inflates every item
+        a = _audit(h, gold, [run, run, run])
+        r = _capture_json(cmd_retention, _ns())
+        gh = _capture_json(cmd_grader_health, _ns())
+        return (a["verdict"] == "fail" and r["grader_unvalidated"] is True
+                and "GRADER UNVALIDATED" in r["read"]
+                and gh["grader_unvalidated"] is True and gh["audited"] is True)
+    check("a FAILED audit stamps 'GRADER UNVALIDATED' into retention's read", fresh(_failed_audit_stamps_loud))
+
+    # -- audits are EVIDENCE: append-only, and a same-day re-audit never overwrites --
+    def _audits_are_append_only(h):
+        gold = [_gitem("s%02d" % i, GRADES[i % 3]) for i in range(33)]
+        run = [{"sid": g["sid"], "grade": g["gold_grade"]} for g in gold]
+        _audit(h, gold, [run, run, run])
+        _audit(h, gold, [run, run, run])            # same day, again
+        return len([f for f in os.listdir(p("audits")) if f.endswith(".json")]) == 2
+    check("audits are append-only: a same-day re-audit writes a second file, never overwrites",
+          fresh(_audits_are_append_only))
+
+    # -- a corrupt latest audit reads `unreadable` and NEVER falls back to a stale pass --
+    def _corrupt_audit_never_flatters(h):
+        gold = [_gitem("s%02d" % i, GRADES[i % 3]) for i in range(33)]
+        run = [{"sid": g["sid"], "grade": g["gold_grade"]} for g in gold]
+        _audit(h, gold, [run, run, run])                       # a genuine PASS on disk
+        with open(p("audits", "2099-01-01-01.json"), "w", encoding="utf-8") as f:
+            f.write("{ not json at all")                       # a newer, corrupt one
+        gh = _capture_json(cmd_grader_health, _ns())
+        r = _capture_json(cmd_retention, _ns())
+        return (gh["verdict"] == "unreadable" and gh["grader_unvalidated"] is True
+                and r["grader_unvalidated"] is True)
+    check("a corrupt LATEST audit reads `unreadable` — never falls back to an older pass",
+          fresh(_corrupt_audit_never_flatters))
+
+    # -- the receipt records its grader when stated, and NEVER invents one --
+    def _receipt_carries_grader(h):
+        _add_ab()
+        rp = os.path.join(h, "rec.json")
+        with open(rp, "w", encoding="utf-8") as f:
+            json.dump([{"topic": "t", "node": "a", "rating": "good", "grade": "recalled",
+                        "kind": "encode", "production": "x", "source": "assessor",
+                        "grader": "engram-assessor"},
+                       {"topic": "t", "node": "b", "rating": "good", "grade": "recalled",
+                        "kind": "encode", "production": "y", "source": "self"}], f)
+        _capture(cmd_receipt, _ns(file=rp, json=None))
+        rs = {r["node"]: r for r in read_jsonl(p("receipts", "t.jsonl"))}
+        return (rs["a"].get("grader") == "engram-assessor"
+                and "grader" not in rs["b"])       # never invented for a self-rating
+    check("a receipt records its grader when stated and never invents one", fresh(_receipt_carries_grader))
 
     # -- EVERY review-counter must agree on what a review IS (v0.6.4) --
     # v0.6.1 established "a node's first receipt is its encoding event" in _by_node (feeding
@@ -3326,18 +4663,91 @@ def cmd_selftest(_args):
                                 "kind": "review", "rating": "good"}) + "\n")
         write_json(p("misconceptions.json"), "not-a-list")
         write_json(p("experiments.json"), {"not": "a list"})
+        # v0.7 surfaces: a hand-edited gold set and a corrupt audit must not brick /coach.
+        # `stats` now calls compute_grader_health(), so a garbage audits/ file is on the
+        # path of EVERY read — the blast radius of a corrupt file just got wider.
+        os.makedirs(p("gold"), exist_ok=True); os.makedirs(p("audits"), exist_ok=True)
+        with open(p("gold", "local-gold.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"sid": ["not", "a", "string"], "gold_grade": 7,
+                                "rubric": "not-a-list", "claim": None}) + "\n")
+            f.write("NOT JSON EITHER\n")
+            f.write(json.dumps(["not", "even", "an", "object"]) + "\n")
+        with open(p("audits", "2099-01-01-01.json"), "w", encoding="utf-8") as f:
+            f.write('{"verdict": {"unhashable": 1}, "qwk": "NaN", "grader_unvalidated": []}')
         _RECEIPTS_CACHE.clear()
         # every read path must RETURN, not raise
         for fn, ns in ((cmd_stats, _ns()), (cmd_adherence, _ns()), (cmd_retention, _ns()),
                        (cmd_decay, _ns(topic=None, horizon=30)), (cmd_topics, _ns()),
                        (cmd_due, _ns(topic=None, limit=None)), (cmd_session_start, _ns()),
+                       (cmd_gold, _ns()), (cmd_grader_health, _ns()),
                        (cmd_report, _ns(out=None, allow_outside=False))):
             _capture(fn, ns)                  # an exception here fails the check, as intended
+        # a corrupt audit must read `unreadable` — NOT be believed, and NOT be skipped over
+        # in favour of an older, rosier one
+        gh = _capture_json(cmd_grader_health, _ns())
         # …and doctor must REPORT the corruption rather than silently swallow it
         doc = _capture_json(cmd_doctor, _ns())
-        return doc["ok"] is False and len(doc["issues"]) >= 2
-    check("read paths degrade on type-corrupt state (stats/adherence/retention/decay/report/hook)",
+        return (doc["ok"] is False and len(doc["issues"]) >= 2
+                and gh["grader_unvalidated"] is True and gh["verdict"] == "unreadable")
+    check("read paths degrade on type-corrupt state (stats/adherence/retention/decay/report/hook/gold/grader-health)",
           fresh(_reads_survive_garbage))
+
+    # -- THE SINGLE-TOPIC GATE: `next` and `topic-status` degrade too (v0.7) --
+    # v0.6 hardened `iter_graphs` — the gate every AGGREGATE read funnels through — and stopped
+    # there. `load_graph`, the gate every SINGLE-TOPIC command funnels through, had no shape
+    # check at all. A v0.7 fuzz run found 447 crashes in 300 garbage states ON SHIPPED MAIN,
+    # every one of them in `next` or `topic-status` — and `next` is what /learn calls at the
+    # start of EVERY session. The v0.6 fuzz list was written from the /coach surface and simply
+    # forgot the /learn surface: the list you write is the list you already thought of.
+    def _single_topic_reads_survive_garbage(h):
+        os.makedirs(p("graphs"), exist_ok=True)
+        # a graph that is valid JSON and structurally poisonous in every way at once
+        write_json(p("graphs", "t.json"), {
+            "topic": "t", "title": {"not": "a string"},
+            "order": ["a", {"unhashable": 1}, 42, "ghost", "b", "c", None],
+            "nodes": {
+                "a": {"claim": "c", "probe": "p", "state": {}, "fsrs": "not-a-dict",
+                      "edges": "not-a-dict"},
+                "b": ["not", "a", "node"],
+                "c": {"claim": "c", "probe": "p", "state": "new",
+                      "edges": {"requires": [{"d": 1}, "a", 7]}},   # unhashable req
+                "d": None}})
+        with open(p(STASH_FILE), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"topic": "t", "node": ["unhashable"]}) + "\n")
+            f.write("NOT JSON\n")
+            f.write(json.dumps(["not", "an", "object"]) + "\n")
+        nxt = _capture_json(cmd_next, _ns(topic="t"))          # must RETURN, not raise
+        _capture(cmd_topic_status, _ns(topic="t"))             # must RETURN, not raise
+        # `c` is the only usable `new` node; its garbage requires are skipped, `a` is not new
+        frontier_ok = nxt["id"] == "c"
+        # a graph whose `nodes` is not an object is a guarded REFUSAL, never an AttributeError
+        write_json(p("graphs", "u.json"), {"topic": "u", "nodes": "not-an-object"})
+        try:
+            _capture(cmd_next, _ns(topic="u"))
+            refused = False
+        except SystemExit:
+            refused = True
+        # …and rating a corrupt node REFUSES rather than writing FSRS state onto garbage
+        try:
+            _capture(cmd_rate, _ns(topic="t", node="b", rating="good", grade="recalled",
+                                   kind="encode", production="x"))
+            declined = False
+        except SystemExit:
+            declined = True
+        return frontier_ok and refused and declined
+    check("single-topic reads degrade on type-corrupt graphs (next/topic-status never brick)",
+          fresh(_single_topic_reads_survive_garbage))
+
+    # -- the scheduler's own counters survive a hand-edit (reps/lapses were raw arithmetic) --
+    def _corrupt_counters_dont_crash_the_scheduler(h):
+        out, _ = apply_rating({"s": 5.0, "d": 5.0, "last": "2026-06-01",
+                               "reps": "many", "lapses": [7]}, "again", today())
+        recovered = out["reps"] == 1 and out["lapses"] == 1     # counters re-anchored, not crashed
+        # and negatives can never be resurrected into the schedule
+        out2, _ = apply_rating({"reps": -9, "lapses": -4}, "good", today())
+        return recovered and out2["reps"] == 1 and out2["lapses"] == 0
+    check("corrupt reps/lapses re-anchor instead of crashing the scheduler",
+          lambda: _corrupt_counters_dont_crash_the_scheduler(None))
     # -- applying a receipt self-drains the stash (F3 adjacent) --
     def _stash_self_clean(h):
         _add_ab()
@@ -3576,7 +4986,7 @@ def cmd_selftest(_args):
     check("modality carries its confound caveat in every read state",
           all("not randomized" in m["caveat"] for m in (mod, mod_thin))
           and "not randomized" in fresh(
-              lambda h: _capture_json(cmd_stats, _ns())["modality"])["caveat"])
+              lambda h: _capture_json(cmd_stats, _ns())["modality"])()["caveat"])
 
     # -- visuals dial round-trips and reports --
     def _visuals(h):
@@ -3773,8 +5183,12 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     for name in ("init", "path", "session-start", "topics", "selftest", "stats", "doctor",
-                 "adherence", "retention"):
+                 "adherence", "retention", "gold", "grader-health"):
         sub.add_parser(name)
+
+    sp = sub.add_parser("assessor-audit")
+    sp.add_argument("--file"); sp.add_argument("--json")
+    sp.add_argument("--gold", help="override the gold set (testing; default = bundled)")
 
     sp = sub.add_parser("decay")
     sp.add_argument("--topic")
@@ -3861,6 +5275,8 @@ def main():
         "selftest": cmd_selftest,
         "adherence": cmd_adherence, "retention": cmd_retention,
         "decay": cmd_decay, "commit": cmd_commit,
+        "gold": cmd_gold, "assessor-audit": cmd_assessor_audit,
+        "grader-health": cmd_grader_health,
     }
     # Serialize state mutators: the skills run engine processes concurrently by
     # design (background artifact-smith registering while the tutor rates), and
@@ -3869,9 +5285,11 @@ def main():
     # case — the lock is milliseconds. Read-only commands stay lock-free.
     # `adherence`/`retention`/`decay` are pure reads over receipts+graphs — no lock.
     # `commit` writes the learner model, so it serializes like every other mutator.
+    # `assessor-audit` writes audits/<date>-NN.json (and probes the dir for a free seq),
+    # so it mutates. `gold`/`grader-health` are pure reads.
     mutating = {"init", "add-topic", "rate", "receipt", "stash", "model", "focus",
                 "visuals", "artifact", "misconception", "experiment",
-                "log-session", "refit", "commit"}
+                "log-session", "refit", "commit", "assessor-audit"}
     if args.cmd in mutating:
         acquire_lock()
         try:

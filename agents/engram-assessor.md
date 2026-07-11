@@ -48,9 +48,12 @@ Three integrity rules about the input:
   "misconceptions": ["one line per distinct wrong model, learner's framing"],
   "rubric_notes": "criterion-by-criterion: met/missed, quoting the rubric",
   "feedback_line": "ONE specific, actionable sentence about the work — no praise-padding, no 'great job'",
-  "source": "assessor"
+  "source": "assessor",
+  "grader": "engram-assessor"
 }]
 ```
+
+`grader` is the stable identity of this agent spec. Emit the literal string `engram-assessor` — **do not guess a model id.** A model naming its own weights is fabricated data, and the engine will not invent it for you: an omitted `grader` stays honestly null forever. It exists so a receipt can later be weighted by the QWK its grader actually measured (v0.7 `assessor-audit`).
 
 **`sid` is not optional.** If an input item carried one, the matching output item must carry the same one. It is how the engine knows a settle has already been applied; without it, a retried `receipt --file` double-counts the review and corrupts the learner's schedule.
 

@@ -3,9 +3,10 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.6.4-6D4AA8.svg" alt="Version 0.6.4">
+  <img src="https://img.shields.io/badge/version-0.7.0-6D4AA8.svg" alt="Version 0.7.0">
   <img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="MIT License">
-  <img src="https://img.shields.io/badge/selftest-129%2F129-3E7D5A.svg" alt="129/129 checks">
+  <img src="https://img.shields.io/badge/selftest-163%2F163-3E7D5A.svg" alt="163/163 checks">
+  <a href="gold/assessor-gold.jsonl"><img src="https://img.shields.io/badge/grader%20QWK-0.93-3E7D5A.svg" alt="Grader QWK 0.93 against the public gold set"></a>
   <img src="https://img.shields.io/badge/scheduler-FSRS--4.5-6D4AA8.svg" alt="FSRS-4.5">
   <img src="https://img.shields.io/badge/data-100%25%20local-3E7D5A.svg" alt="100% local">
   <a href="https://discord.gg/temm1e"><img src="https://img.shields.io/badge/discord-community-5865F2.svg" alt="Discord community"></a>
@@ -166,9 +167,43 @@ The affective layers (v0.4): competence-as-information (Deci/Koestner/Ryan 1999 
 
 The visual-encoding audit (v0.5): interactive simulations carry the largest verified interactivity effect (g+=0.62, D'Angelo/SRI 2014) but *guidance inside the artifact is the active ingredient* (scaffolded versions of the same simulation g+=0.60; guidance in inquiry d=0.50, Lazonder & Harmsen 2016); dynamic-vs-static is modest and moderator-driven (g=0.226, Berney & Bétrancourt 2016 — concentrated where the motion *is* the content, d=0.40 representational vs ≈−0.05 decorative); learner control per se is worth ≈nothing (g=0.05, Karich 2014); seductive details reliably hurt (Sundararajan & Adesope 2020); and expertise reversal is a confirmed disordinal crossover (novices +0.505 with assistance, knowledgeable learners −0.428; Tetzlaff 2025) — which is why explorables are content-triggered, guidance-wrapped, scaffold-faded, and measured against your own receipts rather than assumed to work. What didn't survive verification is stated as open, not assumed — [docs/06-visual-encoding.md](docs/06-visual-encoding.md).
 
-Full treatment with design consequences: [docs/01-foundations.md](docs/01-foundations.md) · what exists and what's missing in every other tool: [docs/02-prior-art.md](docs/02-prior-art.md) · system design: [docs/03-architecture.md](docs/03-architecture.md) · roadmap & constitution: [docs/04-roadmap.md](docs/04-roadmap.md) · the motivation & wisdom layers: [docs/05-affective-layers.md](docs/05-affective-layers.md) · the visual-encoding audit: [docs/06-visual-encoding.md](docs/06-visual-encoding.md)
+Full treatment with design consequences: [docs/01-foundations.md](docs/01-foundations.md) · what exists and what's missing in every other tool: [docs/02-prior-art.md](docs/02-prior-art.md) · system design: [docs/03-architecture.md](docs/03-architecture.md) · roadmap & constitution: [docs/04-roadmap.md](docs/04-roadmap.md) · the motivation & wisdom layers: [docs/05-affective-layers.md](docs/05-affective-layers.md) · the visual-encoding audit: [docs/06-visual-encoding.md](docs/06-visual-encoding.md) · the measured loop: [docs/07-the-measured-loop.md](docs/07-the-measured-loop.md)
 
 </details>
+
+**And the strongest external result, stated honestly.** [Kestin et al., *Scientific Reports*, June 2025 (Harvard, n=194)](https://www.nature.com/articles/s41598-025-97652-6): an AI tutor built on exactly this dialogue grammar — one step at a time, never reveal the solution, make them attempt first — produced **roughly double the learning gains of an active-learning physics classroom, in less time.** The caveat is the whole reason Engram exists: **its outcome was an immediate post-test.** Nobody has ever measured whether AI-tutoring gains survive to thirty days. That is the question this tool is built to answer, on you, with receipts.
+
+---
+
+## The grader is graded (v0.7)
+
+Engram's central claim is separation of powers: a **blind assessor** grades your free recall, and its receipts drive mastery, retention, calibration, and the schedule itself. Which raises the question nobody in this space likes: **who grades the grader?**
+
+Until v0.7, nobody. The oracle was a vibe — an excellent one, unmeasured. And that hole sat directly under the foundation, because *if the grader is lenient, every number Engram has ever shown you is inflated, and the system has no way to find out.*
+
+So we built the audit and ran it, and here is what it says — including the parts that are not flattering:
+
+```
+$ python3 scripts/engram.py grader-health
+```
+
+| | | |
+|---|---|---|
+| **QWK 0.93** | quadratic weighted kappa vs. the gold set | the conventional bar for automated scoring is 0.70 |
+| **leniency bias −0.11** | signed; **+** would mean inflating | it is **harsh**, not lenient |
+| **0 / 198** | judgments where it graded **UP** | across 66 items × 3 independent runs — **it has never once inflated a grade** |
+| **test–retest 0.97** | same answers on re-runs | consistency, which is *not* validity — see below |
+| **verdict `pass`** | so `stats` does **not** stamp `grader_unvalidated` | if it had failed, every retention figure would carry that stamp, and `/coach` would have to say so before quoting one |
+
+**The gold set is public** — [`gold/assessor-gold.jsonl`](gold/assessor-gold.jsonl), 66 items, **88% adversarial by design**: *fluent-but-empty*, *terse-but-correct*, *confident-and-wrong*, *right-answer-wrong-reason*, *paraphrase*, and *partial-credit boundary* cases, each with a written rationale. Run the audit yourself: `/coach audit`.
+
+**Three things this number is not, and we would rather say them than have you find them:**
+
+- **The gold adjudications are authored, not independently human-adjudicated.** Each has a written rationale you can dispute, and disputing one is a first-class contribution — drop it in `gold/local-gold.jsonl` and it overrides ours. But an authored gold set is a weaker instrument than a human-adjudicated one, and calling it otherwise would be the exact dishonesty this feature exists to kill.
+- **High consistency is not correctness.** The literature records a judge at test–retest **0.992** with a position bias of **0.192** — perfectly reproducible and systematically wrong ([docs/07](docs/07-the-measured-loop.md) §3). Engram's assessor is *prompted* to be a skeptic, so it will be highly self-consistent by construction, which is precisely the profile that failure mode wears. That is why the engine **refuses to certify on consistency**: above 0.95 test–retest it demands the leniency bias be strictly under the ceiling, and fewer than three runs cannot pass at all.
+- **It is measurably weakest on `right-answer-wrong-reason`** (52% agreement, bias −0.48) — productions that reach the correct conclusion through a broken derivation. It grades those *harsher* than we did. Whether the grader or the gold set is right there is genuinely open, and it is written down rather than smoothed over.
+
+> *"Our grader agrees with adjudication at QWK 0.93; here is the gold set; run it yourself"* is a sentence almost nobody in AI education can currently say. It is also the only basis on which the rest of this README's numbers are allowed to mean anything.
 
 ---
 
@@ -242,10 +277,13 @@ The model never does calendar math; this does:
 | `focus on\|off\|status` | toggle the ADHD Focus profile (Sprint default, growth every review, always-on amnesty) |
 | `visuals eager\|threshold\|off\|status` | the explorables dial: every high-affordance concept · portal concepts only (default) · none |
 | `artifact set\|clear\|list` | register a built explorable on its node (validated; powers regeneration tracking + the medium comparison) |
+| **`gold`** | the 66-item adversarial gold set, **answers stripped by construction** — shaped exactly like a real settle payload, so the audit grades the real assessor |
+| **`assessor-audit --file F`** | **grade the grader.** QWK (headline) · raw agreement (never quoted alone) · signed leniency bias · test–retest · confusion matrix · per-case-type breakdown |
+| **`grader-health`** | the latest audit's verdict. `stats` embeds it, and stamps `grader_unvalidated` on every retention figure until it passes |
 | `stats` / `report` | telemetry JSON (incl. `modality` — explorable vs dialogue retention) · self-contained HTML dashboard |
 | `refit` | fit review intervals to your measured recall (guarded, ≥50 reviews) |
 | `session-start` / `log-session` | ambient nudge (hook) · session telemetry |
-| `selftest` | 129 checks over the FSRS math, state machine, adherence/retention arithmetic, and every hardened boundary |
+| `selftest` | 163 checks over the FSRS math, state machine, adherence/retention arithmetic, the grader-audit statistics, and every hardened boundary |
 
 </details>
 
