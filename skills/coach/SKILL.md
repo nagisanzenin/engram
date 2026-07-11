@@ -174,7 +174,7 @@ python3 "$ENGRAM" experiment settle --id <id>
 
 **`--verdict` is refused.** It used to write whatever the model said straight into the log — a direct violation of invariant #2 (*the engine owns every number*) in the one command whose entire purpose is a number nobody is allowed to make up.
 
-The engine returns per-arm n and means, the effect, an **exact randomization test** p-value (labels shuffled — valid *by construction*, because the engine randomized them itself), a bootstrap 95% CI, the per-stratum balance, and a `read`. **Relay it. Do not improve it.**
+The engine returns per-arm n and means, the effect, an **exact randomization test** p-value (labels shuffled — valid *by construction*, because the engine randomized them itself), a bootstrap 95% CI (**a signed difference for two arms; `None` for three or more**, because the spread of 3+ arms has no honest interval), the per-stratum balance, and a `read`. **Relay it. Do not improve it.** And an experiment is **settled once** — the engine refuses a second analysis, because peek-and-re-settle is optional stopping and roughly triples the false-positive rate.
 
 **Three things to say, and one never to:**
 

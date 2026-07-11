@@ -69,6 +69,7 @@ grep -rnE '"version"|version-[0-9]|selftest-[0-9]|[0-9]+ checks|[0-9]+/[0-9]+ ch
 |---|---|
 | `.claude-plugin/plugin.json` | `"version"` |
 | `.codex-plugin/plugin.json` | `"version"` (lockstep with the Claude one) |
+| `scripts/engram.py` | `ENGRAM_VERSION` — **a selftest pins it to plugin.json**, so a missed bump goes RED (it caught v1.0.1) |
 | `README.md` | version badge (`badge/version-X.Y.Z` **and** its `alt`) |
 | `README.md` | selftest badge (`badge/selftest-N%2FN`) **if the count changed** |
 | `README.md` | CLI table `selftest` row **if the count changed** |
@@ -431,6 +432,24 @@ willingness to concede, not the subject's validity. So:
   `graded_up == 0` — a *direction* count. Every authoring error was lenient, so correcting them moved
   the bar **down**, and the grader still never exceeded it. That claim got *stronger* under
   correction. **That is the one that goes on the badge.**
+
+> ### ⚠ A WHITELIST THAT ADMITS A FREE-TEXT FIELD STRIPS NOTHING ⚠ NEW
+>
+> v1.0 shipped an `export` "whitelist" and a selftest that *proved it leaked nothing* — and it
+> leaked every node's `claim` **verbatim**, because two of the whitelisted keys (`arm`, `stratum`)
+> were **free-text strings a human authored**. A whitelist of field NAMES does not constrain field
+> VALUES. The promise (*"no code path by which a production could arrive"*) was true of the keys
+> and false of the payload.
+>
+> **Every string on a privacy whitelist must be one of two things: a closed ENUM the engine
+> validates, or a HASH.** Anything a human typed — an arm label, a stratum, a topic, a grader id —
+> gets hashed. `kind`/`grade`/`rating` may leave as themselves *only because* they are enums the
+> ingest path refuses to let anything else into.
+>
+> **And the leak-test that missed it did so the classic way:** it asserted the whitelist keys were
+> clean **by never populating them** — it never started an experiment, so `arm`/`stratum` were
+> always `None`. A privacy test must stuff a canary into **every authored surface** and assert not
+> one character survives. *A test that proves a field is clean by leaving it empty proves nothing.*
 
 ### 6. Does its LABEL survive contact with a reader? ⚠ NEW — bug class #7
 

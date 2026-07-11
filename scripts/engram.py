@@ -32,7 +32,7 @@ SCHEMA = 1
 # The one place the engine knows its own version. Read by `export`, so a shared receipt states
 # which engine produced it — a corpus of receipts from unknown engine versions is not a corpus.
 # Pinned against .claude-plugin/plugin.json by a selftest, so it cannot drift.
-ENGRAM_VERSION = "1.0.0"
+ENGRAM_VERSION = "1.0.1"
 RETENTION_DEFAULT = 0.90
 INTERVAL_MAX = 365
 RETENTION_MIN, RETENTION_MAX = 0.70, 0.97   # sane desired-retention bounds
@@ -1597,20 +1597,33 @@ def _randomization_test(groups, seed):
     return round((hits + 1) / float(EXPERIMENT_PERMUTATIONS + 1), 4)   # add-one: never claims p=0
 
 def _bootstrap_ci(groups, seed):
-    """Percentile bootstrap CI on the spread. Wide is the honest answer at these n — and saying
-    so is the whole point of computing it."""
+    """Percentile bootstrap CI — on the SIGNED two-arm difference, and ONLY for two arms.
+
+    v1.0.1 (the v0.9 review's finding #2): the old version bootstrapped `_spread` = max(mean) −
+    min(mean), which is a non-negative EXTREME-ORDER statistic. Its bootstrap distribution is
+    bounded below by 0 and biased strictly upward as the arm count grows — so for 3+ arms the
+    "95% CI" provably EXCLUDED its own point estimate (three identical arms, observed spread 0.000,
+    reported CI [0.033, 0.367]). A CI that excludes its point estimate is definitionally broken, and
+    it manufactured a strategy separation that was not there — the flattering direction.
+
+    The signed difference of two arms has no such floor, so its bootstrap CI is honest. For k > 2
+    there is no single signed effect to bound, so we return None rather than a broken interval, and
+    the settle read says the effect size is a spread with no CI. Refusing to draw a bad CI is more
+    honest than drawing one."""
     named = [(arm, vs) for arm, vs in groups.items() if vs]
-    if len(named) < 2:
-        return None
+    if len(named) != 2:
+        return None                       # k != 2: no single signed effect to bound. Say so.
+    (a_arm, a_vs), (b_arm, b_vs) = sorted(named)   # deterministic sign: sorted arm order
     rng = random.Random("boot|%s" % seed)
-    stats = []
+    diffs = []
     for _ in range(EXPERIMENT_BOOTSTRAP):
-        res = {arm: [vs[rng.randrange(len(vs))] for _ in vs] for arm, vs in named}
-        stats.append(_spread(res))
-    stats.sort()
-    lo = stats[int(0.025 * len(stats))]
-    hi = stats[min(len(stats) - 1, int(0.975 * len(stats)))]
-    return [round(lo, 3), round(hi, 3)]
+        ra = sum(a_vs[rng.randrange(len(a_vs))] for _ in a_vs) / len(a_vs)
+        rb = sum(b_vs[rng.randrange(len(b_vs))] for _ in b_vs) / len(b_vs)
+        diffs.append(ra - rb)
+    diffs.sort()
+    lo = diffs[int(0.025 * len(diffs))]
+    hi = diffs[min(len(diffs) - 1, int(0.975 * len(diffs)))]
+    return {"of": "%s − %s" % (a_arm, b_arm), "ci95": [round(lo, 3), round(hi, 3)]}
 
 def cmd_experiment(args):
     path = p("experiments.json")
@@ -1703,8 +1716,31 @@ def cmd_experiment(args):
             die("`--verdict` is refused: the engine computes the verdict (invariant #2 — the "
                 "engine owns every number). Until v0.9 this field wrote whatever the model "
                 "said into the experiment log, which is how a vibe becomes a finding.")
+        # ⚠ OPTIONAL-STOPPING GUARD (v1.0.1, the v0.9 post-release review's finding #3). Settle had
+        # no status check: re-settling as data trickled in kept only the last verdict and roughly
+        # TRIPLED the false-positive rate (0.04 -> 0.117 at nominal 0.05). Peek-and-re-settle until
+        # the coin lands is the exact optional-stopping fallacy a pre-registered design exists to
+        # forbid. One analysis. `start` already refuses a second active experiment; `settle` now
+        # refuses a second analysis of the same one.
+        if exp.get("status") == "settled":
+            die("experiment %s is already settled — a pre-registered trial is analysed ONCE. "
+                "Re-settling as data arrives is optional stopping: it roughly triples the "
+                "false-positive rate, and it is the exact fallacy pre-registration forbids. "
+                "Start a fresh experiment for a new question." % args.id)
         groups, detail = _experiment_outcomes(exp)
-        mpa = _exp_min_per_arm(exp)
+        # A hand-edited receipt with a truthy non-rating and no grade yields a None outcome, and
+        # `sum([1.0, None])` is a TypeError that bricked settle (finding #5). Reads DEGRADE, they
+        # do not brick — drop the un-scoreable data points, exactly as every other read path drops
+        # type-corrupt input rather than dying on it.
+        groups = {arm: [v for v in vs if isinstance(v, (int, float))] for arm, vs in groups.items()}
+        # ⚠ THE POWER FLOOR IS THE ENGINE'S, NOT THE PAYLOAD'S (v1.0.1, finding #1 — SEVERE).
+        # `powered` was gated on the experiment's OWN `min_per_arm`, so a design that declared
+        # `min_per_arm: 6` (the underpowered v0.8 default this release exists to kill) certified
+        # as `powered: true` and read "suggestive" — on 6 data points per arm. A power gate you can
+        # buy down with one payload field is not a power gate, and the shipped skill actively
+        # promised the opposite ("the settle will read underpowered, and it will be right"). The
+        # design may set a HIGHER bar than the engine; it may never set a lower one.
+        mpa = max(_exp_min_per_arm(exp), EXPERIMENT_MIN_PER_ARM)
         ns = {arm: len(v) for arm, v in groups.items()}
         means = {arm: (round(sum(v) / len(v), 3) if v else None) for arm, v in groups.items()}
         powered = all(n >= mpa for n in ns.values()) and len(ns) >= 2
@@ -1724,15 +1760,17 @@ def cmd_experiment(args):
                 continue                  # an unhashable stratum/arm would poison the dict itself
             balance.setdefault(st, {}).setdefault(arm, 0)
             balance[st][arm] += 1
+        ci_str = ("95%% CI on %s %s" % (ci["of"], ci["ci95"])) if isinstance(ci, dict) \
+            else "no CI (3+ arms: the spread has no honest interval — see ci95)"
         if not powered:
             read = ("UNDERPOWERED — %s. This is not a null result; it is an ABSENCE of a result, "
                     "and the difference matters: a coin flipped twice does not disprove the coin. "
-                    "Need >=%d per arm."
+                    "Need >=%d per arm (the engine's floor; a design cannot buy it down)."
                     % (", ".join("%s n=%d" % (a, n) for a, n in sorted(ns.items())), mpa))
         elif p_value is not None and p_value < 0.05:
-            read = ("%s leads by %.2f (p=%.3f, randomization test; 95%% CI %s). Suggestive, and "
-                    "it is n-of-1 — it is true about YOU, on THIS material, and it is not a law."
-                    % (best, effect, p_value, ci))
+            read = ("%s leads by %.2f (p=%.3f, randomization test; %s). Suggestive, and it is "
+                    "n-of-1 — it is true about YOU, on THIS material, and it is not a law."
+                    % (best, effect, p_value, ci_str))
         else:
             read = ("no arm separated from the others (spread %.2f, p=%.3f). At this n that means "
                     "'we cannot tell', not 'they are the same'." % (effect or 0.0, p_value or 1.0))
@@ -1760,7 +1798,7 @@ def cmd_experiment(args):
             emit({"active": None, "note": "no active experiment"})
             return
         groups, _ = _experiment_outcomes(exp)
-        mpa = _exp_min_per_arm(exp)
+        mpa = max(_exp_min_per_arm(exp), EXPERIMENT_MIN_PER_ARM)   # the ENGINE's floor, not the payload's
         ns = {arm: len(v) for arm, v in groups.items()}
         assigns = exp.get("assignments")
         ready = bool(ns) and len(ns) >= 2 and all(n >= mpa for n in ns.values())
@@ -1924,12 +1962,16 @@ def compute_modality(receipts):
         key = (topic, node)
         if key not in first or d < first[key][0]:   # ties: keep the earlier-appended
             first[key] = (d, r)
-    arms = {"explorable": [0, 0], "dialogue": [0, 0]}
+    # v1.0.1 (the v0.9 review's finding #4): `first_review_recall` must mean ONE thing. This used
+    # `rating != "again"`, scoring a `partial` as a FULL 1.0 — while the experiment engine, on the
+    # identically-named metric, scores `partial` as 0.5 (`_outcome`). Same name, same engine, same
+    # data, two answers, and modality's was the lenient one. §4.8 Q1: the engine's commands must
+    # agree. Both now use `_outcome`, the shared predicate.
+    arms = {"explorable": [0.0, 0], "dialogue": [0.0, 0]}
     for _d, r in first.values():
         arm = "explorable" if r.get("artifact") else "dialogue"
         arms[arm][1] += 1
-        if r["rating"] != "again":
-            arms[arm][0] += 1
+        arms[arm][0] += _outcome(r)
     out = {a: {"first_review_recall": (round(ok / n, 3) if n else None), "n": n}
            for a, (ok, n) in arms.items()}
     ex, dg = out["explorable"], out["dialogue"]
@@ -3673,13 +3715,24 @@ def cmd_refit(args):
 EXPORT_STRIPPED = ("production", "probe", "claim", "rubric", "goal", "interests",
                    "misconceptions", "misconception_text", "rubric_notes", "feedback_line",
                    "topic_string", "node_id", "title", "why_chain", "transfer_probe",
-                   "commitment", "notes", "question")
+                   "commitment", "notes", "question",
+                   # v1.0.1: these three were STRINGS ON THE WHITELIST — and a whitelist that
+                   # admits a free-text string strips nothing. `arm` and `stratum` are learner-
+                   # and architect-authored: `stratify_by: ["claim"]` routed a node's CLAIM
+                   # verbatim into the export, while the file's own `stripped` list swore `claim`
+                   # was removed. `grader` was uncapped here. All three now leave as HASHES.
+                   "arm_label", "stratum_label", "grader_id")
 # The ONLY keys that may appear on an exported receipt. Constructed by name; nothing else can
-# arrive. (A blacklist is a promise you have to keep every release. A whitelist is one you keep
-# by construction.)
+# arrive — BUT a whitelist that admits a free-text field is a hole in the whitelist, and that hole
+# was the v1.0.0 leak. Every STRING key here is now either a closed enum the engine validates, or
+# a hash. Nothing a human typed leaves as itself.
 EXPORT_RECEIPT_KEYS = ("topic_hash", "node_hash", "kind", "grade", "rating", "confidence",
                        "days_since_encode", "s_before", "s_after", "interval_days",
-                       "retrievability", "artifact", "arm", "stratum", "grader", "grader_qwk")
+                       "retrievability", "artifact", "arm_hash", "stratum_hash",
+                       "grader_hash", "grader_qwk")
+# `kind`/`grade`/`rating` are the only strings that leave un-hashed, because each is a CLOSED ENUM
+# the engine validates — not free text. Anything a human authored is hashed.
+_EXPORT_ENUM = {"kind": KINDS, "grade": GRADES, "rating": tuple(RATINGS)}
 
 def _hash12(s):
     """A stable 12-hex-char digest. Groups a learner's own receipts and lets the corpus compare
@@ -3723,11 +3776,18 @@ def cmd_export(args):
                 skipped += 1
                 continue
             arm, stratum = arms.get((t, r["node"]), (None, None))
-            # CONSTRUCTED BY NAME. There is no path by which a production could arrive here.
+            # CONSTRUCTED BY NAME — and every free-text field is HASHED, not carried. An `arm`
+            # label and a `stratum` are learner/architect prose; the corpus only needs to know
+            # that two receipts shared a condition, never what the condition was CALLED. Same for
+            # the grader id. A closed enum (kind/grade/rating) leaves as itself because it is not
+            # text a human wrote. This is the v1.0.0 leak, closed: `stratify_by: ["claim"]` can no
+            # longer route a node's claim into the file, because the stratum leaves as a digest.
             rec = {
                 "topic_hash": _hash12(t),
                 "node_hash": _hash12("%s/%s" % (t, r["node"])),
-                "kind": r.get("kind"), "grade": r.get("grade"), "rating": r.get("rating"),
+                "kind": r.get("kind") if r.get("kind") in _EXPORT_ENUM["kind"] else None,
+                "grade": r.get("grade") if r.get("grade") in _EXPORT_ENUM["grade"] else None,
+                "rating": r.get("rating") if r.get("rating") in _EXPORT_ENUM["rating"] else None,
                 "confidence": clean_confidence(r.get("confidence")),
                 "days_since_encode": as_number(r.get("days_since_encode")),
                 "s_before": as_number(r.get("s_before")),
@@ -3735,9 +3795,11 @@ def cmd_export(args):
                 "interval_days": as_number(r.get("interval_days")),
                 "retrievability": as_number(r.get("retrievability")),
                 "artifact": bool(r.get("artifact")),
-                "arm": arm if isinstance(arm, str) else None,
-                "stratum": stratum if isinstance(stratum, str) else None,
-                "grader": r.get("grader") if isinstance(r.get("grader"), str) else None,
+                "arm_hash": _hash12("arm|" + arm) if isinstance(arm, str) and arm else None,
+                "stratum_hash": (_hash12("stratum|" + stratum)
+                                 if isinstance(stratum, str) and stratum else None),
+                "grader_hash": (_hash12("grader|" + r["grader"])
+                                if isinstance(r.get("grader"), str) and r["grader"] else None),
                 "grader_qwk": qwk,          # a receipt carries its oracle's MEASURED validity
             }
             out.append({k: rec[k] for k in EXPORT_RECEIPT_KEYS})
@@ -3753,7 +3815,16 @@ def cmd_export(args):
         "grader": {"verdict": gh.get("verdict"), "qwk": qwk,
                    "leniency_bias": gh.get("leniency_bias"),
                    "gold_adjudication": gh.get("gold_adjudication"),
-                   "direction": gh.get("direction")},
+                   "direction": gh.get("direction"),
+                   # HONEST about what `grader_qwk` on each receipt IS: the validity of the grader
+                   # measured NOW, stamped on every receipt regardless of when it was graded. A
+                   # receipt graded before any audit existed still carries today's number — which
+                   # is the best available estimate, not a per-receipt measurement, and saying so
+                   # is cheaper than being quietly misread (the reviewer's finding #2).
+                   "qwk_note": ("grader_qwk on each receipt is the grader's validity measured at "
+                                "EXPORT time, not at grading time — receipts graded before this "
+                                "audit carry it too. It is the current best estimate of the "
+                                "oracle behind them, not a timestamped per-receipt measurement.")},
         "n_receipts": len(out),
         "receipts": out,
         "stripped": list(EXPORT_STRIPPED),
@@ -4805,6 +4876,134 @@ def cmd_selftest(_args):
                 and v["leader"] is not None)             # it still reports the raw numbers
     check("an UNDERPOWERED experiment reads `underpowered` — an absence of a result, not a null one",
           fresh(_underpowered_refuses_to_claim))
+
+    # -- ⚠ THE POWER FLOOR IS THE ENGINE'S, NOT THE PAYLOAD'S (v1.0.1, v0.9 review finding #1) --
+    # A design that declared `min_per_arm: 6` certified as `powered: true` and read "suggestive" on
+    # 6 data points per arm — the exact underpowered regime v0.9 exists to kill, bought with one
+    # payload field, while the skill promised the opposite. `powered` now gates on max(design,
+    # engine floor). Fixture: 12 nodes, `min_per_arm: 6` -> 6/arm, arm A wins every time (clean
+    # separation, p < 0.05) -> and it must STILL read underpowered, because 6 < 15.
+    def _power_floor_cannot_be_bought_down(h):
+        ids = _exp_topic(12)
+        x = _exp_start(seed="SF", mpa=6)                 # a SLOPPY design, below the floor
+        low = x["min_per_arm"] == 6 and "power_note" in x
+        arms = {n: r["arm"] for n, r in _exp_assign_all(ids).items()}
+        for nid in ids:
+            _capture(cmd_rate, _ns(topic="m", node=nid, rating="good", grade="recalled",
+                                   kind="encode", production="x"))
+        os.environ["ENGRAM_TODAY"] = "2026-08-06"
+        for nid in ids:                                  # arm A wins every time -> clean, p<0.05
+            win = arms[nid] == "A"
+            _capture(cmd_rate, _ns(topic="m", node=nid, rating="good" if win else "again",
+                                   grade="recalled" if win else "lapsed",
+                                   kind="review", production="y"))
+        v = _capture_json(cmd_experiment, _ns(action="settle", id=x["id"], verdict=None,
+                                              json=None, file=None, topic=None, node=None))
+        return (low                                      # the design DID ask for 6…
+                and v["min_per_arm"] == EXPERIMENT_MIN_PER_ARM   # …but the verdict uses 15
+                and v["powered"] is False                # …so 6/arm is UNDERPOWERED, as it must be
+                and "UNDERPOWERED" in v["read"]
+                and (v["p_value"] is None or v["p_value"] < 0.05))   # even with a clean separation
+    check("⚠ the power floor is the ENGINE's, not the payload's (min_per_arm:6 still reads underpowered)",
+          fresh(_power_floor_cannot_be_bought_down))
+
+    # -- ⚠ OPTIONAL-STOPPING GUARD: an experiment is analysed ONCE (v0.9 review finding #3) --
+    def _settle_refuses_a_second_analysis(h):
+        ids = _exp_topic(4)
+        x = _exp_start(seed="SS", mpa=2)
+        _exp_assign_all(ids)
+        for nid in ids:
+            _capture(cmd_rate, _ns(topic="m", node=nid, rating="good", grade="recalled",
+                                   kind="encode", production="x"))
+        os.environ["ENGRAM_TODAY"] = "2026-08-06"
+        for nid in ids:
+            _capture(cmd_rate, _ns(topic="m", node=nid, rating="good", grade="recalled",
+                                   kind="review", production="y"))
+        first = _capture_json(cmd_experiment, _ns(action="settle", id=x["id"], verdict=None,
+                                                  json=None, file=None, topic=None, node=None))
+        first_p = first["p_value"]
+        try:
+            _capture(cmd_experiment, _ns(action="settle", id=x["id"], verdict=None,
+                                         json=None, file=None, topic=None, node=None))
+            return False                       # a second analysis was accepted: optional stopping
+        except SystemExit:
+            pass
+        # …and the first verdict is untouched — a refused re-settle cannot corrupt the record
+        exps = _capture_json(cmd_experiment, _ns(action="list", json=None, file=None, id=None,
+                                                 topic=None, node=None, verdict=None))
+        return exps[0]["status"] == "settled" and exps[0]["verdict"]["p_value"] == first_p
+    check("⚠ `settle` refuses a SECOND analysis (optional stopping ~triples the false-positive rate)",
+          fresh(_settle_refuses_a_second_analysis))
+
+    # -- Finding #5: a hand-edited un-scoreable receipt DEGRADES the settle, never bricks it --
+    def _settle_survives_a_garbage_outcome(h):
+        ids = _exp_topic(4)
+        x = _exp_start(seed="SG", mpa=2)
+        _exp_assign_all(ids)
+        for nid in ids:
+            _capture(cmd_rate, _ns(topic="m", node=nid, rating="good", grade="recalled",
+                                   kind="encode", production="x"))
+        os.environ["ENGRAM_TODAY"] = "2026-08-06"
+        # give three nodes a real first review, and leave the FOURTH's only review a hand-forged
+        # un-scoreable one — so it becomes that node's `first review` and `_outcome` returns None.
+        for nid in ids[:3]:
+            _capture(cmd_rate, _ns(topic="m", node=nid, rating="good", grade="recalled",
+                                   kind="review", production="y"))
+        append_jsonl(p("receipts", "m.jsonl"), {
+            "id": "hand", "ts": "2026-08-07", "topic": "m", "node": ids[3],
+            "kind": "review", "rating": "excellent", "grade": None})   # truthy non-rating, no grade
+        _RECEIPTS_CACHE.clear()
+        # confirm the fixture actually produces the None outcome the fix must survive (or the
+        # check is theatre — §4.5). If a future change stops _outcome from returning None here,
+        # this fails loudly rather than passing vacuously.
+        groups, _ = _experiment_outcomes(next(e2 for e2 in
+                     _as_list(read_json(p("experiments.json"), [])) if e2.get("id") == x["id"]))
+        exercised = any(v is None for vs in groups.values() for v in vs)
+        v = _capture_json(cmd_experiment, _ns(action="settle", id=x["id"], verdict=None,
+                                              json=None, file=None, topic=None, node=None))
+        return exercised and isinstance(v, dict) and "read" in v   # RETURNED, did not TypeError
+    check("a settle DEGRADES on an un-scoreable hand-edited receipt (never a TypeError brick)",
+          fresh(_settle_survives_a_garbage_outcome))
+
+    # -- Finding #2: the bootstrap CI is on the SIGNED two-arm diff, and NONE for 3+ arms --
+    def _bootstrap_ci_is_honest(_h=None):
+        # three IDENTICAL arms: observed spread 0.000. The old code returned a CI like [0.03, 0.37]
+        # that EXCLUDED its own point estimate. The new code returns None for k != 2.
+        three = _bootstrap_ci({"A": [1.0, 0.0] * 8, "B": [1.0, 0.0] * 8, "C": [1.0, 0.0] * 8}, "s")
+        # two arms with a real difference: a SIGNED CI whose sign is meaningful
+        two = _bootstrap_ci({"A": [1.0] * 15, "B": [0.0] * 15}, "s")
+        return (three is None                                   # k=3: no dishonest interval
+                and isinstance(two, dict) and "of" in two       # k=2: a signed difference…
+                and two["ci95"][0] > 0)                          # …and A>B is positive, correctly
+    check("the bootstrap CI is a SIGNED two-arm difference (None for 3+ arms — never excludes its own effect)",
+          _bootstrap_ci_is_honest)
+
+    # -- Finding #4: `first_review_recall` means ONE thing across modality and the experiment --
+    def _modality_and_experiment_agree_on_recall(h):
+        # 15 nodes, all first-reviewed PARTIAL. modality used to score partial as 1.0; the
+        # experiment scores it 0.5. Same metric name -> they must now agree.
+        for i in range(MODALITY_MIN_N):
+            _capture(cmd_rate, _ns(topic="t%d" % i if False else "t", node="n%d" % i,
+                                   rating="hard", grade="partial", kind="encode",
+                                   production="x")) if False else None
+        # build one topic with 15 nodes, encode, then FIRST-review each as partial
+        nodes = {"n%02d" % i: {"claim": "c", "probe": "p", "rubric": ["r"]}
+                 for i in range(MODALITY_MIN_N)}
+        write_json(p("payload.json"),
+                   {"topic": "t", "title": "T", "order": sorted(nodes), "nodes": nodes})
+        _capture(cmd_add_topic, _ns(file=p("payload.json"), replace=False))
+        for nid in nodes:
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", grade="recalled",
+                                   kind="encode", production="x"))
+        os.environ["ENGRAM_TODAY"] = "2026-08-06"
+        for nid in nodes:
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="hard", grade="partial",
+                                   kind="review", production="y"))
+        mod = _capture_json(cmd_stats, _ns())["modality"]
+        # every node is dialogue-only (no artifact); partial -> 0.5, not 1.0
+        return mod["dialogue"]["first_review_recall"] == 0.5 and mod["dialogue"]["n"] == MODALITY_MIN_N
+    check("§4.8 Q1: `first_review_recall` scores partial as 0.5 in modality too (agrees with the experiment)",
+          fresh(_modality_and_experiment_agree_on_recall))
 
     # -- §5.5 THE INSTRUMENT GATE: does the ruler rank a REAL effect above NO effect? --
     # `experiment settle` CERTIFIES ("derivation-first won"). v0.7's gold set was an instrument
@@ -6582,6 +6781,21 @@ def cmd_selftest(_args):
     # check above while phoning home just as hard.
     check("⚠ …and it never SHELLS OUT (no subprocess, no os.system/popen/exec/spawn)",
           not _shells)
+    # HONEST ABOUT THE LIMIT (the reviewer's finding #3). This scan is a strong REGRESSION guard —
+    # it catches the realistic way a network dependency creeps in (someone adds `import requests`
+    # to make one thing convenient). It is NOT an impossibility proof: `__import__("socket")`,
+    # `importlib.import_module`, `ctypes`, or `exec` of a string would all pass it green. So the
+    # engine also contains NONE of those dynamic-import primitives — checked here, so the guarantee
+    # is "no network code AND no way to smuggle one in dynamically", which the two checks together
+    # actually support, rather than the broader claim a single import-scan cannot.
+    _dyn = [n.id for n in _ast.walk(_tree)
+            if isinstance(n, _ast.Name) and n.id in ("__import__", "eval", "exec", "compile")]
+    _dyn += [n.func.attr for n in _ast.walk(_tree)
+             if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
+             and isinstance(n.func.value, _ast.Name)
+             and n.func.value.id in ("importlib", "ctypes")]
+    check("⚠ …and no DYNAMIC import escape hatch (__import__/eval/exec/compile/importlib/ctypes)",
+          not _dyn)
 
     # -- the engine's version cannot drift from the plugin manifest --
     def _version_matches_the_manifest(_h=None):
@@ -6597,16 +6811,37 @@ def cmd_selftest(_args):
     # you must keep every release; a whitelist is one you keep by construction.
     def _export_leaks_nothing(h):
         SECRET = "CANARY-7f3a-DO-NOT-LEAK"
-        _add_ab()
-        # a receipt with the canary in every free-text field the schema has (and some it doesn't)
-        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", grade="recalled",
-                               kind="encode", production=SECRET, probe=SECRET, confidence=70))
+        # v1.0.0 shipped a LEAK here and this test passed anyway — because it never started an
+        # experiment, so `arm` and `stratum` (the two free-text keys that leak) were always None.
+        # **It asserted the whitelist keys were clean by never populating them.** The fix to the
+        # test is the fix to the class: put the canary in EVERY authored surface, including the
+        # experiment arm and a stratum pointed at a text-bearing node field, which is the exact
+        # path the reviewer used (`stratify_by: ["claim"]` routed a node's claim into the export).
+        g = {"topic": "t", "title": SECRET, "goal": SECRET, "order": ["a", "b"], "nodes": {
+            "a": {"claim": SECRET, "probe": SECRET, "rubric": [SECRET], "transfer_probe": SECRET,
+                  "why_chain": [SECRET], "secret_architect_field": SECRET},   # arbitrary payload field
+            "b": {"claim": SECRET, "probe": SECRET, "rubric": [SECRET],
+                  "edges": {"requires": ["a"]}}}}
+        write_json(p("payload.json"), g)
+        _capture(cmd_add_topic, _ns(file=p("payload.json"), replace=False))
+        # an experiment whose ARM is learner-authored text, stratified on TEXT-BEARING node fields
+        _capture(cmd_experiment, _ns(action="start", file=None, json=json.dumps({
+            "question": SECRET, "arms": [SECRET, "control"], "metric": "first_review_recall",
+            "seed": SECRET, "stratify_by": ["claim", "secret_architect_field"]}),
+            topic=None, node=None, id=None, verdict=None))
+        for nid in ("a", "b"):
+            _capture(cmd_experiment, _ns(action="assign", topic="t", node=nid, json=None,
+                                         file=None, id=None, verdict=None))
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", grade="recalled",
+                                   kind="encode", production=SECRET, probe=SECRET, confidence=70))
+        # a receipt with the canary in every field the schema has AND a field it doesn't, AND a
+        # hand-forged `grader` string (which `export` used to copy uncapped)
         append_jsonl(p("receipts", "t.jsonl"), {
             "id": "r_x", "ts": "2026-07-20", "topic": "t", "node": "a", "kind": "review",
             "rating": "good", "grade": "recalled",
             "production": SECRET, "probe": SECRET, "claim": SECRET, "rubric": [SECRET],
             "rubric_notes": SECRET, "feedback_line": SECRET, "misconceptions": [SECRET],
-            "a_field_invented_in_v1_1": SECRET,      # ← the whole point of a whitelist
+            "grader": SECRET, "a_field_invented_in_v1_2": SECRET,
         })
         _RECEIPTS_CACHE.clear()
         _capture(cmd_misconception, _ns(action="add", topic="t", node="a", json=None, file=None,
@@ -6615,22 +6850,27 @@ def cmd_selftest(_args):
                                 file=None))
         # a PASSING audit, so the export gate opens
         gold = [_gitem("e%02d" % i, _ORD[i % 3]) for i in range(33)]
-        run = [{"sid": g["sid"], "grade": g["gold_grade"]} for g in gold]
+        run = [{"sid": g2["sid"], "grade": g2["gold_grade"]} for g2 in gold]
         _audit(h, gold, [run, run, run])
         res = _capture_json(cmd_export, _ns(topic=None, contributor="@me",
                                             allow_unvalidated=False))
         blob = open(res["path"], encoding="utf-8").read()
         bundle = json.loads(blob)
         keys = {k for r in bundle["receipts"] for k in r}
-        return (SECRET not in blob                          # ← THE PROPERTY
+        # …and the receipts must actually be POPULATED, or the test proves nothing again
+        populated = any(r.get("arm_hash") and r.get("stratum_hash") for r in bundle["receipts"])
+        return (SECRET not in blob                          # ← THE PROPERTY, over ALL surfaces
                 and "transformers" not in blob              # (no topic strings, ever)
                 and keys == set(EXPORT_RECEIPT_KEYS)        # …by construction, not by deletion
+                and populated                               # arm_hash/stratum_hash actually set
                 and "t" not in {r.get("topic_hash") for r in bundle["receipts"]}
                 and bundle["stripped"]                      # the promise ships INSIDE the file
+                and "arm_label" in bundle["stripped"]       # …and it NAMES the once-leaking fields
+                and "stratum_label" in bundle["stripped"]
                 and bundle["attributed"] is True
                 and bundle["contributor"] == "@me"
-                and bundle["n_receipts"] == 2)
-    check("⚠ EXPORT LEAKS NOTHING: text in every field, and not one character of it survives",
+                and bundle["n_receipts"] == 3)
+    check("⚠ EXPORT LEAKS NOTHING: text in every field — INCLUDING arm & stratum — and none survives",
           fresh(_export_leaks_nothing))
 
     # -- v0.7 GATES v1.0: an unaudited oracle may not contribute. It is a REFUSAL, not a warning. --

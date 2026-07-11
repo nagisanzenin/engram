@@ -1,5 +1,79 @@
 # Changelog
 
+## 1.0.1 — 2026-07-11 · TWO post-release reviews, and the leak the whole project exists to prevent
+
+Two independent reviewers read shipped code — v1.0.0 (the Commons) and the still-in-`main` v0.9.0
+(the Method). Between them, **one critical leak and one severe measurement bug**, plus five more.
+Selftest **207 → 213.**
+
+### ⚠⚠ CRITICAL — `export` leaked free text verbatim. The v1.0 headline was false.
+
+`arm` and `stratum` were **strings on the whitelist** — and a whitelist that admits a free-text
+field is a hole in the whitelist. `stratify_by: ["claim"]` routed **every node's `claim` text,
+verbatim**, into the export's `stratum` field — while the file's own `stripped` list swore `claim`
+was removed. The learner-authored `arm` label leaked on **every** experiment. A hand-forged
+`grader` string left uncapped.
+
+```
+LEAKED into the "attributed, text-stripped" export:
+  CLAIM-CANARY: 4   ARCHITECT-SECRET-CANARY: 4   ARM-CANARY-LEAK: 1   stigmatized: 4
+```
+
+**Fixed:** `arm`, `stratum`, and `grader` now leave as **hashes** (`arm_hash`, `stratum_hash`,
+`grader_hash`). The only strings that leave un-hashed are `kind`/`grade`/`rating` — **closed
+enums the engine validates**, not text a human wrote. *A whitelist that admits a free-text field
+strips nothing.*
+
+**And the reviewer named exactly why the gate missed it:** the leak-test **never started an
+experiment**, so `arm`/`stratum` were always `None` in the fixture. **It asserted the whitelist
+keys were clean by never populating them.** The test now stuffs the canary into *every* authored
+surface — the experiment arm, a stratum pointed at a node's `claim`, an arbitrary architect
+field — which is the exact path the reviewer used.
+
+### ⚠ SEVERE — the power floor could be bought down with one payload field
+
+`experiment settle` gated `powered` on the *design's own* `min_per_arm`. A trial declaring
+`min_per_arm: 6` — the underpowered v0.8 default this release exists to **kill** — certified as
+`powered: true` and read *"suggestive"* on six data points per arm. **And the shipped skill
+promised the opposite:** *"the settle will read underpowered, and it will be right."* It did not.
+
+**Fixed:** `powered` gates on `max(design, EXPERIMENT_MIN_PER_ARM)`. A design may set a *higher*
+bar; it can never buy the engine's floor down. *A power gate you can lower with a payload field is
+not a power gate.*
+
+### And five more, all in shipped code
+
+- **Optional stopping.** `settle` had no status guard — re-settling as data arrived kept only the
+  last verdict and **roughly tripled the false-positive rate (0.04 → 0.117)**. Peek-and-re-settle
+  until the coin lands is the exact fallacy pre-registration forbids. Now: **an experiment is
+  analysed once.** `start` already refused a second active experiment; `settle` now refuses a
+  second analysis of the same one.
+- **A broken bootstrap CI.** It percentile-bootstrapped `max(mean) − min(mean)`, a non-negative
+  extreme-order statistic — so for 3+ arms the *"95% CI" excluded its own point estimate* (three
+  identical arms, spread 0.000, CI [0.033, 0.367]). It manufactured a strategy separation that was
+  not there. Now: a **signed two-arm difference** CI (which has no such floor), and **None for
+  k > 2** with the read saying so. *Refusing to draw a bad CI is more honest than drawing one.*
+- **`first_review_recall` meant two different numbers.** `stats.modality` scored a `partial` as a
+  full **1.0**; the experiment engine, on the identically-named metric, scored it **0.5**. Same
+  name, same engine, same data, two answers — and modality's was the lenient one. Both now use
+  `_outcome`, the shared predicate. (§4.8 Q1: the engine's commands must agree.)
+- **`settle` bricked** (not degraded) on a hand-edited receipt whose `rating` was a truthy
+  non-rating with no grade — `sum([1.0, None])` → `TypeError`, and `status` had greenlit the settle
+  first. Now it drops the un-scoreable data point, like every other read path.
+- **The no-network guarantee, made honest about its limit.** The AST scan is a strong regression
+  guard, not an impossibility proof (`__import__`, `importlib`, `ctypes`, `exec` would pass it). So
+  the engine also contains **none of those dynamic-import primitives**, checked by a new selftest —
+  the two checks together support "no network code AND no way to smuggle one in dynamically," which
+  a single import-scan cannot claim alone.
+- `grader_qwk` on each receipt now ships with a `qwk_note` stating plainly that it is the grader's
+  validity **at export time**, stamped on every receipt regardless of when it was graded — the best
+  available estimate, not a per-receipt measurement.
+
+**Everything the two reviewers checked and found clean is on the record:** the randomization-test
+p-value (valid under unequal n, false-positive rate at/below nominal), block randomization (stable,
+balanced, reproducible), the modality floor move, and **every v0.8.1 fix still holds after the
+merge.**
+
 ## 1.0.0 — 2026-07-11 · THE COMMONS — the first learning system that is also an experiment the whole field can read
 
 The evidence base of learning science is built on **undergraduates, word pairs, and 20-minute
