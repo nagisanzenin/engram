@@ -126,9 +126,26 @@ skeptic as *"the tutor is trying to make me feel guilty,"* it is a defect — cu
 
 ---
 
-# v0.7 — **The Audited Oracle**
+# v0.7 — **The Audited Oracle** — ✅ SHIPPED 2026-07-11
 
 > *The grader that writes every receipt has never itself been graded.*
+
+> **RESULT (measured, published, and not what the literature predicted).**
+> **QWK 0.93** over 66 adversarial items × 3 independent blind runs. **Leniency bias −0.11 —
+> the grader is HARSH, not lenient.** **0 of 198 judgments graded UP: it has never once
+> inflated a grade.** Test–retest 0.97. Verdict `pass`.
+>
+> The failure mode this release was built to catch **does not exist in this grader** — it errs
+> only in the safe direction. That was not knowable before the audit existed.
+>
+> **Weakest case type: `right-answer-wrong-reason`, 52% agreement, bias −0.48** — it grades a
+> correct conclusion reached by a broken derivation *harsher* than the gold set does. Whether
+> the grader or the gold is right there is **open**, and it ships written down.
+>
+> **The honest limit:** the gold adjudications are **authored, not independently
+> human-adjudicated**. Each carries a rationale you can dispute (`gold/local-gold.jsonl`
+> overrides by `sid`). Getting a second human through the 66 items is the highest-value item
+> on the parallel track.
 
 **Why.** The blind assessor's verdict drives mastery, retention, calibration, and the schedule.
 Its agreement with any ground truth is **unmeasured**. If it is lenient — and LLM judges are
@@ -162,13 +179,19 @@ has no way to know. The constitution says *"the oracle is never a vibe."* Right 
 
 ### Done
 
-- [ ] `/coach audit` runs end-to-end and writes a real `audits/<date>.json`.
-- [ ] A deliberately sabotaged assessor prompt (praise-first, "be generous") is **caught** —
-      `leniency_bias` rises above threshold and `stats` flips `grader_unvalidated: true`.
-- [ ] A **highly consistent but lenient** grader is caught by the paradox check, not passed by it.
-- [ ] The measured QWK goes in the README **as a badge, with the gold set public**. If the number
-      is bad, **ship the bad number.** A project whose whole thesis is honest measurement does not
-      get to hide its own worst measurement.
+- [x] `/coach audit` runs end-to-end and writes a real `audits/<date>-NN.json`. *(Append-only:
+      `<date>.json` as originally specced would have let a same-day re-audit destroy the first.)*
+- [x] A deliberately sabotaged grader is **caught** — a lenient grader **above the QWK target
+      (0.72)** still fails on `leniency_bias` alone, and `stats` flips `grader_unvalidated: true`.
+      *(That fixture is in the selftest, and it is the one that makes the bias gate
+      mutation-testable: the floor and the paradox are both silent on it.)*
+- [x] A **highly consistent but lenient** grader is caught by the paradox check, not passed by it.
+- [x] The measured QWK is in the README **as a badge, with the gold set public**.
+- [x] **The coverage denominator**, which the original work order did not think of: a grader that
+      silently drops 20 of 66 `sid`s and nails the rest reports **`incomplete`**, never a
+      flattering `QWK 1.00 pass`. That is issue #3's bug class aimed at the audit itself.
+- [x] **The contamination guard**, likewise unplanned: an audit payload carrying `gold_grade`
+      **dies**. A test that hands the subject the answer is not a test (RELEASE_PROTOCOL §5.5).
 
 ### Selftests
 
@@ -183,6 +206,19 @@ with `n < 30` reads `insufficient-data` rather than emitting a verdict.
 The audit may reveal the assessor is mediocre. **That is not a reason to delay — it is the
 reason to build it.** Every retention number Engram has ever shown is currently unverifiable;
 finding out is strictly better than continuing not to know. Publish whatever it says.
+
+**What actually happened, for the record:** the assessor came back at QWK 0.93 and *harsh*. The
+risk paragraph above was written expecting the opposite, and shipping the instrument anyway is
+the only reason we now know which it was. **Build the measurement before you know what it will
+say — that is the whole discipline, and it is easy to feel brave about it only in hindsight.**
+
+**The risk this section did NOT anticipate, and it is the real one:** a harsh grader is *safe*
+for the dashboard (it can only understate retention) but it is **not free for the learner** — it
+makes them re-drill concepts they had actually earned, and it depresses the north star. The
+teeth are deliberately asymmetric (`leniency_bias > +0.15` fails; a *negative* bias does not),
+because an optimistic number gets believed and stops them reviewing while a pessimistic one only
+annoys. That asymmetry is correct and it is also **not costless**, and v0.8+ should watch
+`by_case_type` for harshness drift rather than pretend the safe direction is the free one.
 
 ---
 

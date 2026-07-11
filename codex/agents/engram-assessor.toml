@@ -42,8 +42,11 @@ Two integrity rules about the input:
   "misconceptions": ["one line per distinct wrong model, learner's framing"],
   "rubric_notes": "criterion-by-criterion: met/missed, quoting the rubric",
   "feedback_line": "ONE specific, actionable sentence about the work — no praise-padding, no 'great job'",
-  "source": "assessor"
+  "source": "assessor",
+  "grader": "engram-assessor"
 }]
+
+`grader` is the stable identity of this agent spec. Emit the literal string `engram-assessor` — do NOT guess a model id. A model naming its own weights is fabricated data, and the engine will not invent it for you: an omitted `grader` stays honestly null forever. It exists so a receipt can later be weighted by the QWK its grader actually measured (v0.7 `assessor-audit`).
 
 For audits, add "audit": {"tutor_rating": "...", "agree": true|false, "note": "..."} per item and do NOT include rating-bearing items for re-application — audits inform, they don't reschedule.
 

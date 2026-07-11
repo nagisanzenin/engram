@@ -1,5 +1,146 @@
 # Changelog
 
+## 0.7.0 — 2026-07-11 · THE ORACLE — the grader that writes every receipt has now itself been graded
+
+The blind assessor's verdict drives mastery, retention, calibration, and the schedule. Its
+agreement with any ground truth had **never been measured**. The constitution says *"the oracle
+is never a vibe"*; it had been one — an excellent one, unaudited — and the hole sat directly
+under the foundation, because **if the grader is lenient, every number Engram has ever printed
+is inflated and nothing in the system could discover it.**
+
+Selftest **129 → 152**.
+
+### The result — and we publish it whatever it says
+
+Ran the real assessor against the new gold set, three independent times, blind:
+
+| | |
+|---|---|
+| **QWK 0.93** | vs. a 0.70 conventional bar, 0.60 floor |
+| **leniency bias −0.11** | signed, `+` = inflating. It is **harsh**, not lenient |
+| **0 of 198 judgments graded UP** | 66 items × 3 runs. **It has never once inflated a grade** |
+| **test–retest 0.97** | consistency — which the engine deliberately refuses to accept as validity |
+| **verdict `pass`** | so retention figures are not stamped `grader_unvalidated` |
+
+The bug class this whole release was built to catch — a lenient oracle quietly inflating every
+retention number — **does not exist in this grader.** It errs only in the safe direction. That
+was worth finding out, and it was not knowable before today.
+
+**Weakest case type: `right-answer-wrong-reason` — 52% agreement, bias −0.48.** On productions
+that reach the correct conclusion through a broken derivation, the grader is *harsher* than our
+adjudication. Whether the grader or the gold set is right there is honestly open, and it ships
+written down rather than smoothed away.
+
+**The caveat that matters most:** the gold adjudications are **authored, not independently
+human-adjudicated.** Every item carries a written rationale you can dispute, and a dispute is a
+first-class contribution (`gold/local-gold.jsonl` overrides ours by `sid`). But an authored gold
+set is a weaker instrument than a human-adjudicated one, and saying otherwise would be the exact
+dishonesty this feature exists to kill.
+
+### Engine
+
+- **`gold`** — the 66-item gold set, **88% adversarial** (fluent-but-empty, terse-but-correct,
+  confident-and-wrong, right-answer-wrong-reason, paraphrase, partial-credit boundary), emitted
+  as a **bare array shaped exactly like `stash list`** and **stripped of the answer by
+  construction**. The strip is a **whitelist, not a blacklist**: a field added to the gold schema
+  later cannot leak by being forgotten in a delete-list.
+- **`assessor-audit --file F`** — QWK (**the headline**), raw agreement (**never quoted alone** —
+  it overstates chance-corrected agreement by 34–41 points), signed leniency bias, test–retest
+  over ≥3 runs, confusion matrix, per-case-type breakdown. Writes `audits/<date>-NN.json`.
+- **`grader-health`** — the latest audit's verdict. `stats` embeds it.
+- **THE TEETH** — `qwk < 0.60`, `leniency_bias > +0.15`, or the paradox → `grader_unvalidated:
+  true` on **every retention figure**, and the stamp goes into the **`read` string** the narrator
+  actually speaks, not a nested key only a test ever opens. **An unaudited grader is unvalidated
+  too**: it fails toward *"we don't know"*, never toward *"it's fine"*.
+- **The consistency–bias paradox gate.** Engram's assessor is *prompted* to be a skeptic, so it
+  will be extremely self-consistent — and the literature's central warning is that a judge can
+  hit test–retest 0.992 with bias 0.192: perfectly reproducible, systematically wrong. So
+  **consistency may never certify.** Above 0.95 test–retest the engine demands leniency strictly
+  under the ceiling, and **fewer than three runs cannot pass at all** (`insufficient-runs`).
+- **ONE denominator for every number in the audit** — the gold items graded in *every* run.
+  A grader that silently drops 20 of 66 sids and nails the rest reports **`incomplete`**, never a
+  flattering `QWK 1.00 pass`. (That is issue #3's bug class aimed at the audit itself.)
+- **The contamination guard.** If the grader's output carries `gold_grade`, it was *shown*
+  `gold_grade` — the audit **dies** rather than certify. A test that hands the subject the answer
+  is not a test, and v0.6 shipped a dead feature because a dogfood did exactly that.
+- Receipts carry **`grader`** when the assessor states it, and the engine **never invents one**.
+  A model naming its own weights is fabricated data; an omitted `grader` stays honestly null.
+
+### The pre-existing crash class this release also fixes — 447 crashes, in shipped code
+
+The v0.7 fuzz gate ran the read paths that v0.6's fuzz list **had never included** — and found
+**447 crashes in 300 garbage states on `main`.** Every one in **`next`** and **`topic-status`**:
+`nodes` as a string, `order` holding a dict (an unhashable key), a node that is a list.
+
+**`next` is the command `/learn` calls at the start of every session** — the hottest path in the
+product. A hand-edited graph could take it down mid-lesson, and it could have done so since v0.1.
+
+The cause has exactly the shape of the original bug: v0.6 put a shape gate in `iter_graphs` —
+which every *aggregate* read funnels through — and **`load_graph`, the gate every *single-topic*
+command funnels through, never got one.** The v0.6 fuzz list was written from the `/coach`
+surface and simply forgot the `/learn` surface. **The list you write is the list you already
+thought of.**
+
+- `load_graph` now **refuses** an unusable graph with a fix path, instead of half-reading it. It
+  drops and rewrites **nothing** — mutators save what they read, so a lossy "repair" here would be
+  a data-loss bug wearing a hard hat.
+- `graph_nodes` / `graph_order` — the read views that tolerate partial garbage.
+- `apply_item` **refuses** to advance a schedule into a corrupt node rather than write FSRS state
+  on top of garbage (receipts are append-only; bad evidence could never be taken back).
+- **`reps` and `lapses` were the last two raw arithmetic leaves in the scheduler** — every other
+  one already went through `as_number`, and these two did `fsrs.get("reps", 0) + 1` straight.
+  A hand-edited `"reps": "many"` raised `TypeError` on the **mutator** path too, so it took `rate`
+  down, not just `decay`.
+- Fuzz: **891 → 0 crashes across 750 states × 13 read paths (9,750 invocations, 3 seeds).**
+
+### The three selftests that turned out to be theatre
+
+§4.5 (mutation-test every new check) caught **three of this release's own checks** faking it —
+the same rate as v0.6, which is the honest news here: *writing a fake check is the default, and
+only the mutation test finds it.*
+
+1. **"QWK weights are QUADRATIC"** asserted only that a 2-step error hurts *more* than a 1-step
+   one — which **linear weights satisfy just as happily**. Reverting the fix left it green. (And
+   a *balanced* confusion matrix is no good either: with equal marginals the two schemes
+   normalize to the same kappa and prove nothing.) Now pinned to a hand-computed value on an
+   unbalanced matrix carrying both error distances: quadratic → 0.383, linear → 0.407.
+2. **"raw agreement is a liar"** did not isolate the QWK floor — its always-says-recalled grader
+   trips the *bias* ceiling too, so reverting the floor left it green. Now paired with a **noisy
+   but perfectly unbiased** grader (bias exactly 0.00) that only the floor can catch.
+3. **"a grader that drops sids"** used three **identical** runs — so the union and the
+   intersection of graded sids were the same set, and swapping the honest denominator for the
+   flattering one **changed nothing**. Now each run drops a *different* five.
+
+The mutation run also surfaced a **latent crash**: the `pass` read formatted `test_retest` with
+`%.2f`, and the only thing between it and a `TypeError` on `None` was a branch three `if`s up the
+ladder — a landmine for whoever next edits the verdict order.
+
+And the check harness itself got fixed: **a check that raises now fails BY NAME** instead of
+taking the whole suite down. Every mutation of a crash-guard used to report *"the selftest
+crashed"* — true, unmissable, and useless for locating which guard you just reverted.
+
+### Behavior
+
+- **`/coach` reports the oracle before any number it produced.** `unaudited` → one calm line,
+  once, and the dashboard still runs. `fail` → said first, plainly, with every retention figure
+  named as unearned until it is fixed. **Raw agreement never travels without its QWK.**
+- **`/coach audit`** — runs the real assessor on the gold set, three independent times, and
+  narrates the engine's verdict. The assessor is **never told it is being audited**: a subject
+  that knows it is being tested is not the subject.
+
+### Also
+
+- `audits/` and `gold/` created on `init`. The bundled gold set is **not copied** into the state
+  dir — a copy would shadow the plugin's set forever, so a future gold item would never reach an
+  existing learner. The plugin's file is the source of truth; `gold/local-gold.jsonl` is additive
+  and wins on a `sid` collision, because a human who disputed an adjudication outranks ours.
+- Audits are **append-only**, like receipts. A same-day re-audit writes `-02`, never overwrites.
+  (`docs/09` §3.4 specified `<date>.json`; destroying evidence to keep a filename tidy is not a
+  trade this project makes.)
+- A **corrupt latest audit reads `unreadable`** and never falls back to an older, rosier one.
+  A stale `pass` is worse than no pass.
+- Codex parity: `codex/agents/engram-assessor.toml` carries `grader`, in lockstep.
+
 ## 0.6.4 — 2026-07-11 · one definition of "review", and the denominator on the label
 
 Found by running **§7.5 (post-release review)** and **§4.8 (the numbers audit)** of the release
