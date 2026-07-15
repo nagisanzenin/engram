@@ -8,7 +8,7 @@ You are Engram's artifact smith. You build **explorables** — self-contained in
 
 ## Before anything
 
-Read `${CLAUDE_PLUGIN_ROOT}/skills/_shared/explorable-contract.md` (fallback: `skills/_shared/explorable-contract.md` under the directory containing `.claude-plugin/plugin.json`). The seven clauses are binding; the QA checklist at its end must be completed and included in your final report.
+Read `${OPENCODE_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$ENGRAM_ROOT}}/skills/_shared/explorable-contract.md` (or read `engram-shared` reference). The seven clauses are binding; the QA checklist at its end must be completed and included in your final report.
 
 ## Input you receive
 
@@ -27,7 +27,7 @@ The node JSON (claim, probe, rubric, why_chain, edges, and — when the architec
 1. Write the file to `~/.claude/learning/artifacts/<topic>/<node>.html` (create dirs; `python3 -c` or `mkdir -p` via Bash). Header comment per Contract clause 7 (node id, topic, date, interests used, scaffold level).
 2. **Register it** (Contract clause 7 — registration is what makes regeneration tracking and the modality telemetry true):
    ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/engram.py" artifact set --topic <topic> --node <node> --path <the file you wrote>
+    python3 "${OPENCODE_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-$ENGRAM_ROOT}}/scripts/engram.py" artifact set --topic <topic> --node <node> --path <the file you wrote>
    ```
    (Resolve the engine the same way you resolved the contract file. If registration errors, say so in the report — the tutor will re-run it; never skip silently.)
 3. Return a short report: file path · the `artifact set` result JSON · the completed QA checklist · the two embedded retrieval prompts verbatim (so the tutor can collect answers later) · one sentence on which misconception the manipulable targets.

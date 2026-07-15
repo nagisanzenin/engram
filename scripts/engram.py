@@ -6824,12 +6824,19 @@ def cmd_selftest(_args):
     check("⚠ …and no DYNAMIC import escape hatch (__import__/eval/exec/compile/importlib/ctypes)",
           not _dyn)
 
-    # -- the engine's version cannot drift from the plugin manifest --
-    def _version_matches_the_manifest(_h=None):
-        mf = os.path.join(_plugin_root(), ".claude-plugin", "plugin.json")
-        return json.load(open(mf, encoding="utf-8"))["version"] == ENGRAM_VERSION
-    check("ENGRAM_VERSION matches .claude-plugin/plugin.json (a shared receipt names its engine)",
-          _version_matches_the_manifest)
+    # -- the engine's version cannot drift from any plugin manifest --
+    def _version_matches_all_manifests(_h=None):
+        for rel in (".claude-plugin/plugin.json",
+                     ".codex-plugin/plugin.json",
+                     "package.json"):
+            mf = os.path.join(_plugin_root(), rel)
+            if not os.path.exists(mf):
+                continue
+            if json.load(open(mf, encoding="utf-8"))["version"] != ENGRAM_VERSION:
+                return False
+        return True
+    check("ENGRAM_VERSION matches all plugin manifests (claude-plugin, codex-plugin, package.json)",
+          _version_matches_all_manifests)
 
     # -- ⚠ PROPERTY-BASED: put text in EVERY field. Assert NONE of it survives the export. --
     # Not "we remembered to delete the productions" — there must be no code path by which one

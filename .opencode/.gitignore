@@ -1,0 +1,5 @@
+instructions.md
+command/
+.engram-*.jsonc
+scripts/
+plugins/

@@ -1,0 +1,1 @@
+../../agents/engram-artifact-smith.md

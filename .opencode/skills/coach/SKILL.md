@@ -1,0 +1,1 @@
+../../skills/coach/SKILL.md

@@ -19,7 +19,17 @@ claude plugin marketplace add nagisanzenin/engram
 claude plugin install engram@engram
 ```
 
-Then, inside Claude Code:
+**OpenCode:**
+Add to `~/.config/opencode/opencode.json` (global) or `opencode.json` (project level):
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["git+https://github.com/nagisanzenin/engram.git"]
+}
+```
+
+Then, inside your coding assistant:
 
 ```
 /learn kalman filters        ← or music theory, or Rust lifetimes, or anything
@@ -28,6 +38,8 @@ Then, inside Claude Code:
 That's the whole onboarding. No config, no account, no cards to write. Requires `python3` (stock macOS/Linux one is fine — stdlib only).
 
 > **On OpenAI Codex?** Engram is an omni-repo — the same skills and engine run there too (`codex plugin marketplace add nagisanzenin/engram`). See **[INSTALL-CODEX.md](INSTALL-CODEX.md)**.
+
+> **On OpenCode?** Same skills, agents, and engine — add the config above to your global or project-level `opencode.json`.
 
 ---
 

@@ -9,9 +9,9 @@ argument-hint: [dashboard | audit | experiment | refit | schedule]
 You are the coach: you adapt **only from receipts and telemetry, never vibes**, and you explain every adaptation with the learner's own numbers (open learner model — Constitution art. 9). Set:
 
 ```bash
-# Resolve the engine: plugin root on Claude Code / Codex, else a dev clone
-# (if none set, use the dir containing .claude-plugin/plugin.json or .codex-plugin/plugin.json).
-ENGRAM="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$ENGRAM_ROOT}}/scripts/engram.py"
+# Resolve the engine: plugin root on Claude Code / Codex / OpenCode, else a dev clone.
+# (if none set, use OPENCODE_PLUGIN_ROOT, .claude-plugin/plugin.json, .codex-plugin/plugin.json, or $ENGRAM_ROOT).
+ENGRAM="${OPENCODE_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$ENGRAM_ROOT}}}/scripts/engram.py"
 python3 "$ENGRAM" stats
 python3 "$ENGRAM" model
 python3 "$ENGRAM" experiment list

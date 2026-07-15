@@ -17,6 +17,16 @@ Design DNA inherited from `claude-code-production-grade-plugin`, transposed from
 ```
 engram/
 ├── .claude-plugin/plugin.json          # + marketplace.json for distribution
+├── .codex-plugin/plugin.json           # Codex plugin manifest
+├── opencode.jsonc                      # OpenCode plugin config
+├── package.json                        # OpenCode npm plugin manifest
+├── .opencode/                          # OpenCode plugin entry point + modules
+│   ├── index.ts                        # entry point: config, hooks, skills, agents, commands, references
+│   ├── agents.ts                       # register hidden subagents from agents/*.md
+│   ├── commands.ts                     # register /learn, /review-loop, /coach
+│   ├── references.ts                   # register engram-{shared,docs,scripts}
+│   ├── install-type.ts                 # detect npm vs local install
+│   └── parse-frontmatter.ts            # shared markdown frontmatter parser
 ├── skills/
 │   ├── learn/SKILL.md                  # /learn — acquire (diagnose→derive→verify→schedule)
 │   ├── review/SKILL.md                 # /review — due retrievals, 2-min friction-free
@@ -28,7 +38,9 @@ engram/
 │   └── engram-artifact-smith.md        # explorables under the Explorable Contract
 ├── hooks/
 │   ├── hooks.json
-│   └── session-start.sh                # re-anchor: due-count nudge; silent when nothing due
+│   ├── session-start.sh                # re-anchor: due-count nudge; silent when nothing due
+│   ├── session-start.ts                # OpenCode session-start hook
+│   └── shell-env.ts                    # OpenCode shell env hook
 └── scripts/
     └── engram.py                       # THE deterministic core: FSRS-4.5 + state + receipts
                                         #   + stats + selftest, one stdlib-only CLI
