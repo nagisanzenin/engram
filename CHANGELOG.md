@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.3 — 2026-07-16 · OpenCode — the third platform
+
+Engram now runs on **OpenCode**, alongside Claude Code and Codex. Same skills, same
+`engram.py` engine, same receipts — the port is a thin TypeScript adapter that satisfies
+OpenCode's plugin contract and shells out to the unchanged Python core.
+
+- **Self-extract bridge.** OpenCode loads plugins from its npm cache, which is not a
+  config directory, so native discovery never sees the plugin's skills/agents. On first
+  run the `config` hook extracts `skills/ agents/ scripts/` into the OpenCode config dir
+  (`~/.config/opencode/` or the project's `.opencode/`) behind a `copyMissing` guard that
+  never overwrites a user's edits; a first-session `cfg.*` bridge registers everything
+  immediately, and disk discovery takes over thereafter.
+- **Deterministic update tool.** `/engram-update` appears on a version bump and applies
+  refreshes through the `engram_update` custom tool — deletes go through `unlinkSync` with
+  every path validated against the manifest allowlist. No bash, no interpolation.
+- **Hooks.** `shell.env` exports `OPENCODE_PLUGIN_ROOT`; `experimental.chat.system.transform`
+  carries the review-due nudge; a `session.idle` toast announces available updates.
+- **Verification.** New vitest suite (67 tests) covering extract, the manifest state machine,
+  and the update tool's path validation; `.github/workflows/test.yml` runs vitest +
+  `tsc --noEmit` + `engram.py selftest` on every push. Engine selftest unchanged at 214/214.
+
+Contributed by @luanweslley77 (#5), hardened across four review rounds.
+
 ## 1.0.2 — 2026-07-11 · a regression my own fix caused
 
 The v1.0.1 verification review confirmed both headline fixes hold (the export leak is closed; the
