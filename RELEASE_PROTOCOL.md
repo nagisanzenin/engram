@@ -69,8 +69,9 @@ grep -rnE '"version"|version-[0-9]|selftest-[0-9]|[0-9]+ checks|[0-9]+/[0-9]+ ch
 |---|---|
 | `.claude-plugin/plugin.json` | `"version"` |
 | `.codex-plugin/plugin.json` | `"version"` (lockstep with the Claude one) |
+| `package.json` | `"version"` — this is what npm publishes; a stale one makes `npm publish` fail or, worse, ship old code under a new tag |
 | `scripts/engram.py` | `ENGRAM_VERSION` — **a selftest pins it to plugin.json**, so a missed bump goes RED (it caught v1.0.1) |
-| `README.md` | version badge (`badge/version-X.Y.Z` **and** its `alt`) |
+| `README.md` | version badge (`badge/version-X.Y.Z` **and** its `alt`) — **v1.0.3 AND v1.0.4 both missed it**; the npm badge beside it is live (shields.io reads the registry) and needs no edit |
 | `README.md` | selftest badge (`badge/selftest-N%2FN`) **if the count changed** |
 | `README.md` | CLI table `selftest` row **if the count changed** |
 | `INSTALL-CODEX.md` | selftest count comment **if the count changed** |
@@ -649,6 +650,24 @@ gh release create "v$V" --title "v$V — <theme>" --notes-file /tmp/relnotes.md 
 `--latest` is what flips the badge off the previous version. **Without the tag + release, `main`
 has the new version and the world still sees the old one.**
 
+## 6.5 · Publish to npm ⚠ NEW — the name resolves now, so it must stay current
+
+Since v1.0.4 the package is live on npm as **`opencode-engram-learning`** (claimed to prevent
+name-squatting; OpenCode users can install by bare name). **A release that skips this step
+strands every npm installer on the old version while git moves on** — and the update-manifest
+flow diffs against the npm cache, so a stale registry quietly mutes update notifications for
+those users.
+
+```bash
+rm -rf scripts/__pycache__          # npm pack has no gitignore; local junk WILL ship
+npm pack --dry-run                  # eyeball the file list — 38-ish files, no .pyc, no secrets
+npm publish --access public        # needs the passkey/2FA tap — run it in a real terminal
+npm view opencode-engram-learning version   # must print X.Y.Z
+```
+
+Publishing requires 2FA (passkey), so this step is interactive-only — an agent can prep and
+verify, but the human taps.
+
 ## 7 · Verify the release is real
 
 ```bash
@@ -715,6 +734,7 @@ shipped, what the wrinkle was, and how to get it.
 - [ ] **§5.5** agent dogfood — **uncontaminated** (agents got exactly what the skill gives them)
 - [ ] **§5.6** **USER SESSION run; report written; verdict = ship**
 - [ ] **§6** merged `--no-ff`; annotated tag; `gh release create … --latest`
+- [ ] **§6.5** `npm publish` (dry-run eyeballed first); `npm view … version` == the tag
 - [ ] **§7** `gh release list` shows it as Latest
 - [ ] **§7.5** post-release independent review scheduled/run
 - [ ] **§8** update line published; fixed issues closed with a real reply

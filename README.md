@@ -3,7 +3,8 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.2-6D4AA8.svg" alt="Version 1.0.2">
+  <img src="https://img.shields.io/badge/version-1.0.4-6D4AA8.svg" alt="Version 1.0.4">
+  <a href="https://www.npmjs.com/package/opencode-engram-learning"><img src="https://img.shields.io/npm/v/opencode-engram-learning?label=npm&color=6D4AA8" alt="npm package"></a>
   <img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="MIT License">
   <img src="https://img.shields.io/badge/selftest-214%2F214-3E7D5A.svg" alt="214/214 checks">
   <a href="gold/assessor-gold.jsonl"><img src="https://img.shields.io/badge/grader%20never%20inflates-0%2F198-3E7D5A.svg" alt="0 of 198 blind judgments graded up"></a>
@@ -25,7 +26,8 @@ Add to `~/.config/opencode/opencode.json` (global) or `opencode.json` (project l
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["git+https://github.com/nagisanzenin/engram.git"]
+  "plugin": ["opencode-engram-learning"]   // from npm — or pin to source:
+  // "plugin": ["git+https://github.com/nagisanzenin/engram.git"]
 }
 ```
 
