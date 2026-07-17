@@ -66,14 +66,29 @@
 
 import { tool } from "@opencode-ai/plugin"
 import { existsSync, unlinkSync, readFileSync, writeFileSync } from "node:fs"
-import { resolve } from "node:path"
+import { resolve, sep } from "node:path"
 import { readManifest, saveManifest } from "./update.js"
+
+/**
+ * Guards against path traversal — rejects paths that resolve outside the
+ * target directory. Uses os-specific separator (path.sep) instead of
+ * hardcoded "/" so that resolve works correctly on Windows (\\ separators).
+ *
+ * Manifest category paths (POSIX-style with /) don't need this treatment —
+ * they are JSON keys from .engram-update.jsonc, not filesystem paths.
+ * Only paths resolved via resolve() are subject to the guard.
+ */
+function isWithinTarget(target: string, filePath: string): boolean {
+  const targetDir = resolve(target) + sep
+  const resolved = resolve(target, filePath)
+  return resolved.startsWith(targetDir)
+}
 
 export const engramUpdateTool = tool({
   description: "Apply Engram plugin updates — delete preserved files and update the manifest. Only call when the /engram-update command instructs you.",
   args: {
     target: tool.schema.string().describe("Target .opencode/ directory"),
-    mode: tool.schema.enum(["auto", "per_file", "keep_as_is", "skip", "checkpoint"]).describe("Update mode"),
+    mode: tool.schema.enum(["auto", "per_file", "keep_as_is", "skip", "checkpoint", "cleanup"]).describe("Update mode"),
     decisions: tool.schema.array(tool.schema.object({
       file: tool.schema.string().describe("Relative file path from manifest categories"),
       action: tool.schema.enum(["delete", "keep"]).describe("What to do with this file"),
@@ -82,6 +97,7 @@ export const engramUpdateTool = tool({
   async execute(args) {
     const manifestPath = resolve(args.target, ".engram-update.jsonc")
     const versionPath = resolve(args.target, ".engram-version.jsonc")
+    const diffPath = resolve(args.target, ".engram-update.diff")
 
     let manifest = readManifest(args.target)
     if (!manifest) {
@@ -96,6 +112,7 @@ export const engramUpdateTool = tool({
         let deleted = 0
         for (const diff of Object.values(manifest.categories)) {
           for (const file of diff.skipped) {
+            if (!isWithinTarget(args.target, file)) continue
             const filePath = resolve(args.target, file)
             if (existsSync(filePath)) {
               unlinkSync(filePath)
@@ -105,6 +122,7 @@ export const engramUpdateTool = tool({
         }
         if (existsSync(versionPath)) unlinkSync(versionPath)
         unlinkSync(manifestPath)
+        if (existsSync(diffPath)) unlinkSync(diffPath)
         return `[engram] Auto update applied. ${deleted} files deleted. Restart OpenCode or reload plugins.`
       }
 
@@ -115,6 +133,10 @@ export const engramUpdateTool = tool({
 
         const results: string[] = []
         for (const d of args.decisions) {
+          if (!isWithinTarget(args.target, d.file)) {
+            results.push(`SKIP ${d.file}: path outside target`)
+            continue
+          }
           const category = d.file.split("/")[0]
           const cat = manifest.categories[category]
           if (!cat || !cat.skipped.includes(d.file)) {
@@ -152,6 +174,7 @@ export const engramUpdateTool = tool({
         if (manifest.remaining.length === 0) {
           if (existsSync(versionPath)) unlinkSync(versionPath)
           unlinkSync(manifestPath)
+          if (existsSync(diffPath)) unlinkSync(diffPath)
           return `[engram] All files processed.\n${results.join("\n")}\n\nRestart OpenCode or reload plugins.`
         }
 
@@ -162,6 +185,7 @@ export const engramUpdateTool = tool({
       case "keep_as_is": {
         if (existsSync(versionPath)) unlinkSync(versionPath)
         if (existsSync(manifestPath)) unlinkSync(manifestPath)
+        if (existsSync(diffPath)) unlinkSync(diffPath)
         return "[engram] Update skipped permanently. Restart for fresh extract."
       }
 
@@ -173,6 +197,13 @@ export const engramUpdateTool = tool({
         manifest.state = "in_progress"
         writeFileSync(manifestPath, JSON.stringify(manifest, null, 2))
         return `[engram] State set to in_progress. ${manifest.remaining.length} categories pending.`
+      }
+
+      case "cleanup": {
+        if (existsSync(versionPath)) unlinkSync(versionPath)
+        if (existsSync(manifestPath)) unlinkSync(manifestPath)
+        if (existsSync(diffPath)) unlinkSync(diffPath)
+        return "[engram] No pending updates. State cleaned. Restart to apply."
       }
 
       default:
