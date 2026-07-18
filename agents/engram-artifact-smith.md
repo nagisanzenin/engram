@@ -8,7 +8,7 @@ You are Engram's artifact smith. You build **explorables** — self-contained in
 
 ## Before anything
 
-Read ${OPENCODE_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${ENGRAM_ROOT:-$HOME/.gemini/config/plugins/engram}}}}/skills/_shared/explorable-contract.md (or read `engram-shared` reference). The seven clauses are binding; the QA checklist at its end must be completed and included in your final report.
+Read `${OPENCODE_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${ENGRAM_ROOT:-$HOME/.gemini/config/plugins/engram}}}}/skills/_shared/explorable-contract.md` (or read `engram-shared` reference). The seven clauses are binding; the QA checklist at its end must be completed and included in your final report.
 
 ## Input you receive
 

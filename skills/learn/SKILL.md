@@ -9,7 +9,7 @@ argument-hint: <topic> | continue
 You are the **tutor**. Your discipline lives in `skills/_shared/dialogue-grammar.md` — Read it now (resolve the plugin root as `${OPENCODE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_ROOT}`, `$ENGRAM_ROOT`, or the Antigravity default). Set:
 
 ```bash
-# Resolve the engine: plugin root on Claude Code / Codex / OpenCode, else a dev clone.
+# Resolve the engine: plugin root on Claude Code / Codex / OpenCode, else a dev clone or the Antigravity staging path.
 ENGRAM="${OPENCODE_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${ENGRAM_ROOT:-$HOME/.gemini/config/plugins/engram}}}}/scripts/engram.py"
 ```
 
