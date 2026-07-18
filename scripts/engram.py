@@ -32,7 +32,7 @@ SCHEMA = 1
 # The one place the engine knows its own version. Read by `export`, so a shared receipt states
 # which engine produced it — a corpus of receipts from unknown engine versions is not a corpus.
 # Pinned against .claude-plugin/plugin.json by a selftest, so it cannot drift.
-ENGRAM_VERSION = "1.0.6"
+ENGRAM_VERSION = "1.0.7"
 RETENTION_DEFAULT = 0.90
 INTERVAL_MAX = 365
 RETENTION_MIN, RETENTION_MAX = 0.70, 0.97   # sane desired-retention bounds
@@ -1912,7 +1912,11 @@ def compute_momentum(receipts):
             sb, sa = as_number(r.get("s_before")), as_number(r.get("s_after"))
             if sb is not None and sa is not None and sa > sb:
                 gained += (sa - sb)
-        if r.get("grade") == "recalled":
+        # wins ⊆ retrievals (the docstring's contract). Encode and pretest receipts carry
+        # grade:"recalled" too, and counting them here reported retrieval wins to a learner
+        # who had not retrieved once — the flattering direction. (v1.0.7, found by the
+        # §7.5 post-release review; the guarding check's fixture couldn't see it.)
+        if id(r) in genuine and r.get("grade") == "recalled":
             recalled_7d += 1
     most_durable = None
     retained_total = 0
@@ -4371,10 +4375,18 @@ def cmd_selftest(_args):
              "topic": "t", "node": "n3", "s_before": 8.0, "s_after": 3.0},   # lapse: no negative growth
             {"id": "r4", "ts": "2026-06-01", "kind": "review", "rating": "good",
              "topic": "t", "node": "n4", "s_before": 1.0, "s_after": 40.0},  # outside window
+            # IN-WINDOW first-exposure receipts carrying grade:"recalled" — the inflators
+            # the v1.0.6 fixture couldn't see (its encodes were out-of-window AND gradeless,
+            # so the recalled_7d check was theatre; §7.5 post-release review, v1.0.7).
+            {"id": "e5", "ts": "2026-08-05", "kind": "encode", "rating": "good",
+             "topic": "t", "node": "n5", "grade": "recalled"},
+            {"id": "p1", "ts": "2026-08-05", "kind": "pretest", "rating": "easy",
+             "topic": "t", "node": "n6", "grade": "recalled"},
         ])
         check("momentum sums only in-window durability gains",
               mom["reviews_7d"] == 3 and approx(mom["stability_gained_7d"], 8.5, 0.01))
-        check("momentum counts genuine recalls in window", mom["recalled_7d"] == 1)
+        check("momentum recalled_7d = wins among RETRIEVALS only (in-window encode/pretest "
+              "'recalled' grades do not count)", mom["recalled_7d"] == 1)
 
         # settings self-heal: a model missing the new keys is repaired, not broken
         healed = _deep_heal({"schema": SCHEMA, "settings": {"default_mode": "sprint"}},

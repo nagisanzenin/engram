@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.0.7 — 2026-07-19 · a flattering number, caught by the gate built for it
+
+One engine fix, shipped hours after v1.0.6 because RELEASE_PROTOCOL §7.5 says a wrong
+number does not get to stand. The independent post-release reviewer — standing
+instruction: *"find a number that is wrong, especially one that is wrong in the
+direction that reassures the learner"* — found exactly one, and it is bug class #1:
+
+- **`momentum.recalled_7d` counted encode and pretest receipts as retrieval wins.** The
+  docstring's contract is *"retrievals cleared, and genuine wins among them"* — wins ⊆
+  retrievals — but the counter took ANY in-window receipt with `grade: "recalled"`.
+  Encodes and pretests carry that grade in normal use, so a learner who encoded three
+  concepts and never came back once read `recalled_7d: 3` beside `reviews_7d: 0` —
+  three "genuine wins" with zero retrievals. One-line fix: the counter now shares the
+  same genuine-retrieval predicate as `reviews_7d`.
+- **And the embarrassing part, per protocol: the guarding selftest was theatre.** The
+  v1.0.6 check asserting `recalled_7d == 1` could not fail — its encode fixtures were
+  both out-of-window AND gradeless, so the inflating population never reached the
+  counter under test. The fixture now carries an in-window `grade: "recalled"` encode
+  AND pretest; the check fails by name when the fix is reverted (mutation-tested).
+  That is the fourth §4.5 lesson in four releases: *a check that cannot see the
+  inflating population proves nothing about inflation.*
+- Blast radius, honestly: the prescribed `/coach` narration leads with
+  `stability_gained_7d` / `reviews_7d` / `most_durable` (all correct) and never quotes
+  `recalled_7d`; exposure was a narrator improvising off the JSON — which the docstring
+  invited, by calling the field retrieval wins.
+- Noted, unchanged: `retained_total`/`state_counts` label a node "retained" on FSRS
+  graduation (before any retention test). That matches its docstring and the system-wide
+  state convention, and the retention *metric* correctly excludes first exposures — a
+  labeling convention to revisit, not a wrong number.
+- Selftest count unchanged at **217/217** (an inert check was made real, none added).
+  Re-fuzz after the fix: 0 crashes / 800 states.
+
 ## 1.0.6 — 2026-07-18 · Antigravity — the fifth platform
 
 Engram now installs natively on **Google Antigravity** (`agy` CLI) — contributed by
