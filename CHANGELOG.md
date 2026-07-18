@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.0.6 — 2026-07-18 · Antigravity — the fifth platform
+
+Engram now installs natively on **Google Antigravity** (`agy` CLI) — contributed by
+@mertso13 in #8, two review rounds, every claim below verified live against agy 1.1.4
+with a sandboxed `$HOME`.
+
+- **One command:** `agy plugin install https://github.com/nagisanzenin/engram`. Root
+  `plugin.json` is schema-minimal on purpose — the official
+  `antigravity.google/schemas/v1/plugin.json` allows exactly `name` + `description`
+  (`additionalProperties: false`); everything else is directory-crawled. The manifest is
+  inert on the other four platforms (Claude Code reads `.claude-plugin/`, Codex
+  `.codex-plugin/`, OpenCode npm/`.opencode/`, Hermes `skills.external_dirs`).
+- **The bug that made it possible was ours, not theirs.** `agy plugin install` stats every
+  file it copies — and died on `.opencode/skills/{learn,coach,review}/SKILL.md`, whose
+  symlinks have been **self-referential loops since f3ccc76** (`../../` where three levels
+  were needed: from `.opencode/skills/<n>/`, `../../skills/<n>/SKILL.md` resolves to
+  *itself*). Nobody noticed for four releases because npm packs exclude symlinks and
+  OpenCode's loader never stats them. Retargeted to `../../../`; git-clone OpenCode
+  installs get real links out of it too.
+- **Engine resolution gains the AG default** — the skills' chain is now
+  `OPENCODE_PLUGIN_ROOT → CLAUDE_PLUGIN_ROOT → CODEX_PLUGIN_ROOT → ENGRAM_ROOT →
+  ~/.gemini/config/plugins/engram` (agy sets no plugin-root variable at all; the staging
+  path is deterministic, so it rides last as the default).
+- **And the embarrassing part, per protocol — this time the reviewer's.** The first
+  review round's fix sketch *replaced* `$ENGRAM_ROOT` with the AG path while its prose
+  said "before `$ENGRAM_ROOT`". The contributor implemented the sketch faithfully — which
+  would have **broken Hermes**, the platform shipped one release ago, whose entire engine
+  resolution runs through `ENGRAM_ROOT` (INSTALL-HERMES.md sets no plugin-root var). Caught
+  in the second round by evaluating the installed chain side-by-side under
+  `ENGRAM_ROOT=/fake/dev/clone`: new chain ignored it, old chain honored it. The lesson is
+  §4.6's, inverted: *a reviewer's sketch is a diff too, and it gets the same scrutiny.*
+- **Known limits, stated in the README footnote:** agy 1.1.4 **silently drops any agent
+  whose frontmatter carries a `tools:` field** (any value — Claude names and snake_case
+  both tested), so `engram-curriculum-architect` and `engram-artifact-smith` don't register
+  on AG; only `engram-assessor` does. `agy plugin validate` still reports "3 agents
+  processed" — *validate ≠ install ≠ register*. The due-review session nudge isn't ported
+  (AG hooks use a different mechanism). Stripping `tools:` was rejected deliberately: it
+  would grant those agents all tools on Claude Code, trading a real restriction for a
+  cosmetic registration.
+- Engine untouched (`ENGRAM_VERSION` pin only). Selftest unchanged at **214/214**.
+
 ## 1.0.5 — 2026-07-18 · Hermes — the fourth platform, and the README stops being misread
 
 Engram now runs on **Nous Research's Hermes Agent** (requested in #9), and the README
