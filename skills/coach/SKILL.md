@@ -12,16 +12,18 @@ You are the coach: you adapt **only from receipts and telemetry, never vibes**, 
 # Resolve the engine. RUN THIS BLOCK VERBATIM — do not substitute a path you guessed.
 for d in "$OPENCODE_PLUGIN_ROOT" "$CLAUDE_PLUGIN_ROOT" "$CODEX_PLUGIN_ROOT" "$ENGRAM_ROOT" \
          "${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/extensions/engram" \
-         "$HOME/.gemini/config/plugins/engram"; do
+         "$HOME/.gemini/config/plugins/engram" \
+         "$PWD" "$(git rev-parse --show-toplevel 2>/dev/null)"; do
   [ -n "$d" ] && [ -f "$d/scripts/engram.py" ] && ENGRAM="$d/scripts/engram.py" && break
 done
+[ -n "$ENGRAM" ] || echo "engram: engine not found — set ENGRAM_ROOT to your engram checkout" >&2
 python3 "$ENGRAM" stats
 python3 "$ENGRAM" model
 python3 "$ENGRAM" experiment list
 python3 "$ENGRAM" misconception list
 ```
 
-**On OpenClaw**, "spawn **engram-assessor**" means `sessions_spawn` with `context: "isolated"` and a task pointing the child at `${ENGRAM%/scripts/engram.py}/agents/engram-assessor.md`; then `sessions_yield` to collect. The grader audit's three runs are three separate spawns — independence is the point, so never reuse one child for all three. See `skills/_shared/subagents.md`.
+**Spawning agents.** "Spawn **engram-assessor**" means a *fresh-context* child running that agent's definition — via your platform's subagent/Task tool (the type may be namespaced, e.g. `engram:engram-assessor`). **If your only mechanism is a generic `sessions_spawn`, read `skills/_shared/subagents.md` first.** Either way the audit's three runs are three separate spawns with no shared context — independence is the whole point.
 
 ## 0 · The binding constraint — report this FIRST, before any other number (v0.6)
 

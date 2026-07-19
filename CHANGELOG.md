@@ -67,7 +67,36 @@ booked reviews for moments you are not at a desk; until now the tool only existe
   roots, each guarded by an existence check, prefixed *"RUN THIS BLOCK VERBATIM — do not
   substitute a path you guessed."* This also hardens the other five platforms: the old form
   took the first *set* variable even when nothing was there, the new one takes the first
-  root that actually **exists**. `/review` and `/coach` both run clean after the change.
+  root that actually **exists**. Verified identical across bash, zsh, and POSIX sh, and
+  under each platform's env layout.
+
+- **And then that rewrite introduced its own regression, caught by a blind agent read.**
+  The first draft ended in `: "${ENGRAM:?engram engine not found…}"`. In a **dev clone** —
+  no plugin-root variable set, which is exactly how contributors run this repo — nothing
+  matched, and `:?` **aborts the shell**, killing the rest of the block. The old code failed
+  softer there and let the skill's prose fallback recover. Two fixes: `$PWD` and
+  `git rev-parse --show-toplevel` are now the final candidates (so a dev clone resolves at
+  all, which the old chain never did either), and the hard `:?` became a non-fatal warning
+  on stderr. The finding came from handing the edited files to an uncontaminated agent and
+  asking only *"which mechanism applies to you, and does the block succeed?"* — a question
+  no test in this repo asks.
+
+- **Known ordering caveat, unchanged from previous releases and deliberately left alone:**
+  the Antigravity staging path is checked *before* `$PWD`, so on a machine carrying a stale
+  Antigravity install, a dev clone will silently run the installed engine rather than the
+  checkout. Reordering would change resolution behavior on a supported platform to fix a
+  contributor-only papercut, which is the wrong trade in a release whose whole claim is
+  "no regressions elsewhere."
+
+- **The cross-platform prose was made platform-agnostic after a pollution check.** The
+  first draft wrote *"On OpenClaw, engram's agents are not registered — call
+  `sessions_spawn`…"* into all three **shared** skills, which every platform's agent reads.
+  A blind agent test flagged the branch as stated in terms of two platforms with Claude
+  Code's own `Agent`/Task tool never named, and noted the skills use bare agent names where
+  that platform requires a namespaced `engram:engram-assessor`. Rewritten to describe the
+  *property* — "a fresh-context child running that agent's definition" — and to name both
+  mechanisms. Re-tested blind: correct tool, correct namespaced type, three separate
+  spawns for the audit, and no ambiguity reported.
 
 - **Verified live, not merely wired.** Driven against `gpt-5.4` with `ENGRAM_HOME` pointed
   at a throwaway store: a model asked to name its learning skills answered
@@ -102,8 +131,22 @@ booked reviews for moments you are not at a desk; until now the tool only existe
   not shipped** — it would do nothing today and would silently change engram's plugin shape
   the day upstream makes the code match the docs.
 
-- Selftest count unchanged at **217/217** (the version-lockstep check validated the six-file
-  bump, as designed).
+- **Gates.** Selftest **217/217** (unchanged — no engine behavior changed, so no new check was
+  owed; §4.5 mutation-testing is therefore N/A this release). OpenCode suite **88/88**. Fuzz
+  gate re-run against the final commit across every read path enumerated from the dispatch
+  table plus the read-only sub-actions the table cannot see: **0 crashes**. Live engine test
+  green — `s_after` 3.71 → 29.55 across a day-11 review, `momentum.recalled_7d` matching
+  `reviews_7d` (the v1.0.7 fix holding), `retention` carrying its `grader_unvalidated`,
+  `doctor ok=true`.
+
+- **§5's read-only check needs an amendment, and it is not a v1.0.8 bug.** Hashing
+  `~/.claude/learning` before and after every read path reports a mutation — traced to
+  `report`, whose documented job is writing `artifacts/dashboard.html`. `report` is
+  classified non-mutating in the dispatch table because it touches no *learning state*, so
+  the protocol's own enumeration recipe hands it to a gate that then fails on it. Re-run with
+  `report` excluded, every read path leaves the store byte-identical, and no state file is
+  touched. **The gate should exempt `report` (or compare state files only)** — as written it
+  cries wolf on every release, which is how a real read-path write would get waved through.
 
 ## 1.0.7 — 2026-07-19 · a flattering number, caught by the gate built for it
 

@@ -12,14 +12,16 @@ Read `skills/_shared/dialogue-grammar.md` (hard rules, confidence integrity, par
 # Resolve the engine. RUN THIS BLOCK VERBATIM — do not substitute a path you guessed.
 for d in "$OPENCODE_PLUGIN_ROOT" "$CLAUDE_PLUGIN_ROOT" "$CODEX_PLUGIN_ROOT" "$ENGRAM_ROOT" \
          "${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/extensions/engram" \
-         "$HOME/.gemini/config/plugins/engram"; do
+         "$HOME/.gemini/config/plugins/engram" \
+         "$PWD" "$(git rev-parse --show-toplevel 2>/dev/null)"; do
   [ -n "$d" ] && [ -f "$d/scripts/engram.py" ] && ENGRAM="$d/scripts/engram.py" && break
 done
+[ -n "$ENGRAM" ] || echo "engram: engine not found — set ENGRAM_ROOT to your engram checkout" >&2
 ```
 
 If none are set, resolve the plugin root as the directory containing `.claude-plugin/plugin.json` (or `.codex-plugin/plugin.json`). **Never inline a learner's answer into a shell command** — pass productions via `--production-file` (or `--production-file -` on stdin); a stray quote or `$(…)` in what they typed would otherwise execute.
 
-**On OpenClaw**, "spawn **engram-…**" means `sessions_spawn` with `context: "isolated"` and a task pointing the child at `${ENGRAM%/scripts/engram.py}/agents/<agent-name>.md`; then `sessions_yield` to collect. See `skills/_shared/subagents.md`.
+**Spawning agents.** "Spawn **engram-…**" means a *fresh-context* child running that agent's definition — via your platform's subagent/Task tool (the type may be namespaced, e.g. `engram:engram-assessor`). **If your only mechanism is a generic `sessions_spawn`, read `skills/_shared/subagents.md` first.**
 
 ## 1 · Load the queue
 

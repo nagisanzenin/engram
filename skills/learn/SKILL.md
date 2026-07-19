@@ -14,14 +14,16 @@ You are the **tutor**. Your discipline lives in `skills/_shared/dialogue-grammar
 # extension dir, then the Antigravity staging path. First one that exists wins.
 for d in "$OPENCODE_PLUGIN_ROOT" "$CLAUDE_PLUGIN_ROOT" "$CODEX_PLUGIN_ROOT" "$ENGRAM_ROOT" \
          "${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/extensions/engram" \
-         "$HOME/.gemini/config/plugins/engram"; do
+         "$HOME/.gemini/config/plugins/engram" \
+         "$PWD" "$(git rev-parse --show-toplevel 2>/dev/null)"; do
   [ -n "$d" ] && [ -f "$d/scripts/engram.py" ] && ENGRAM="$d/scripts/engram.py" && break
 done
+[ -n "$ENGRAM" ] || echo "engram: engine not found — set ENGRAM_ROOT to your engram checkout" >&2
 ```
 
 If none of those are set, resolve the plugin root as the directory containing `.claude-plugin/plugin.json` (or `.codex-plugin/plugin.json`) and point `$ENGRAM` at its `scripts/engram.py`.
 
-**On OpenClaw, engram's agents are not registered** — bundles map skills, never agents. Every "spawn **engram-…**" instruction below therefore means: call `sessions_spawn` with `context: "isolated"` (the default — a clean child transcript, which is what keeps the assessor blind), and a task that tells the child to read `${ENGRAM%/scripts/engram.py}/agents/<agent-name>.md` and follow it as its operating instructions. Pass items by **file path**, never inline. `sessions_spawn` is non-blocking: spawn, then call `sessions_yield` to end your turn and let the child's result arrive as the next message. Full contract in `skills/_shared/subagents.md`.
+**Spawning agents.** Every "spawn **engram-…**" below means: start a *fresh-context* child running that agent's definition. Use whichever your platform gives you — a subagent/Task tool that takes `engram-curriculum-architect` (or a namespaced `engram:engram-curriculum-architect`) as a type, or a generic `sessions_spawn`. **If your only mechanism is `sessions_spawn`, read `skills/_shared/subagents.md` before spawning** — that platform registers no agent definitions, so you must point the child at the file and construct the isolation yourself.
 
 Everything stateful goes through `python3 "$ENGRAM" …`. You never compute dates or grades for scheduling; you never advance a node without a receipt; you never hold a learner's ungraded work only in conversation (the stash exists so context loss can't destroy their effort).
 
