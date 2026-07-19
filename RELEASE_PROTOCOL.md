@@ -169,6 +169,13 @@ The **four** ways a check turns out fake, all seen for real:
   because a *different* element on the page happened to contain the string being grepped.
   **A check is only real if it fails when ITS OWN fix is reverted.** When several guards overlap,
   build a fixture where all the others are silent.
+- **The fixture returns before execution ever reaches the code under test.** ⚠ NEW. v1.0.8's
+  OpenClaw hook was unit-tested against an **empty** store — where the handler correctly prints
+  nothing and returns early. Every assertion passed. None of them ever reached the delivery
+  branch below the early return, which was unguarded and threw on a frozen `messages` array.
+  The suite was green about code it had never once executed. **Ask of every negative test: does
+  the happy path in this fixture actually walk past the line I am claiming to have tested?**
+  A test whose fixture short-circuits proves the short-circuit works, and nothing else.
 
 ### ⚠ The special case: mutation-testing an ABSENCE check ⚠ NEW
 
@@ -210,6 +217,22 @@ every new number**), and say prose files matter only for cross-file consistency.
 3. **Feed the reviewer the shipped contract, not just the diff.** v0.6's `sid` guard was dead
    because the *assessor's agent spec* — a file not in the diff — didn't carry the field.
    A reviewer looking only at the diff cannot see that. Point it at the whole round-trip.
+4. **Hand reviewers an extracted tree, never the live working copy.** ⚠ NEW. v1.0.8 spawned
+   reviewer agents against the repo; one ran `git checkout main` to compare, which switched the
+   working tree off the release branch mid-review. Nothing was lost, but every reviewer still
+   running was now reading **v1.0.7 files while believing it was reading the release** — and a
+   reviewer that reports "clean" against the wrong tree is worse than no reviewer. Extract
+   first, then point them at paths that cannot move:
+   ```bash
+   git archive release/vX.Y.Z | tar xf - -C /tmp/rev/new
+   git archive main           | tar xf - -C /tmp/rev/old
+   git diff main...release/vX.Y.Z > /tmp/rev/diff
+   ```
+5. **A reviewer that never reports is not a clean review.** ⚠ NEW. Companion to rule 2, one
+   step earlier: in v1.0.8 three of four review agents went idle without returning findings at
+   all. Silence is not a verdict. **Count the reports you actually received against the
+   reviewers you launched, and treat every missing one as an unrun gate** — then run it
+   yourself rather than quietly inheriting its optimism.
 
 Every confirmed finding gets a fix **and** a check that fails without it (§4.5).
 
@@ -518,6 +541,14 @@ and never landed in the gap.
 Then **read-only against the real state** (`~/.claude/learning`) and hash the directory before
 and after. A read command that writes is a defect (three of them were).
 
+> **⚠ Exempt `report` from that hash, or the gate cries wolf every release.** ⚠ NEW.
+> `report`'s documented job is writing `artifacts/dashboard.html`; it is classified
+> non-mutating because it touches no *learning state*, so §4.7's dispatch-table recipe hands it
+> straight to a gate it must fail. v1.0.8 hit this and spent real time chasing it. Hash the
+> state files only — `find ~/.claude/learning -type f ! -name dashboard.html` — so that when
+> the gate does go red, it means something. **A gate that fires every time is a gate nobody
+> reads.**
+
 ## 5.5 · The agent dogfood — **UNCONTAMINATED** (required when skills, agents, or the Contract change)
 
 The engine can be green while the *prose* regresses — and prose is where most of this plugin's
@@ -543,6 +574,44 @@ gap in the *real* contract. Fix the contract; don't patch the prompt.
 
 Concretely: paste the literal output of `stash list`. Nothing else.
 
+### ⚠ AND THE SECOND RULE, because v1.0.8 broke the first one without touching it ⚠ NEW
+
+> **Pin the dogfood to the RELEASE TREE. Never to the installed plugin.**
+
+v1.0.8's dogfood was reported green. It had run against the **v0.3.0** agent definitions —
+because that was what `~/.claude/plugins/cache/` still held, four months and eighty-three
+commits behind `main`. The two specs are not close: v0.3.0's assessor has no `sid` rule and no
+`grader` rule at all. So the run "passed" while emitting `"grader": "claude-opus-4-8[1m]"` —
+a fabricated model id, which is **precisely the output the shipped spec exists to forbid**
+("do not guess a model id… a model naming its own weights is fabricated data").
+
+Re-run against the release tree, the same item returned `"grader": "engram-assessor"`. The
+claims survived; the evidence for them did not. **A dogfood that certifies the version you are
+not shipping certifies nothing.**
+
+This is nastier than the v0.6 hint-in-the-prompt failure, because there is nothing wrong to
+*see*. The prompt is clean, the output is plausible, every field is present. The only tell is a
+version number nobody thought to check.
+
+Assert it before you trust a single agent result:
+
+```bash
+# The version the harness will actually load, vs the version you are shipping.
+python3 -c "import json;d=json.load(open('$HOME/.claude/plugins/installed_plugins.json'));\
+print([v[0]['version'] for k,v in d['plugins'].items() if 'engram' in k.lower()])"
+grep -m1 '"version"' .claude-plugin/plugin.json
+```
+
+Not equal → either `claude plugin update engram@engram` first, or drive the agents by handing
+them the **repo's** `agents/<name>.md` by absolute path. Do not proceed on the installed copy
+and hope.
+
+**And the generalisation, which is the part worth keeping:** every gate that runs *through a
+platform* — dogfood, user session, any live skill invocation — silently tests whatever that
+platform has cached. The engine gates (`selftest`, fuzz, live test) run the repo directly and
+are immune. **Know which kind of gate you are running, and for the platform kind, print the
+version first.**
+
 ### The loop
 
 1. **curriculum-architect** on a small real topic (5 nodes). Did it honor the current spec?
@@ -563,6 +632,59 @@ Concretely: paste the literal output of `stash list`. Nothing else.
 
 Write down what surprised you. **A surprise here is not a reason to skip the release. It is the
 release.**
+
+## 5.7 · The omni-repo gate ⚠ NEW — required when a release adds or changes a PLATFORM
+
+`skills/` is shared verbatim by six platforms. Every word added to a SKILL.md for the platform
+you are porting is also read, that same session, by the five you are not. v1.0.8 learned both
+halves of this the hard way, and neither showed up in any test that existed.
+
+### Write capability tests, never platform names
+
+The first draft wrote *"On OpenClaw, engram's agents are not registered — call
+`sessions_spawn`…"* into all three shared skills. A blind read by an agent on **Claude Code**
+came back mildly confused: the branch was stated as a choice between two platforms, Claude
+Code's own `Agent`/Task tool was never named, and the skills used bare agent names where that
+platform needs a namespaced `engram:engram-assessor`. It resolved correctly — this time.
+
+**Branch on what the agent can actually observe about itself, not on a platform name it has to
+recognise.** *"If your only mechanism is a generic `sessions_spawn`, read X first"* is testable
+by the reader. *"On OpenClaw, do Y"* requires it to know what it is running inside, which is
+exactly the thing a skill file cannot rely on.
+
+And state the **property**, so a seventh platform inherits it for free: *"a fresh-context child
+running that agent's definition"* survives a port. *"call `sessions_spawn`"* does not.
+
+### Assume the model paraphrases your shell instead of running it
+
+v1.0.8 added engine resolution as a second line — `[ -f "$ENGRAM" ] || ENGRAM="…"` after the
+existing nested-default expression. A live `/review` then died on
+`python3 $HOME/.openclaw/extensions/engram/scripts/engram.py`: the model had read two lines of
+shell and **collapsed them into one path it guessed**. The variable it should have used was
+present in the environment the whole time. This was not a missing variable; it was a snippet
+that invited improvisation.
+
+- **One copy-and-run block.** Not a base expression plus a correction. If a human would have to
+  mentally execute two steps to know the answer, a model will skip to the answer it expects.
+- **Say so out loud** — the block now opens `RUN THIS BLOCK VERBATIM — do not substitute a path
+  you guessed.`
+- **Prefer "first candidate that EXISTS" over "first variable that is SET."** The old form took
+  a set-but-wrong variable and produced a broken path; the loop walks past it. That change
+  hardened all five incumbent platforms as a side effect.
+
+### The gate
+
+Before shipping a platform change, hand the edited skill files to an **uncontaminated agent on
+a DIFFERENT platform** and ask only:
+
+1. Which mechanism applies to you here — name the exact tool you would call.
+2. Trace the resolution block. Which path does it select, and does it succeed?
+3. Does anything here reference a tool or platform you do not have, in a way that could make
+   you do the wrong thing?
+
+Both v1.0.8 regressions were found by exactly those three questions and by nothing else. No
+selftest, fuzz, dogfood, or live run on the ported platform can see them, because the damage is
+to the five platforms you were not testing.
 
 ## 5.6 · THE USER SESSION ⚠ NEW — the "user ready" gate
 
