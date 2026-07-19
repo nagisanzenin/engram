@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.7-6D4AA8.svg" alt="Version 1.0.7">
+  <img src="https://img.shields.io/badge/version-1.0.8-6D4AA8.svg" alt="Version 1.0.8">
   <a href="https://www.npmjs.com/package/opencode-engram-learning"><img src="https://img.shields.io/npm/v/opencode-engram-learning?label=npm&color=6D4AA8" alt="npm package"></a>
   <img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="MIT License">
   <img src="https://img.shields.io/badge/selftest-217%2F217-3E7D5A.svg" alt="217/217 checks">
@@ -17,7 +17,7 @@
 
 > **The mix-up worth clearing first: Engram is not an agent-memory plugin.** It doesn't give your agent persistent memory, context, or knowledge of your codebase — memory MCPs and context tools do that, *for the agent*. Engram points the other way: **it's a learning system for the human.** Your agent becomes a tutor that makes you do the thinking, a blind examiner that checks you actually got it, and a scheduler that brings each idea back right before your brain drops it. The agent doesn't get smarter. **You do — measurably, with receipts.**
 
-Born as a Claude Code plugin; the same skills and engine now run on five agentic platforms:
+Born as a Claude Code plugin; the same skills and engine now run on six agentic platforms — including, as of v1.0.8, one that puts the tutor in your chat app:
 
 ```bash
 claude plugin marketplace add nagisanzenin/engram
@@ -31,9 +31,11 @@ claude plugin install engram@engram
 | **OpenCode** | `"plugin": ["opencode-engram-learning"]` in `opencode.json` ([npm](https://www.npmjs.com/package/opencode-engram-learning)) | `/learn` `/review` `/coach` |
 | **Hermes Agent** | clone + `skills.external_dirs` → [INSTALL-HERMES.md](INSTALL-HERMES.md) — verified live on v0.18.2 | `/skill learn` (or `/study`) `/review` `/coach` |
 | **Google Antigravity** | `agy plugin install https://github.com/nagisanzenin/engram` | `/learn` `/review` `/coach` |
+| **OpenClaw** | `openclaw plugins install engram --marketplace nagisanzenin/engram` → [INSTALL-OPENCLAW.md](INSTALL-OPENCLAW.md) — verified on 2026.7.1-2 | `/learn` `/review` `/coach` |
 
 <sub>OpenCode: `opencode.json` is read globally (`~/.config/opencode/opencode.json`) or per-project; pin to source instead of npm with `"plugin": ["git+https://github.com/nagisanzenin/engram.git"]`.</sub><br>
-<sub>Antigravity: The due-review session nudge isn't ported yet, and the `architect` and `smith` subagents are currently dropped by AG 1.1.4's strict installer. Everything else works the same.</sub>
+<sub>Antigravity: The due-review session nudge isn't ported yet, and the `architect` and `smith` subagents are currently dropped by AG 1.1.4's strict installer. Everything else works the same.</sub><br>
+<sub>OpenClaw: the nudge needs `openclaw config set hooks.internal.enabled true` (OpenClaw ignores plugin hooks until internal hooks are switched on), and it fires on `/new` and `/reset` rather than every session. Engram's agents aren't registered — the skills spawn them through `sessions_spawn` with isolated context instead, which keeps the assessor blind. Details in [INSTALL-OPENCLAW.md](INSTALL-OPENCLAW.md).</sub>
 
 Then, inside your coding assistant (command spelling per your platform's row above):
 
@@ -59,7 +61,7 @@ Engram is what's missing around the explanation: **a tutor that makes you do the
 | an independent examiner that grades you blind, in writing | self-assessed *"yeah, makes sense"* |
 | plain JSON files on your machine | a cloud service, account, or subscription |
 
-**Concretely, installing it gives you:** three commands (`/learn`, `/review`, `/coach` — exact spelling per platform in the table above), a quiet session nudge that tells you when reviews are due (and says nothing otherwise — on every platform except Antigravity, whose hook port is pending), and a state folder at `~/.claude/learning/` that you own, can read, and share across every platform you use.
+**Concretely, installing it gives you:** three commands (`/learn`, `/review`, `/coach` — exact spelling per platform in the table above), a quiet session nudge that tells you when reviews are due (and says nothing otherwise — on every platform except Antigravity, whose hook port is pending; on OpenClaw it needs one config flag and fires on `/new`), and a state folder at `~/.claude/learning/` that you own, can read, and share across every platform you use.
 
 ```
  recall
@@ -372,13 +374,14 @@ The model never does calendar math; this does:
 .claude-plugin/     plugin.json, marketplace.json          (Claude Code)
 .codex-plugin/      plugin.json                            (Codex)
 .agents/plugins/    marketplace.json                       (Codex marketplace)
-skills/             learn / review / coach  (+ _shared: dialogue grammar, Explorable Contract)
+skills/             learn / review / coach  (+ _shared: dialogue grammar, Explorable Contract, subagent spawning)
 agents/             engram-curriculum-architect · engram-assessor · engram-artifact-smith  (Claude Code)
 codex/agents/       *.toml ports of the three subagents     (Codex)
 hooks/              SessionStart re-anchor (Claude Code/Codex) · pre_llm_call port (Hermes) — self-resolving; silent when nothing is due
+hooks/engram-due/   HOOK.md + handler.js                    (OpenClaw hook pack — same nudge, same silence)
 scripts/engram.py   deterministic core: FSRS-4.5, state, receipts, stats, dashboard, selftest
 docs/               theory · prior art · architecture · roadmap
-INSTALL-CODEX.md · INSTALL-HERMES.md    per-platform glue, at the repo root
+INSTALL-CODEX.md · INSTALL-HERMES.md · INSTALL-OPENCLAW.md    per-platform glue, at the repo root
 ```
 
 One codebase, many agents: `skills/` and `scripts/engram.py` are shared verbatim; each platform gets its own thin glue (manifest, subagent format, or hook adapter). See [INSTALL-CODEX.md](INSTALL-CODEX.md) · [INSTALL-HERMES.md](INSTALL-HERMES.md).

@@ -29,7 +29,7 @@ OPENCODE_PLUGIN_ROOT is set in shell env automatically on every session start.
 
 The following references are available and resolve to the extracted copy in .opencode/:
 
-- **engram-shared** — skills/_shared/ (dialogue grammar, explorable contract)
+- **engram-shared** — skills/_shared/ (dialogue grammar, explorable contract, subagent spawning)
 - **engram-scripts** — scripts/ (engram.py — deterministic core, FSRS scheduler, stats)
 - **engram-docs** — docs/ (foundations, architecture, roadmap)
 

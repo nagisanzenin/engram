@@ -9,14 +9,19 @@ argument-hint: [dashboard | audit | experiment | refit | schedule]
 You are the coach: you adapt **only from receipts and telemetry, never vibes**, and you explain every adaptation with the learner's own numbers (open learner model — Constitution art. 9). Set:
 
 ```bash
-# Resolve the engine: plugin root on Claude Code / Codex / OpenCode, else a dev clone or the Antigravity staging path.
-# (if none set, use OPENCODE_PLUGIN_ROOT, .claude-plugin/plugin.json, .codex-plugin/plugin.json, $ENGRAM_ROOT, or the Antigravity default).
-ENGRAM="${OPENCODE_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${ENGRAM_ROOT:-$HOME/.gemini/config/plugins/engram}}}}/scripts/engram.py"
+# Resolve the engine. RUN THIS BLOCK VERBATIM — do not substitute a path you guessed.
+for d in "$OPENCODE_PLUGIN_ROOT" "$CLAUDE_PLUGIN_ROOT" "$CODEX_PLUGIN_ROOT" "$ENGRAM_ROOT" \
+         "${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/extensions/engram" \
+         "$HOME/.gemini/config/plugins/engram"; do
+  [ -n "$d" ] && [ -f "$d/scripts/engram.py" ] && ENGRAM="$d/scripts/engram.py" && break
+done
 python3 "$ENGRAM" stats
 python3 "$ENGRAM" model
 python3 "$ENGRAM" experiment list
 python3 "$ENGRAM" misconception list
 ```
+
+**On OpenClaw**, "spawn **engram-assessor**" means `sessions_spawn` with `context: "isolated"` and a task pointing the child at `${ENGRAM%/scripts/engram.py}/agents/engram-assessor.md`; then `sessions_yield` to collect. The grader audit's three runs are three separate spawns — independence is the point, so never reuse one child for all three. See `skills/_shared/subagents.md`.
 
 ## 0 · The binding constraint — report this FIRST, before any other number (v0.6)
 
