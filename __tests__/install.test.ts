@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import { tmpdir } from "node:os"
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
-import { getExtractTarget, needsExtract, readPrevVersion, copyMissing, selfExtract, getVERSION } from "../.opencode/install"
+import { getExtractTarget, needsExtract, readPrevVersion, copyMissing, selfExtract, getVERSION, resolveAgentsPath, writeOrPrependAgentsMd } from "../.opencode/install"
 
 describe("getExtractTarget", () => {
   let tmp: string
@@ -171,4 +171,194 @@ describe("selfExtract — engram-update is never written to disk", () => {
     expect(existsSync(resolve(target, ".engram-update.jsonc"))).toBe(false)
   })
 
+  it("removes legacy instructions.md on version bump", () => {
+    const target = resolve(tmp, ".opencode")
+    mkdirSync(target, { recursive: true })
+    writeFileSync(resolve(target, ".engram-version.jsonc"), JSON.stringify({ version: "0.9.0" }))
+    writeFileSync(resolve(target, "instructions.md"), "legacy content")
+
+    selfExtract(pkg, tmp, "1.0.2")
+    expect(existsSync(resolve(target, "instructions.md"))).toBe(false)
+  })
+
+  it("writes .engram-smudge-template on extract", () => {
+    const target = resolve(tmp, ".opencode")
+    mkdirSync(target, { recursive: true })
+
+    selfExtract(pkg, tmp, "1.0.2")
+    const tmpl = resolve(target, ".engram-smudge-template")
+    expect(existsSync(tmpl)).toBe(true)
+    expect(readFileSync(tmpl, "utf-8")).toContain("<!-- engram v1.0.2 -->")
+    expect(readFileSync(tmpl, "utf-8")).toContain("<!-- /engram -->")
+  })
+
+})
+
+describe("resolveAgentsPath", () => {
+  it("returns project root for project-level target", () => {
+    expect(resolveAgentsPath(resolve("/project", ".opencode"))).toBe(resolve("/project", "AGENTS.md"))
+  })
+
+  it("returns inside target for global target", () => {
+    expect(resolveAgentsPath(resolve("/home/u", ".config", "opencode"))).toBe(resolve("/home/u", ".config", "opencode", "AGENTS.md"))
+  })
+})
+
+describe("writeOrPrependAgentsMd", () => {
+  let tmp: string
+
+  beforeEach(() => {
+    tmp = mkdtempSync(resolve(tmpdir(), "engram-test-"))
+    writeFileSync(resolve(tmp, "opencode.jsonc"), "{}")
+  })
+  afterEach(() => rmSync(tmp, { recursive: true }))
+
+  function projectTarget() { return resolve(tmp, ".opencode") }
+  function agentsPath() { return resolve(tmp, "AGENTS.md") }
+
+  it("creates AGENTS.md with versioned marker block when file does not exist", () => {
+    writeOrPrependAgentsMd(projectTarget(), "1.0.0")
+    expect(existsSync(agentsPath())).toBe(true)
+    const content = readFileSync(agentsPath(), "utf-8")
+    expect(content).toContain("<!-- engram v1.0.0 -->")
+    expect(content).toContain("<!-- /engram -->")
+    expect(content).toContain("Engram — Evidence-Based Learning Engine")
+  })
+
+  it("is no-op when file already has the same version marker", () => {
+    writeOrPrependAgentsMd(projectTarget(), "1.0.0")
+    const content1 = readFileSync(agentsPath(), "utf-8")
+    writeOrPrependAgentsMd(projectTarget(), "1.0.0")
+    const content2 = readFileSync(agentsPath(), "utf-8")
+    expect(content1).toBe(content2)
+  })
+
+  it("replaces old block and preserves user content on version bump", () => {
+    writeOrPrependAgentsMd(projectTarget(), "1.0.0")
+    writeFileSync(agentsPath(), readFileSync(agentsPath(), "utf-8") + "\n\nMy custom rule.")
+
+    writeOrPrependAgentsMd(projectTarget(), "1.0.1")
+    const content = readFileSync(agentsPath(), "utf-8")
+    expect(content).toContain("<!-- engram v1.0.1 -->")
+    expect(content).toContain("My custom rule.")
+    expect(content).not.toContain("<!-- engram v1.0.0 -->")
+  })
+
+  it("prepends block at top when no marker exists, preserving existing content", () => {
+    writeFileSync(agentsPath(), "Existing user rules.")
+
+    writeOrPrependAgentsMd(projectTarget(), "1.0.0")
+    const content = readFileSync(agentsPath(), "utf-8")
+    expect(content.startsWith("<!-- engram v1.0.0 -->")).toBe(true)
+    expect(content).toContain("Existing user rules.")
+  })
+
+  it("handles multiple version bumps", () => {
+    writeOrPrependAgentsMd(projectTarget(), "1.0.0")
+    writeOrPrependAgentsMd(projectTarget(), "1.0.1")
+    writeOrPrependAgentsMd(projectTarget(), "2.0.0")
+    const content = readFileSync(agentsPath(), "utf-8")
+    expect(content).toContain("<!-- engram v2.0.0 -->")
+    expect(content).not.toContain("<!-- engram v1.0.0 -->")
+    expect(content).not.toContain("<!-- engram v1.0.1 -->")
+  })
+
+  it("writes AGENTS.md at correct global location", () => {
+    const globalTarget = resolve(tmp, ".config", "opencode")
+    mkdirSync(globalTarget, { recursive: true })
+    writeOrPrependAgentsMd(globalTarget, "1.0.0")
+    expect(existsSync(resolve(globalTarget, "AGENTS.md"))).toBe(true)
+  })
+
+  it("preserves content with special characters below the block", () => {
+    writeOrPrependAgentsMd(projectTarget(), "1.0.0")
+    writeFileSync(agentsPath(), readFileSync(agentsPath(), "utf-8") + "\n\n## My Rules\n- rule 1\n- rule 2\n\n```json\n{\"key\": \"value\"}\n```")
+
+    writeOrPrependAgentsMd(projectTarget(), "1.0.1")
+    const content = readFileSync(agentsPath(), "utf-8")
+    expect(content).toContain("<!-- engram v1.0.1 -->")
+    expect(content).toContain("## My Rules")
+    expect(content).toContain("```json")
+    expect(content).toContain('"key"')
+  })
+
+  it("handles empty existing file", () => {
+    writeFileSync(agentsPath(), "")
+    writeOrPrependAgentsMd(projectTarget(), "1.0.0")
+    const content = readFileSync(agentsPath(), "utf-8")
+    expect(content).toContain("<!-- engram v1.0.0 -->")
+    expect(content).not.toMatch(/\n\n$/)
+  })
+
+  it("handles whitespace-only existing file", () => {
+    writeFileSync(agentsPath(), " \n\n  \t  ")
+    writeOrPrependAgentsMd(projectTarget(), "1.0.0")
+    const content = readFileSync(agentsPath(), "utf-8")
+    expect(content.startsWith("<!-- engram v1.0.0 -->")).toBe(true)
+  })
+
+  it("prepends when close marker exists without opening marker", () => {
+    writeFileSync(agentsPath(), "<!-- /engram -->\norphan close marker")
+    writeOrPrependAgentsMd(projectTarget(), "1.0.0")
+    const content = readFileSync(agentsPath(), "utf-8")
+    expect(content.startsWith("<!-- engram v1.0.0 -->")).toBe(true)
+    expect(content).toContain("orphan close marker")
+  })
+
+  it("prepends when opening marker exists without matching close marker", () => {
+    writeFileSync(agentsPath(), "<!-- engram v0.9.0 -->\n# incomplete block\nno close marker")
+    writeOrPrependAgentsMd(projectTarget(), "1.0.0")
+    const content = readFileSync(agentsPath(), "utf-8")
+    expect(content.startsWith("<!-- engram v1.0.0 -->")).toBe(true)
+    expect(content).toContain("<!-- engram v0.9.0 -->")
+    expect(content).toContain("no close marker")
+  })
+
+  it("writes to same dir when target basename is not .opencode", () => {
+    const t = resolve(tmp, "custom-dir")
+    mkdirSync(t, { recursive: true })
+    writeOrPrependAgentsMd(t, "1.0.0")
+    expect(existsSync(resolve(t, "AGENTS.md"))).toBe(true)
+  })
+
+  it("handles semver versions with pre-release tags", () => {
+    writeOrPrependAgentsMd(projectTarget(), "1.0.0-alpha.1")
+    const content = readFileSync(agentsPath(), "utf-8")
+    expect(content).toContain("<!-- engram v1.0.0-alpha.1 -->")
+  })
+
+  it("replaces block and preserves user content with leading blank lines", () => {
+    writeOrPrependAgentsMd(projectTarget(), "1.0.0")
+    writeFileSync(agentsPath(), readFileSync(agentsPath(), "utf-8") + "\n\n\n\nUser content after blank lines.")
+
+    writeOrPrependAgentsMd(projectTarget(), "1.0.1")
+    const content = readFileSync(agentsPath(), "utf-8")
+    expect(content).toContain("<!-- engram v1.0.1 -->")
+    expect(content).toContain("User content after blank lines.")
+    expect(content).not.toMatch(/\n\n\n\nUser content/)
+  })
+
+  it("does not introduce double newlines when user content follows immediately after close marker", () => {
+    writeOrPrependAgentsMd(projectTarget(), "1.0.0")
+    const raw = readFileSync(agentsPath(), "utf-8")
+    writeFileSync(agentsPath(), raw.replace(/\n$/, "") + "\nuser content")
+
+    writeOrPrependAgentsMd(projectTarget(), "1.0.1")
+    const content = readFileSync(agentsPath(), "utf-8")
+    expect(content).toContain("<!-- /engram -->")
+    expect(content).toContain("user content")
+  })
+
+  it("preserves content above the marker on replace", () => {
+    writeOrPrependAgentsMd(projectTarget(), "1.0.0")
+    const raw = readFileSync(agentsPath(), "utf-8")
+    writeFileSync(agentsPath(), "User header above.\n" + raw + "\n\nFooter below.")
+
+    writeOrPrependAgentsMd(projectTarget(), "1.0.1")
+    const content = readFileSync(agentsPath(), "utf-8")
+    expect(content).toContain("User header above.")
+    expect(content).toContain("Footer below.")
+    expect(content).toContain("<!-- engram v1.0.1 -->")
+    expect(content).not.toContain("<!-- engram v1.0.0 -->")
+  })
 })

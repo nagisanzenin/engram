@@ -74,20 +74,19 @@ describe("pseudo-command registration", () => {
     expect(cfg.command["engram-update"]).toBeDefined()
   })
 
-  it("registers instructions.md path when file exists", async () => {
+  it("does NOT set cfg.instructions for AGENTS.md (native discovery handles it)", async () => {
     const target = resolve(tmp, ".opencode")
     mkdirSync(target, { recursive: true })
-    writeFileSync(resolve(target, "instructions.md"), "test content")
+    writeFileSync(resolve(tmp, "AGENTS.md"), "test content")
 
     const plugin = await getPlugin(tmp)
     const cfg: any = {}
     await plugin.config!(cfg)
 
-    expect(cfg.instructions).toBeDefined()
-    expect(cfg.instructions).toContain(resolve(target, "instructions.md"))
+    expect(cfg.instructions).toBeUndefined()
   })
 
-  it("does NOT set cfg.instructions when instructions.md is absent", async () => {
+  it("does NOT set cfg.instructions when AGENTS.md is absent", async () => {
     const plugin = await getPlugin(tmp)
     const cfg: any = {}
     await plugin.config!(cfg)

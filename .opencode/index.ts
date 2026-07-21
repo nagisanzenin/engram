@@ -26,7 +26,7 @@
  *
  * Generated (always overwritten on extract):
  *   command/  → command/{learn,review-loop,coach}.md
- *   instructions.md → file path for cfg.instructions
+ *   AGENTS.md → versioned marker block (project root or ~/.config/opencode/)
  *   .engram-version.jsonc → idempotency: {version, previous, installed_at, source}
  *   .engram-update.jsonc  → per-category diff manifest (only on version bump)
  *
@@ -53,9 +53,25 @@
  *      Shape note: targets the OpenCode v1 SDK config layer (skills.paths,
  *      command singular, agent singular). v2 uses skills: string[] and
  *      commands: plural. The bridge shapes are intentional.
- *   3. cfg.instructions = {target}/instructions.md — file path.
- *
  *   After first exec: bridge off, disk discovery handles everything.
+ *
+ * AGENTS.md (no bridge needed)
+ * ------------------------------
+ *
+ *   AGENTS.md is written directly to disk by selfExtract. No cfg.instructions
+ *   registration is required because both V1 and V2 discover it natively:
+ *
+ *     V1 (HTTP API / CLI) — fs.findUp("AGENTS.md") every request.
+ *     V2 (InstructionContext) — fs.up({ targets: ["AGENTS.md"] }) every turn.
+ *
+ *   The file is re-read from disk on every LLM request — no bridge, no cache,
+ *   no restart needed. Changes or creation take effect immediately.
+ *
+ *   selfExtract also:
+ *     - Adds AGENTS.md to .git/info/exclude so the file is never committed
+ *       (per-repo local gitignore, no hook, no working-tree mutation).
+ *     - Warns if CLAUDE.md exists at the project root — AGENTS.md takes
+ *       discovery priority over CLAUDE.md (first filename match wins).
  *
  * Update system (update.ts)
  * -------------------------
@@ -138,10 +154,11 @@
  * -----------------------------
  *
  *   docs/ from extract        → end users don't need internal docs.
- *   cfg.references            → all paths local; instructions.md covers it.
+ *   cfg.references            → all paths local; AGENTS.md covers it.
  *   cfg.permission            → no external paths remain post-extract.
  *   cfg.{skills,commands,agents} → disk discovery (bridge on first exec).
- *   inline instructions       → file path to instructions.md.
+ *   cfg.instructions push     → dropped — V1 and V2 both discover AGENTS.md
+ *                               natively (re-read from disk every request).
  *   copyDir / cpSync          → copyMissing (never overwrite user files).
  *
  * Known OpenCode bug
@@ -159,6 +176,7 @@ import { createSessionStartHooks } from "../hooks/session-start.js"
 import { createShellEnvHook } from "../hooks/shell-env.js"
 import { detectInstallType } from "./install-type.js"
 import { selfExtract, getExtractTarget, getVERSION } from "./install.js"
+import { createPluginLogger } from "./logger.js"
 import { engramUpdateTool } from "./update-tool.js"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
@@ -205,7 +223,7 @@ Tool: Read
 Path: $TARGET/.engram-update.jsonc
 
 The Engram system consists of:
-  instructions.md    — model behavioral rules
+  AGENTS.md         — model behavioral rules (project root or global)
   skills/            — skill definitions (learn, review, coach)
   agents/            — subagent definitions (curriculum-architect, engram-assessor, artifact-smith)
   scripts/           — deterministic engine (engram.py)
@@ -298,7 +316,7 @@ STOP.
 ## Constraints — MUST follow
 - Use Read tool for the manifest. NEVER use Glob.
 - Do NOT use Bash for file deletion or manifest updates. Use the engram_update tool instead.
-- Do NOT delete instructions.md or scripts/engram.py directly.
+- Do NOT delete AGENTS.md or scripts/engram.py directly.
 - Do NOT add, modify, or rename any file.
 - If a category.skipped array is empty, skip that category silently.
 - Do NOT output text beyond what each step prescribes.`
@@ -317,7 +335,8 @@ export const server: Plugin = async ({ client, $, directory }) => {
       let target: string
       let freshlyExtracted = false
       if (type === "npm") {
-        const result = selfExtract(root, cwd, getVERSION(root))
+        const logger = createPluginLogger(client)
+        const result = selfExtract(root, cwd, getVERSION(root), logger)
         target = result.target
         freshlyExtracted = result.freshlyExtracted
       } else {
@@ -344,12 +363,6 @@ export const server: Plugin = async ({ client, $, directory }) => {
       }
       cfg.tools = cfg.tools || {}
       cfg.tools["engram_update"] = existsSync(resolve(target, ".engram-update.jsonc"))
-
-      const instructionsFile = resolve(target, "instructions.md")
-      if (existsSync(instructionsFile)) {
-        cfg.instructions = cfg.instructions || []
-        cfg.instructions.push(instructionsFile)
-      }
       } catch {}
     },
     tool: {
