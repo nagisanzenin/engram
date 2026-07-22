@@ -1,5 +1,73 @@
 # Changelog
 
+## 1.2.0 — 2026-07-22 · AGENTS.md, and the instructions that deleted themselves
+
+The OpenCode plugin wrote its model instructions to `.opencode/instructions.md` and registered
+that path in `cfg.instructions`. That only ever worked on OpenCode's v1 session path; the v2
+runner (`packages/core/src/instruction-context.ts`) discovers `AGENTS.md` natively and never
+reads `cfg.instructions` at all. So the instructions were one refactor away from silently not
+loading. #11 (thanks @luanweslley77) moves them into `AGENTS.md`, behind a versioned
+`<!-- engram v… -->` marker.
+
+**The first implementation of that move deleted the instructions it existed to install** — and
+it took an end-to-end test against a real OpenCode to see it, because every unit test passed.
+
+### Packaging
+
+- **A pre-commit hook stripped the block from the working tree, not just from the commit.**
+  The design was "always on disk, never in git". The strip script rewrote the file in place, so
+  after one `git commit` the block was gone from disk too — and `selfExtract` returns early when
+  the version is unchanged, so nothing put it back until the next release. Measured on OpenCode
+  1.18.4: a project with a `CLAUDE.md` went from *"Instructions from: CLAUDE.md"* to a **0-byte
+  `AGENTS.md` and no instructions block at all**, permanently. Replaced with a git
+  **clean/smudge filter pair** — `clean` strips the block on the way into the index, `smudge`
+  restores it on checkout. The working tree always has it; git never does.
+- **The hook also swept unstaged work into commits.** `git add AGENTS.md` after stripping
+  staged the whole file, so anyone using `git add -p` on it committed hunks they had held back.
+  Gone with the hook.
+- **A project-root `AGENTS.md` silently suppresses the user's `CLAUDE.md`.** Not our bug, but
+  ours to disclose: OpenCode's `instruction.ts:122-133` breaks on the first *filename* that
+  matches anywhere in the ancestor chain, and `AGENTS.md` is first in that list. Creating one
+  takes `CLAUDE.md` away, and `findUp` tests existence, so even an empty `AGENTS.md` does it.
+  Engram now warns when both exist. **The warning fires from the config hook, once per session,
+  not from `selfExtract`** — a `CLAUDE.md` added the week after install would otherwise never
+  be flagged, which is precisely the case the warning is for.
+- **`.git/info/exclude` no longer hides the user's own rules.** Keeping `AGENTS.md` out of git
+  is right while the file holds only Engram's block, and a trap the moment it doesn't: the
+  exclude is invisible from the working tree — it is not `.gitignore`, and finding it takes
+  `git check-ignore -v` — so `git status` stays silent and the user's rules are never committed.
+  The entry now tracks **content, not authorship**: present while Engram-only, removed as soon
+  as there is anything else in the file, with a log line saying so. `.opencode/` is deliberately
+  *not* excluded — it can hold the user's own commands and agents, and hiding those would be the
+  same bug.
+- **The clean and smudge filters disagreed about what a block is.** `clean` was line-anchored;
+  `smudge` used a substring test. A user whose rules merely mention `<!-- engram v` inline made
+  `smudge` no-op, so the block was never restored on checkout and the instructions quietly
+  stopped reaching the model. Both are anchored now, and a check holds them together.
+- **The clean filter could delete user prose above the block.** The old regex was `DOTALL` with
+  no `$`, so `.+?` crossed newlines: a line mentioning the marker swallowed everything down to
+  the real close marker — and the truncated file is what git stored. The locator now takes the
+  **last** opening marker before the closing one, both anchored alone on their line.
+- **The clean filter no longer rewrites the user's line endings.** It normalized CRLF→LF across
+  the whole file, user content included. CRLF is now normalized only for matching and restored
+  on the way out.
+- `cfg.instructions` is no longer set. Once the file is `AGENTS.md` at project root, v1
+  discovers it natively (and de-duplicates against config — `instruction.ts:113` is a `Set`), and
+  v2 never reads the field. It was dead either way.
+- Legacy `.opencode/instructions.md` is removed on upgrade.
+
+### Tests
+
+110 → 151 vitest checks; `selftest` unchanged at 234 (the engine is untouched).
+
+**One of the new checks was fake, and the mutation gate caught it** — §4.5, for the fourth
+release running. The fixture for "user prose above the block survives" used an *inline* mention,
+which the anchored regex never matches, so `opens[0]` and `opens[-1]` were the same element and
+flipping between them changed nothing. Rewritten with two genuinely-anchored markers so the two
+definitions diverge. Worth recording that the `$`-anchor and the last-marker rule are
+belt-and-braces: either alone saves the inline case, so only the fenced-example fixture
+separates them, and the locator has to be mutation-tested as a unit. The test file says so.
+
 ## 1.1.1 — 2026-07-22 · What the post-release review found, three hours later
 
 v1.1.0 shipped with every gate green. §7.5 — an independent reviewer reading the **shipped**

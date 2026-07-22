@@ -2,26 +2,65 @@
 """
 Git clean filter for AGENTS.md — strips the Engram block before staging.
 
-Used by the git smudge/clean filter pair installed by selfExtract.
-Reads stdin, removes the <!-- engram v{...} --> ... <!-- /engram --> block,
-and writes the result to stdout. No-op if no block is present.
+Half of the smudge/clean filter pair installed by selfExtract. Reads stdin,
+removes the <!-- engram v{...} --> ... <!-- /engram --> block, writes the
+result to stdout. No-op when no complete block is present.
 
-Note: CRLF (\r\n) is normalized to LF (\n) across the entire file, not just
-the block. In practice this is harmless — git's autocrlf converts back on
-checkout — but it does mean the clean filter rewrites line endings in user
-content below the block too.
+Two properties this file exists to hold, both learned from review:
+
+1. The block's opening marker is the LAST one before the closing marker, not
+   the first. A user who documents Engram's own marker syntax at line start,
+   above the block, would otherwise have everything from their line down to
+   the real close marker deleted — and the truncated version is what git
+   stores.
+
+2. The user's line endings survive. CRLF is normalized only so the anchored
+   regex can match, then restored before writing. Rewriting line endings
+   across a user's whole file is not this filter's business.
+
+Must stay behaviourally identical to findEngramBlock() in .opencode/install.ts
+and to opencode-engram-smudge. All three answer "is there a block here?" and a
+disagreement between any two of them silently loses either user content or the
+Engram instructions.
 """
-import os
 import re
 import sys
 
-MARKER_RE = re.compile(
-    r"^<!-- engram v.+? -->\n(?:.*?\n)*?^<!-- /engram -->\n?",
-    re.MULTILINE | re.DOTALL,
-)
+# Both markers must be alone on their line. An inline mention is prose.
+OPEN_RE = re.compile(r"^<!-- engram v.+? -->$", re.MULTILINE)
+CLOSE_RE = re.compile(r"^<!-- /engram -->$", re.MULTILINE)
 
-content = sys.stdin.read()
-# Normalize CRLF to LF so the regex works on Windows
-if "\r\n" in content:
-    content = content.replace("\r\n", "\n")
-sys.stdout.write(MARKER_RE.sub("", content))
+
+def strip_block(content: str) -> str:
+    close = CLOSE_RE.search(content)
+    if not close:
+        return content
+
+    opens = [m for m in OPEN_RE.finditer(content) if m.start() < close.start()]
+    if not opens:
+        return content
+
+    start = opens[-1].start()
+    end = close.end()
+    # Swallow the newline terminating the close marker so removing the block
+    # does not leave a blank line where it used to be.
+    if content[end:end + 1] == "\n":
+        end += 1
+
+    return content[:start] + content[end:]
+
+
+def main() -> None:
+    raw = sys.stdin.read()
+    had_crlf = "\r\n" in raw
+    content = raw.replace("\r\n", "\n") if had_crlf else raw
+
+    out = strip_block(content)
+
+    if had_crlf:
+        out = out.replace("\n", "\r\n")
+    sys.stdout.write(out)
+
+
+if __name__ == "__main__":
+    main()

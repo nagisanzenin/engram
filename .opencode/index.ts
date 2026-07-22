@@ -168,14 +168,14 @@
  */
 
 import { existsSync } from "node:fs"
-import { resolve, dirname } from "node:path"
+import { resolve, dirname, basename } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { Plugin } from "@opencode-ai/plugin"
 import { registerAgents } from "./agents.js"
 import { createSessionStartHooks } from "../hooks/session-start.js"
 import { createShellEnvHook } from "../hooks/shell-env.js"
 import { detectInstallType } from "./install-type.js"
-import { selfExtract, getExtractTarget, getVERSION } from "./install.js"
+import { selfExtract, getExtractTarget, getVERSION, syncProjectState } from "./install.js"
 import { createPluginLogger } from "./logger.js"
 import { engramUpdateTool } from "./update-tool.js"
 
@@ -342,6 +342,9 @@ export const server: Plugin = async ({ client, $, directory }) => {
       } else {
         target = getExtractTarget(cwd)
       }
+
+      // Every session, not just on a version bump — see syncProjectState().
+      try { syncProjectState(target, createPluginLogger(client)) } catch {}
 
       if (freshlyExtracted) {
         registerAgents(cfg, root)

@@ -32,7 +32,7 @@ SCHEMA = 1
 # The one place the engine knows its own version. Read by `export`, so a shared receipt states
 # which engine produced it — a corpus of receipts from unknown engine versions is not a corpus.
 # Pinned against .claude-plugin/plugin.json by a selftest, so it cannot drift.
-ENGRAM_VERSION = "1.1.1"
+ENGRAM_VERSION = "1.2.0"
 RETENTION_DEFAULT = 0.90
 INTERVAL_MAX = 365
 RETENTION_MIN, RETENTION_MAX = 0.70, 0.97   # sane desired-retention bounds

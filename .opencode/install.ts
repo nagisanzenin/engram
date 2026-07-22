@@ -55,20 +55,34 @@ The following references are available and resolve to the extracted copy in .ope
 
 const MARKER_OPEN = "<!-- engram v"
 const MARKER_CLOSE = "<!-- /engram -->"
-const MARKER_RE = /^<!-- engram v(.+?) -->$/m
+const MARKER_OPEN_RE = /^<!-- engram v(.+?) -->$/gm
+const MARKER_CLOSE_RE = /^<!-- \/engram -->$/m
 
 function buildEngramBlock(version: string): string {
   return `${MARKER_OPEN}${version} -->\n${INSTRUCTIONS_TEXT}${MARKER_CLOSE}\n`
 }
 
+/**
+ * Locates the Engram block: the LAST opening marker before the first closing one.
+ *
+ * Taking the *first* opening marker looks equivalent and is not. A user who
+ * documents Engram's own marker syntax at line start — above the block — would
+ * have everything from their line down to the real close marker deleted, and
+ * (via the clean filter) that truncated version is what git stores. Anchoring
+ * to the last opening marker keeps their prose. Both markers must be alone on
+ * their line; an inline mention is prose, not a marker.
+ */
 function findEngramBlock(content: string): { version: string; start: number; end: number } | null {
-  const match = content.match(MARKER_RE)
-  if (!match) return null
-  const version = match[1]
-  const start = match.index!
-  const closeIdx = content.indexOf(MARKER_CLOSE, start + match[0].length)
-  if (closeIdx === -1) return null
-  return { version, start, end: closeIdx + MARKER_CLOSE.length }
+  const close = content.match(MARKER_CLOSE_RE)
+  if (close?.index === undefined) return null
+  const closeStart = close.index
+
+  let open: RegExpExecArray | null = null
+  const re = new RegExp(MARKER_OPEN_RE.source, "gm")
+  for (let m = re.exec(content); m !== null && m.index < closeStart; m = re.exec(content)) open = m
+  if (open === null) return null
+
+  return { version: open[1], start: open.index, end: closeStart + close[0].length }
 }
 
 /** Resolves the AGENTS.md path based on extraction target.
@@ -138,7 +152,8 @@ export function writeOrPrependAgentsMd(target: string, version: string): boolean
  *      content yet) and .engram-* internal files. Combined with the filter,
  *      the file is still tracked if the user explicitly git add --force
  *      (filter strips the block). Local (not versioned), affects only this clone.
- *      Only written when engramCreated is true (file didn't exist before).
+ *      Entry tracks CONTENT, not authorship: present while the file is
+ *      Engram-only, removed as soon as the user adds rules of their own.
  *
  * Each mechanism is checked independently — partial-state repair is supported.
  * Each mechanism is wrapped in try/catch — a failure in one does not block the others.
@@ -150,7 +165,7 @@ export function writeOrPrependAgentsMd(target: string, version: string): boolean
  * [filter "engram"] section from .git/config and the engram lines from
  * .git/info/attributes and .git/info/exclude.
  */
-function installGitFilter(projectRoot: string, engramCreated: boolean, log: (msg: string) => void) {
+function installGitFilter(projectRoot: string, log: (msg: string) => void) {
   const gitConfig = resolve(projectRoot, ".git", "config")
   if (!existsSync(gitConfig)) return
 
@@ -164,7 +179,14 @@ function installGitFilter(projectRoot: string, engramCreated: boolean, log: (msg
 
   const infoDir = resolve(projectRoot, ".git", "info")
 
-  // 1. SMUDGE/CLEAN FILTER — check independently, no early return
+  // 1. SMUDGE/CLEAN FILTER — check independently, no early return.
+  //
+  //    Deliberately a plain file append rather than `git config --local`.
+  //    `git config` is the tidier API, but it hard-fails with "can only be used
+  //    inside a git repository" whenever .git/config exists while git does not
+  //    consider the directory a valid repo — a partially initialised repo, an
+  //    unusual GIT_DIR. That trades a guarded, idempotent fs write for a
+  //    subprocess plus a new failure mode, and buys nothing a user can see.
   try {
     const configContent = readFileSync(gitConfig, "utf-8")
     if (!configContent.includes('[filter "engram"]')) {
@@ -190,28 +212,76 @@ function installGitFilter(projectRoot: string, engramCreated: boolean, log: (msg
     }
   } catch {}
 
-  // 3. LOCAL EXCLUDE — only when engram created AGENTS.md (avoid hiding user-authored files)
-  if (!engramCreated) return
-
-  try {
-    const excludeFile = resolve(infoDir, "exclude")
-    if (existsSync(excludeFile)) {
-      const exclude = readFileSync(excludeFile, "utf-8")
-      const hasAgents = exclude.split("\n").some(l => l.trim() === "AGENTS.md")
-      const hasDotFiles = exclude.split("\n").some(l => l.trim() === ".engram-*")
-      if (!hasAgents || !hasDotFiles) {
-        const lines: string[] = []
-        if (!hasDotFiles) lines.push("# Engram internal files\n.engram-*")
-        if (!hasAgents) lines.push("# Engram plugin instructions\nAGENTS.md")
-        writeFileSync(excludeFile, exclude.trimEnd() + "\n" + lines.join("\n") + "\n")
-      }
-    } else {
-      mkdirSync(infoDir, { recursive: true })
-      writeFileSync(excludeFile, "# Engram internal files\n.engram-*\n# Engram plugin instructions\nAGENTS.md\n")
-    }
-  } catch {}
+  syncAgentsExclude(projectRoot, log)
 
   log("Engram: installed git filter (clean+smudge) for AGENTS.md")
+}
+
+/**
+ * Keeps AGENTS.md out of git only while the file is Engram's alone.
+ *
+ * The exclude entry stops an otherwise-empty AGENTS.md from being committed —
+ * with the block stripped by the clean filter there would be nothing in it.
+ * But `.git/info/exclude` is invisible from the working tree; it is not
+ * `.gitignore`, and finding it takes `git check-ignore -v`. So an exclude that
+ * outlives its reason is a trap: the user adds their own rules below the block,
+ * `git status` stays silent, and their rules are never committed.
+ *
+ * So the entry tracks the file's contents rather than who created it — present
+ * while the file is Engram-only, removed the moment there is user content to
+ * commit. `.engram-*` is unconditional; those files are always internal.
+ *
+ * `.opencode/` is deliberately NOT excluded. It holds the extracted install but
+ * can also hold the user's own commands and agents, and hiding those would be
+ * the same bug this function exists to avoid.
+ */
+function syncAgentsExclude(projectRoot: string, log: (msg: string) => void) {
+  try {
+    const infoDir = resolve(projectRoot, ".git", "info")
+    const excludeFile = resolve(infoDir, "exclude")
+    const userOwnsIt = agentsHasUserContent(resolve(projectRoot, "AGENTS.md"))
+
+    const existing = existsSync(excludeFile) ? readFileSync(excludeFile, "utf-8") : ""
+    const lines = existing.length ? existing.split("\n") : []
+    const has = (needle: string) => lines.some(l => l.trim() === needle)
+
+    let next = lines
+    let changed = false
+
+    if (!has(".engram-*")) {
+      next = [...next, "# Engram internal files", ".engram-*"]
+      changed = true
+    }
+
+    if (userOwnsIt && has("AGENTS.md")) {
+      // The user has rules of their own in there now — stop hiding the file.
+      next = next.filter(l => l.trim() !== "AGENTS.md" && l.trim() !== "# Engram plugin instructions")
+      changed = true
+      log("Engram: AGENTS.md now has your own content below the block — un-excluded it so git can track it. The Engram block is stripped on commit.")
+    } else if (!userOwnsIt && !has("AGENTS.md")) {
+      next = [...next, "# Engram plugin instructions", "AGENTS.md"]
+      changed = true
+      log("Engram: AGENTS.md is excluded from git locally (.git/info/exclude) while it holds only Engram's block. Add your own rules below it and Engram will un-exclude it; or `git add -f AGENTS.md` to track it now.")
+    }
+
+    if (!changed) return
+
+    mkdirSync(infoDir, { recursive: true })
+    writeFileSync(excludeFile, next.join("\n").trimEnd() + "\n")
+  } catch {}
+}
+
+/** True when AGENTS.md holds anything beyond the Engram block. */
+function agentsHasUserContent(agentsPath: string): boolean {
+  if (!existsSync(agentsPath)) return false
+  try {
+    const content = readFileSync(agentsPath, "utf-8")
+    const found = findEngramBlock(content)
+    const rest = found ? content.slice(0, found.start) + content.slice(found.end) : content
+    return rest.trim().length > 0
+  } catch {
+    return false
+  }
 }
 
 /** Extracts the version string from package.json. Falls back to "0.0.0". */
@@ -387,7 +457,7 @@ export function selfExtract(packageRoot: string, directory: string, version: str
       }
     }
 
-    const engramCreated = writeOrPrependAgentsMd(target, version)
+    writeOrPrependAgentsMd(target, version)
 
     const smudgeTemplate = resolve(target, ".engram-smudge-template")
     writeFileSync(smudgeTemplate, buildEngramBlock(version))
@@ -412,18 +482,36 @@ export function selfExtract(packageRoot: string, directory: string, version: str
     }
 
     if (basename(target) === ".opencode") {
-      const projectRoot = resolve(target, "..")
       try {
-        installGitFilter(projectRoot, engramCreated, log)
-      } catch {}
-      try {
-        warnClaudeMdCollision(projectRoot, log)
+        installGitFilter(resolve(target, ".."), log)
       } catch {}
     }
+    // The CLAUDE.md warning and the exclude sync deliberately do NOT live here.
+    // selfExtract only runs on a version bump, and both conditions can arise at
+    // any time — a CLAUDE.md added next week, user rules added to AGENTS.md this
+    // afternoon. They run from the config hook, once per session. See
+    // syncProjectState().
 
     return { target, freshlyExtracted: !prevVersion, prevVersion }
   } catch (e) {
     if (logger) logger(`Engram: extract failed — ${String(e)}`)
     return { target, freshlyExtracted: false }
   }
+}
+
+/**
+ * Per-session project state sync — cheap, pure-fs, no subprocess.
+ *
+ * selfExtract runs only on a version bump, but the two conditions below can
+ * arise at any moment: a CLAUDE.md added long after Engram was installed, or
+ * user rules typed into AGENTS.md this afternoon. Both are silent failures if
+ * nobody looks, so the config hook calls this every session.
+ */
+export function syncProjectState(target: string, log: (msg: string) => void) {
+  if (basename(target) !== ".opencode") return
+  const projectRoot = resolve(target, "..")
+  if (!existsSync(resolve(projectRoot, ".git"))) return
+
+  try { syncAgentsExclude(projectRoot, log) } catch {}
+  try { warnClaudeMdCollision(projectRoot, log) } catch {}
 }

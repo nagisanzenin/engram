@@ -2,30 +2,48 @@
 """
 Git smudge filter for AGENTS.md — prepends the Engram block on checkout.
 
-Reads stdin (git-stored content, without the Engram block), reads the
-block template from .opencode/.engram-smudge-template, prepends it,
-and writes to stdout. No-op if template doesn't exist or block already
-present.
+Reads stdin (git-stored content, which has no Engram block), reads the block
+template from .opencode/.engram-smudge-template, prepends it, writes stdout.
+No-op when the template is missing or a block is already present.
+
+The "already present" test is LINE-ANCHORED, and that is the whole point. A
+substring test treats a user who merely mentions the marker inline —
+"the <!-- engram v --> marker" — as already having a block, so the smudge
+no-ops, the block is never restored on checkout, and Engram's instructions
+silently stop reaching the model. opencode-engram-clean anchors the same way;
+the two must agree or content is lost in one direction or the other.
 """
 import os
+import re
 import sys
 
 TEMPLATE_PATH = os.path.join(".opencode", ".engram-smudge-template")
 
-content = sys.stdin.read()
-if "<!-- engram v" in content:
-    sys.stdout.write(content)
-    sys.exit(0)
+# Alone on its line — matches OPEN_RE in opencode-engram-clean.
+OPEN_RE = re.compile(r"^<!-- engram v.+? -->$", re.MULTILINE)
 
-if not os.path.isfile(TEMPLATE_PATH):
-    sys.stdout.write(content)
-    sys.exit(0)
 
-with open(TEMPLATE_PATH, encoding="utf-8") as fh:
-    template = fh.read()
+def main() -> None:
+    content = sys.stdin.read()
 
-if template:
-    result = template + content if content else template
-    sys.stdout.write(result)
-else:
-    sys.stdout.write(content)
+    probe = content.replace("\r\n", "\n") if "\r\n" in content else content
+    if OPEN_RE.search(probe):
+        sys.stdout.write(content)
+        return
+
+    if not os.path.isfile(TEMPLATE_PATH):
+        sys.stdout.write(content)
+        return
+
+    with open(TEMPLATE_PATH, encoding="utf-8") as fh:
+        template = fh.read()
+
+    if not template:
+        sys.stdout.write(content)
+        return
+
+    sys.stdout.write(template + content if content else template)
+
+
+if __name__ == "__main__":
+    main()

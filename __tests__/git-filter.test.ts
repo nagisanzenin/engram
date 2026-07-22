@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, copyFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { execSync } from "node:child_process"
-import { selfExtract } from "../.opencode/install"
+import { selfExtract, syncProjectState } from "../.opencode/install"
 
 describe("git filter integration", () => {
   let tmp: string
@@ -221,14 +221,15 @@ describe("git filter integration", () => {
     expect(readFileSync(attrsPath, "utf-8")).toContain("AGENTS.md filter=engram")
   })
 
-  it("logger receives CLAUDE.md warning when CLAUDE.md exists", () => {
+  it("logger receives CLAUDE.md warning from syncProjectState", () => {
     const target = resolve(tmp, ".opencode")
     mkdirSync(target, { recursive: true })
     writeFileSync(resolve(target, ".engram-version.jsonc"), JSON.stringify({ version: "0.9.0" }))
     writeFileSync(resolve(tmp, "CLAUDE.md"), "# rules\nSENTINEL\n")
+    selfExtract(pkg, tmp, "1.0.2")
 
     const messages: string[] = []
-    selfExtract(pkg, tmp, "1.0.2", (m: string) => messages.push(m))
+    syncProjectState(target, (m: string) => messages.push(m))
 
     expect(messages.some((m) => m.includes("WARNING") && m.includes("CLAUDE.md"))).toBe(true)
   })
@@ -306,13 +307,13 @@ more rules
   it("opencode-engram-clean handles CRLF line endings", () => {
     const input = "<!-- engram v1.0.0 -->\r\n# block content\r\n<!-- /engram -->\r\nuser content\r\n"
     const result = execSync(`python3 ${resolve(scriptsDir, "opencode-engram-clean")}`, { input })
-    expect(result.toString()).toBe("user content\n")
+    expect(result.toString()).toBe("user content\r\n")
   })
 
   it("opencode-engram-clean handles mixed CRLF and LF line endings", () => {
     const input = "<!-- engram v1.0.0 -->\r\n# block\r\n<!-- /engram -->\n\nuser content\n"
     const result = execSync(`python3 ${resolve(scriptsDir, "opencode-engram-clean")}`, { input })
-    expect(result.toString()).toBe("\nuser content\n")
+    expect(result.toString()).toBe("\r\nuser content\r\n")
   })
 
   it("opencode-engram-smudge prepends block from template", () => {
@@ -476,5 +477,181 @@ describe("filter lifecycle (real git)", () => {
     } finally {
       rmSync(repo, { recursive: true })
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// v1.2.0 review fixes. Each check below fails if its fix is reverted (§4.5).
+// ---------------------------------------------------------------------------
+
+describe("marker anchoring — clean and smudge must agree", () => {
+  const scriptsDir = resolve(__dirname, "..", "scripts")
+  const clean = (input: string) =>
+    execSync(`python3 ${resolve(scriptsDir, "opencode-engram-clean")}`, { input }).toString()
+
+  // The old locator was DOTALL with no `$`, so `.+?` crossed newlines and an
+  // inline mention swallowed every line down to the real marker. Reverting
+  // opencode-engram-clean wholesale fails this check.
+  //
+  // Honest note on what each half guards: `$`-anchoring and "last open marker
+  // wins" are belt-and-braces here, and either alone saves THIS fixture — so
+  // flipping just one of them leaves this check green. Only the fenced-example
+  // case below separates them. Mutation-test the locator as a unit.
+  it("keeps user prose that mentions the marker INLINE above the block", () => {
+    const out = clean([
+      "# How Engram marks its block",
+      "<!-- engram v1.0.0 --> is the opening marker Engram uses.",
+      "IMPORTANT USER RULE — never delete this line.",
+      "",
+      "<!-- engram v1.1.1 -->",
+      "ENGRAM BLOCK",
+      "<!-- /engram -->",
+      "",
+      "## Real user rules",
+      "",
+    ].join("\n"))
+
+    expect(out).toContain("IMPORTANT USER RULE")
+    expect(out).toContain("<!-- engram v1.0.0 --> is the opening marker")
+    expect(out).not.toContain("ENGRAM BLOCK")
+  })
+
+  // Fix B — LAST open marker before the close, not the first. This fixture has
+  // TWO fully-anchored open markers, so opens[0] and opens[-1] genuinely
+  // diverge; with `opens[0]` the user's fenced example and the sentence under
+  // it are both deleted. (An earlier version of this test used an inline
+  // mention, which never matched the anchored regex at all — the two
+  // definitions agreed and the check proved nothing.)
+  it("keeps a user's fenced marker EXAMPLE — the last open marker wins", () => {
+    const out = clean([
+      "# Our docs",
+      "The block Engram writes opens with this exact line:",
+      "",
+      "<!-- engram v1.0.0 -->",
+      "",
+      "SENTINEL_USER_EXPLANATION — this sentence sits between the two markers.",
+      "",
+      "<!-- engram v1.1.1 -->",
+      "ENGRAM BLOCK",
+      "<!-- /engram -->",
+      "",
+      "## Real user rules",
+      "",
+    ].join("\n"))
+
+    expect(out).toContain("SENTINEL_USER_EXPLANATION")
+    expect(out).toContain("<!-- engram v1.0.0 -->")
+    expect(out).toContain("## Real user rules")
+    expect(out).not.toContain("ENGRAM BLOCK")
+  })
+
+  it("still strips a normal block with nothing above it", () => {
+    const out = clean("<!-- engram v1.1.1 -->\nBLOCK\n<!-- /engram -->\nuser\n")
+    expect(out).toBe("user\n")
+  })
+
+  // Fix: smudge's "already present" test is line-anchored like clean's. With a
+  // substring test it no-ops here, the block is never restored on checkout, and
+  // Engram's instructions silently stop reaching the model.
+  it("smudge restores the block when the user only MENTIONS the marker inline", () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), "engram-smudge-"))
+    mkdirSync(resolve(tmp, ".opencode"), { recursive: true })
+    writeFileSync(
+      resolve(tmp, ".opencode", ".engram-smudge-template"),
+      "<!-- engram v1.1.1 -->\nENGRAM RULES\n<!-- /engram -->\n",
+    )
+
+    const stored = "Our style guide covers the <!-- engram v --> marker inline.\n## rules\n"
+    const out = execSync(`python3 ${resolve(scriptsDir, "opencode-engram-smudge")}`, {
+      input: stored,
+      cwd: tmp,
+    }).toString()
+
+    expect(out).toContain("ENGRAM RULES")
+    expect(out).toContain("marker inline")
+    rmSync(tmp, { recursive: true })
+  })
+
+  it("smudge still no-ops when a REAL block is already present", () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), "engram-smudge-"))
+    mkdirSync(resolve(tmp, ".opencode"), { recursive: true })
+    writeFileSync(
+      resolve(tmp, ".opencode", ".engram-smudge-template"),
+      "<!-- engram v1.1.1 -->\nENGRAM RULES\n<!-- /engram -->\n",
+    )
+
+    const stored = "<!-- engram v1.1.1 -->\nENGRAM RULES\n<!-- /engram -->\nuser\n"
+    const out = execSync(`python3 ${resolve(scriptsDir, "opencode-engram-smudge")}`, {
+      input: stored,
+      cwd: tmp,
+    }).toString()
+
+    expect(out).toBe(stored)
+    expect((out.match(/ENGRAM RULES/g) || []).length).toBe(1)
+    rmSync(tmp, { recursive: true })
+  })
+})
+
+describe("AGENTS.md exclude tracks CONTENT, not authorship", () => {
+  let tmp: string
+  let pkg: string
+
+  beforeEach(() => {
+    tmp = mkdtempSync(resolve(tmpdir(), "engram-test-"))
+    writeFileSync(resolve(tmp, "opencode.jsonc"), "{}")
+    mkdirSync(resolve(tmp, ".git", "info"), { recursive: true })
+    writeFileSync(resolve(tmp, ".git", "config"), "[core]\n\trepositoryformatversion = 0\n")
+    pkg = resolve(tmp, "pkg")
+    for (const d of ["skills", "agents", "scripts"]) mkdirSync(resolve(pkg, d), { recursive: true })
+    writeFileSync(resolve(pkg, "scripts", "engram.py"), "script")
+    writeFileSync(resolve(pkg, "package.json"), JSON.stringify({ version: "1.0.2" }))
+  })
+  afterEach(() => rmSync(tmp, { recursive: true }))
+
+  const excludeText = () => readFileSync(resolve(tmp, ".git", "info", "exclude"), "utf-8")
+
+  it("excludes AGENTS.md while it holds only the Engram block", () => {
+    const target = resolve(tmp, ".opencode")
+    mkdirSync(target, { recursive: true })
+    writeFileSync(resolve(target, ".engram-version.jsonc"), JSON.stringify({ version: "0.9.0" }))
+
+    selfExtract(pkg, tmp, "1.0.2")
+    expect(excludeText().split("\n").some((l) => l.trim() === "AGENTS.md")).toBe(true)
+  })
+
+  // The trap this fixes: .git/info/exclude is invisible from the working tree,
+  // so an exclude that outlives its reason means `git status` stays silent and
+  // the user's own rules are never committed.
+  it("un-excludes AGENTS.md once the user adds rules below the block", () => {
+    const target = resolve(tmp, ".opencode")
+    mkdirSync(target, { recursive: true })
+    writeFileSync(resolve(target, ".engram-version.jsonc"), JSON.stringify({ version: "0.9.0" }))
+    selfExtract(pkg, tmp, "1.0.2")
+    expect(excludeText().split("\n").some((l) => l.trim() === "AGENTS.md")).toBe(true)
+
+    const agents = resolve(tmp, "AGENTS.md")
+    writeFileSync(agents, readFileSync(agents, "utf-8") + "\n## TEAM RULE\n- always run make lint\n")
+
+    const messages: string[] = []
+    syncProjectState(target, (m: string) => messages.push(m))
+
+    expect(excludeText().split("\n").some((l) => l.trim() === "AGENTS.md")).toBe(false)
+    expect(messages.some((m) => m.includes("un-excluded"))).toBe(true)
+    // .engram-* is unconditional — those files are always internal.
+    expect(excludeText().split("\n").some((l) => l.trim() === ".engram-*")).toBe(true)
+  })
+
+  it("does not re-exclude on a later session once user content is there", () => {
+    const target = resolve(tmp, ".opencode")
+    mkdirSync(target, { recursive: true })
+    writeFileSync(resolve(target, ".engram-version.jsonc"), JSON.stringify({ version: "0.9.0" }))
+    selfExtract(pkg, tmp, "1.0.2")
+
+    const agents = resolve(tmp, "AGENTS.md")
+    writeFileSync(agents, readFileSync(agents, "utf-8") + "\n## TEAM RULE\n")
+    syncProjectState(target, () => {})
+    syncProjectState(target, () => {})
+
+    expect(excludeText().split("\n").some((l) => l.trim() === "AGENTS.md")).toBe(false)
   })
 })
