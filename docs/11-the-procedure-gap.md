@@ -179,8 +179,9 @@ and once instruction has happened, the practice act is solving, not re-studying.
 **problem ladder**, replacing beats 2–4 when the node's practice state is novice:
 (L1) worked example, learner self-explains each step's *why*; (L2) completion — learner
 executes the final step(s); (L3) faded — the *principle-bearing* interior step blank;
-(L4) full solve, cold. Beats 5–8 unchanged; VERIFY's production is a worked solution to a
-fresh algorithmic variant, stashed and blind-graded like any production. Rung selection
+(L4) full solve, cold. Beats 1, 5–6, 8 unchanged; VERIFY keeps its confidence-pick → stash
+flow but its *production* becomes a worked solution to a fresh algorithmic variant (never
+the canonical instance whose solution L1 just displayed), blind-graded like any production. Rung selection
 from the same measured signals as `docs/06`'s worked-drive gate; when unsure, assist.
 Concept nodes keep today's grammar byte-for-byte.
 

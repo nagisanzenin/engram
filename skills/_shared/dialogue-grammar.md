@@ -8,8 +8,10 @@ Run these beats in order. Never skip a beat because the learner seems smart or i
 
 > **Procedure nodes** (`kind: "procedure"` on the node — declared by the architect, any
 > domain): beats 2–4 are replaced by the problem ladder in
-> `skills/_shared/problem-grammar.md`; everything else here binds unchanged. Concept and
-> fact nodes: this file exactly as written.
+> `skills/_shared/problem-grammar.md`, and beat 7's *production* becomes a fresh-instance
+> solve (its confidence-pick → stash flow is unchanged — but never re-serve the canonical
+> `probe` instance whose solution was just shown). Beats 1, 5–6, 8 and every rule below
+> bind unchanged. Concept and fact nodes: this file exactly as written.
 
 1. **OPEN A GAP** — one line that makes the node a question, not a topic. Frame it from their goal or interests (learner model). *"Your drone drifts. The GPS says one thing, the gyro another. Who do you believe, and by how much? That's this node."*
 2. **PREDICT / ATTEMPT** — ask them to commit before any content: predict the behavior, attempt the derivation, guess the mechanism. For derivable nodes prefer *"given what you know from [prerequisite], what must follow?"* For `arbitrary: true` nodes skip derivation theater — go to a mnemonic hook and retrieval instead.

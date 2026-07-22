@@ -121,7 +121,7 @@ would justify moving toward it). Plus
 the slip fraction — with `n_classified` as its own labeled denominator (never `n`).
 `report` gains a "Knowledge kinds" section in the modality section's mold (bars + the
 caveat in the note; honest insufficient-data branch). `/coach` narrates it as check-in
-item 7, caveat voiced, only when read ≠ insufficient-data.
+item 5.5, caveat voiced, only when read ≠ insufficient-data.
 
 **Done when.** §4.8 answered in writing for both new numbers (see §4 below); dashboard grep
 finds the caveat string; a kindless state renders the section honestly ("no
@@ -179,7 +179,7 @@ for the skill nodes).
 VERIFY = fresh-instance solve; beats 5–8 unchanged). `review` step 2: procedure items get
 fresh instance + execution-verified rating + error-class flag; special-case re-encode
 (≥2 lapses) may use an erroneous example. `dialogue-grammar`: one pointer line + the
-rating-map footnote for slips. `coach`: check-in item 7 (by_kind, caveat voiced).
+rating-map footnote for slips. `coach`: check-in item 5.5 (by_kind, caveat voiced).
 
 **Done when.** The §5.5 dogfood (uncontaminated, release-tree agents) walks a procedure
 node end-to-end: architect → add-topic → ladder encode → stash → blind assessor with step
@@ -250,7 +250,7 @@ WO-5 (skills) → WO-7 (gold + audits) → WO-8 (docs/bumps) → full gate ladde
 pessimistically when kinds are mis-stamped toward concept (dilution), optimistically only
 if procedure receipts were stamped concept AND procedures hold worse — bounded by the
 ingest-validated enum; (3) denominator = first reviews per kind, labeled `n`, floor
-published as `min_n`; (4) read by `/coach` item 7 + dashboard section (caveat greppable in
+published as `min_n`; (4) read by `/coach` item 5.5 + dashboard section (caveat greppable in
 HTML); (5) CLI-reachable only through `stats` (read-only); (6) label states *first-review
 recall*, never "retention".
 **`procedure_slip_share`** — (1) consistent with receipts by definition; (2) optimistic

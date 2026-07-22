@@ -66,7 +66,7 @@ python3 "$ENGRAM" stash count   # productions left ungraded by a previous sessio
 
 Take the first **3** nodes of `order` (more feels like an exam, not a diagnostic). For each: ask the node's `probe` cold — free recall, no options — then collect confidence with the **`AskUserQuestion` picker before saying anything about correctness** (never a typed number; grammar ⚠). Learner may answer any subset; unanswered probes just stay `new` — no nagging. Then:
 
-- Solid answer → `rate --rating easy --kind pretest --grade recalled --confidence <c-or-omit> --production "<their words>"` (schedules it far out; it's known).
+- Solid answer → write their words to a temp file, then `rate --rating easy --kind pretest --grade recalled --confidence <c-or-omit> --production-file <tmpfile>` (schedules it far out; it's known). Never inline their answer into the command — the shell-safety rule applies to pretests too.
 - Miss → leave it `new`, and say so without judgment — verbatim spirit: *"Good — a wrong guess before learning measurably improves what sticks next (the pretesting effect). That's now a scheduled destination, not a failure."*
 
 ## 3 · Encode nodes (the heart)
