@@ -6,7 +6,7 @@
   <img src="https://img.shields.io/badge/version-1.1.0-6D4AA8.svg" alt="Version 1.1.0">
   <a href="https://www.npmjs.com/package/opencode-engram-learning"><img src="https://img.shields.io/npm/v/opencode-engram-learning?label=npm&color=6D4AA8" alt="npm package"></a>
   <img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="MIT License">
-  <img src="https://img.shields.io/badge/selftest-229%2F229-3E7D5A.svg" alt="229/229 checks">
+  <img src="https://img.shields.io/badge/selftest-230%2F230-3E7D5A.svg" alt="230/230 checks">
   <a href="gold/assessor-gold.jsonl"><img src="https://img.shields.io/badge/grader%20never%20inflates-0%2F198-3E7D5A.svg" alt="0 of 198 blind judgments graded up"></a>
   <img src="https://img.shields.io/badge/scheduler-FSRS--4.5-6D4AA8.svg" alt="FSRS-4.5">
   <a href="CONTRIBUTING-DATA.md"><img src="https://img.shields.io/badge/data-100%25%20local-3E7D5A.svg" alt="100% local — the engine has no network code, proven by a permanent selftest"></a>
@@ -357,7 +357,7 @@ The model never does calendar math; this does:
 | `refit` | fit review intervals to your measured recall (guarded, ≥50 reviews) |
 | **`export [--topic T]`** | a **text-stripped**, **attributed** receipt bundle written **to a file**. Whitelist-constructed — there is no code path by which a production could leave. **Refuses** if your grader is unaudited |
 | `session-start` / `log-session` | ambient nudge (hook) · session telemetry |
-| `selftest` | 229 checks| 217 checks| 214 checks| 213 checks| 213 checks| 207 checks| 201 checks| 200 checks| 192 checks| 191 checks over the FSRS math, state machine, adherence/retention arithmetic, the grader-audit statistics, and every hardened boundary |
+| `selftest` | 230 checks| 217 checks| 214 checks| 213 checks| 213 checks| 207 checks| 201 checks| 200 checks| 192 checks| 191 checks over the FSRS math, state machine, adherence/retention arithmetic, the grader-audit statistics, and every hardened boundary |
 
 </details>
 

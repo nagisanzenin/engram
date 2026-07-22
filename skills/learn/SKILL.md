@@ -90,6 +90,8 @@ python3 "$ENGRAM" stash add --file <tmpfile.json>
 # tmpfile.json = {"topic":"<t>","node":"<id>","probe":"<probe>",
 #   "production":"<their words, verbatim; note omissions factually>",
 #   "confidence":<n or null>,"claim":"<node claim>","rubric":[...],"kind":"encode"}
+# On a procedure node, add "node_kind":"procedure" (and the probe is the fresh
+# instance you served) — it tells the assessor to step-grade and classify errors.
 # The engine mints a `sid` on every stash entry. It MUST survive the round-trip to the
 # receipt (see step 4) — it is what makes the settle idempotent (issue #3).
 ```

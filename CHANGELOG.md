@@ -9,8 +9,10 @@ conversion at half the effect or, without elaborated feedback, near zero (Pan & 
 2018: congruent d = 0.58, incongruent 0.28, neither-condition ≈ 0 bias-adjusted). v1.1
 adds the third knowledge kind. **Engram stays a general learn-anything system** — the kind
 is declared per node by the content (a `procedure` is a git workflow or a conjugation as
-readily as an integral); there is no math mode, and a topic with zero procedure nodes runs
-byte-identically to v1.0.8.
+readily as an integral); there is no math mode, and a topic with zero procedure nodes
+behaves exactly as on v1.0.8 — same schedule, same grades, same flow. (Precisely, not
+byte-identically: new receipts carry a `node_kind` stamp, `due` gains two additive keys,
+`stats` gains `by_kind` — additions old code paths never read.)
 
 **Theory (docs/11 + docs/12).** Two new pillars, adversarially verified before code: three
 independent refute-first passes over the acquisition, retention, and grading literature
@@ -31,7 +33,7 @@ carried on receipts, `rate --error-class`; `due` payload carries `node_kind` + `
 `stats.by_kind` (first-review recall per kind, the modality mold: same predicates, honest
 floor, confound caveat *inside the payload*, slip share with its own `n_classified`
 denominator); dashboard "Knowledge kinds" section (the caveat reaches the page); export
-gains `node_kind`/`error_class` as closed enums. Selftest 217 → **229**, every new check
+gains `node_kind`/`error_class` as closed enums. Selftest 217 → **230**, every new check
 mutation-tested (11/11 fail when their fix is reverted).
 
 **Behavior (skills + agents).** New `skills/_shared/problem-grammar.md`: the worked-example

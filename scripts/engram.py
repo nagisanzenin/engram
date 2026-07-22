@@ -2029,6 +2029,7 @@ def compute_momentum(receipts):
 # Raising this SUPPRESSES a number some existing learners can currently see. That is correct: the
 # number was never earned. Suppressing an unearned number is not a regression, it is the product.
 MODALITY_MIN_N = EXPERIMENT_MIN_PER_ARM   # 15 — powered, and it moves with the experiment floor
+SLIP_SHARE_MIN_N = 5   # below this, narrators quote counts, never a percentage (v1.1)
 
 # Shipped inside the stats block so the narrator cannot forget it (the coach reads
 # this JSON, not the docs). Surfaced live in a dogfood session: explorables are
@@ -2146,9 +2147,14 @@ def compute_by_kind(receipts):
     else:
         out["read"] = "insufficient-data"
     out["min_n"] = MODALITY_MIN_N
+    # The slip split is REVIEW telemetry (docs/12 WO-3: "among procedure-node review
+    # receipts that carry error_class") — encode-stage misses, where the method is still
+    # forming, would bias the share toward "slip", which is precisely this number's
+    # flattering direction. The first cut iterated every receipt kind; caught by the
+    # pre-release adversarial review, fixture made to diverge (§4.5).
     slips = classified = 0
-    for r in receipts:
-        if not isinstance(r, dict) or r.get("node_kind") != "procedure":
+    for r in _review_receipts(receipts):
+        if r.get("node_kind") != "procedure":
             continue
         ec = r.get("error_class")
         if ec in ERROR_CLASSES:
@@ -2375,7 +2381,7 @@ PARADOX_RETEST = 0.95   # above this consistency, leniency must be strictly unde
 # #5 (the assessor is blind) applied to the audit itself — and RELEASE_PROTOCOL §5.5's
 # hardest lesson: a test that hands the subject the answer is not a test.
 GOLD_ASSESSOR_KEYS = ("topic", "node", "sid", "claim", "rubric", "probe",
-                      "production", "confidence", "kind")
+                      "production", "confidence", "kind", "node_kind")
 # Everything the assessor must never see. The whitelist above already makes that structural;
 # this list is what the BLINDNESS selftest asserts is absent.
 GOLD_SECRET_KEYS = ("gold_grade", "case_type", "rationale")
@@ -2507,7 +2513,12 @@ def cmd_gold(_args):
         sys.stderr.write("engram: %d malformed gold item(s) skipped\n" % meta["skipped"])
     if meta["modified"]:
         sys.stderr.write("engram: ground truth is %s\n" % meta["source"])
-    emit([{k: it.get(k) for k in GOLD_ASSESSOR_KEYS} for it in items])
+    # `node_kind` (v1.1) rides only where it exists — a real stash carries the key on
+    # procedure entries and OMITS it on concept ones, and the audit payload must be
+    # indistinguishable from a real settle. `confidence` stays even when null (null
+    # confidence is legitimate data the assessor must pass through untouched).
+    emit([{k: it.get(k) for k in GOLD_ASSESSOR_KEYS
+           if k != "node_kind" or it.get(k) is not None} for it in items])
 
 def _qwk(pairs):
     """Quadratic weighted kappa over (gold, grader) grade pairs. None if undefined.
@@ -4384,32 +4395,51 @@ def cmd_report(args):
                      "appears when both sides have history.</p>"
                      % (mod["min_n"], mod["explorable"]["n"], mod["dialogue"]["n"]))
 
-    # v1.1 (docs/11): knowledge-kind split, rendered in the modality section's mold. The
-    # caveat must reach this page — the dashboard is the one surface a human actually looks
-    # at, and it is where caveats have died before (RELEASE_PROTOCOL §4.8 Q4).
+    # v1.1 (docs/11): knowledge-kind split, rendered in the modality section's mold — which
+    # means the FLOOR is the modality floor: percentage bars render only when the compared
+    # arms both clear MODALITY_MIN_N (`read` != insufficient-data). The first cut rendered
+    # a full-width 100% bar off a single first-review — an unearned optimistic rate on the
+    # one surface a human actually looks at (§4.8 Q2, release-blocking direction; caught by
+    # the pre-release adversarial review). Below the floor: honest counts, no rates. The
+    # caveat must reach this page either way (§4.8 Q4).
     bk = stats["by_kind"]
     kind_arms = [(k, bk[k]) for k in NODE_KINDS
                  if isinstance(bk.get(k), dict) and bk[k].get("n")]
     if kind_arms:
         parts.append("<h2>Knowledge kinds</h2>")
-        for k, v in kind_arms:
-            parts.append("<div class='hbar'><span class='lab mono'>%s</span>"
-                         "<span class='track'><span class='fill' style='width:%d%%'></span></span>"
-                         "<span class='val'>%d%% first-review recall · n=%d</span></div>"
-                         % (escape(k), int(v["first_review_recall"] * 100),
-                            int(v["first_review_recall"] * 100), v["n"]))
         slip = bk.get("procedure_slip_share") or {}
         slip_line = ""
-        if slip.get("n_classified"):
-            slip_line = (" Of the %d procedure errors the grader classified, %d%% were "
+        # Quote the slip PERCENTAGE only at a real n; below the floor, counts are facts
+        # and rates are noise ("100% were slips" off n=1 is the flattering read).
+        if (slip.get("n_classified") or 0) >= SLIP_SHARE_MIN_N:
+            slip_line = (" Of the %d classified procedure-review errors, %d%% were "
                          "execution slips rather than wrong method — a slip is priced "
                          "gentler (partial/hard), because a transcription error is not a "
                          "memory lapse." % (slip["n_classified"],
                                             int((slip.get("share") or 0) * 100)))
-        parts.append("<p class='note'>%s — recall split by what each node IS (concept / "
-                     "procedure / fact), from your own receipts.%s <b>Read it carefully:</b> "
-                     "%s</p>"
-                     % (escape(bk["read"]), escape(slip_line), escape(bk["caveat"])))
+        elif slip.get("n_classified"):
+            slip_line = (" %d procedure-review error(s) classified so far — counts, not "
+                         "rates, until there are at least %d."
+                         % (slip["n_classified"], SLIP_SHARE_MIN_N))
+        if bk["read"] != "insufficient-data":
+            for k, v in kind_arms:
+                parts.append("<div class='hbar'><span class='lab mono'>%s</span>"
+                             "<span class='track'><span class='fill' style='width:%d%%'></span></span>"
+                             "<span class='val'>%d%% first-review recall · n=%d</span></div>"
+                             % (escape(k), int(v["first_review_recall"] * 100),
+                                int(v["first_review_recall"] * 100), v["n"]))
+            parts.append("<p class='note'>%s — recall split by what each node IS (concept / "
+                         "procedure / fact), from your own receipts.%s <b>Read it carefully:"
+                         "</b> %s</p>"
+                         % (escape(bk["read"]), escape(slip_line), escape(bk["caveat"])))
+        else:
+            counts = " · ".join("%s: %d" % (k, v["n"]) for k, v in kind_arms)
+            parts.append("<p class='note'>Splitting recall by knowledge kind needs ≥%d "
+                         "first-reviews in both compared kinds (%s so far) — the honest "
+                         "verdict appears when both sides have history.%s "
+                         "<b>Read it carefully:</b> %s</p>"
+                         % (bk["min_n"], escape(counts), escape(slip_line),
+                            escape(bk["caveat"])))
 
     mis = _open_misconceptions()
     if mis:
@@ -6182,7 +6212,8 @@ def cmd_selftest(_args):
                 # the override actually took effect (so the flag is not decorative)…
                 and next(g["gold_grade"] for g in items if g["sid"] == "g_001") == "recalled"
                 # …and the blindness whitelist still holds for the local items
-                and all(set(it) == set(GOLD_ASSESSOR_KEYS)
+                # (node_kind is optional-per-item since v1.1: subset, never beyond)
+                and all(set(it) <= set(GOLD_ASSESSOR_KEYS)
                         for it in _capture_json(cmd_gold, _ns())))
     check("a local gold set that RE-ADJUDICATES the answer is recorded, never passed off as bundled",
           fresh(_local_gold_cannot_certify_silently))
@@ -6399,7 +6430,10 @@ def cmd_selftest(_args):
         items = _capture_json(cmd_gold, _ns())
         gold, _ = load_gold()
         blob = json.dumps(items)
-        keys_exact = all(set(it) == set(GOLD_ASSESSOR_KEYS) for it in items)
+        # subset per item (node_kind rides only on procedure items since v1.1), union
+        # exactly the whitelist — nothing beyond it may ever appear
+        keys_exact = (all(set(it) <= set(GOLD_ASSESSOR_KEYS) for it in items)
+                      and set().union(*(set(it) for it in items)) == set(GOLD_ASSESSOR_KEYS))
         no_secret_key = all(k not in blob for k in GOLD_SECRET_KEYS)
         # property-based: not one rationale or case_type VALUE may survive into the payload
         no_values = (all(g["rationale"] not in blob for g in gold)
@@ -6413,13 +6447,22 @@ def cmd_selftest(_args):
         _add_ab()
         _capture(cmd_stash, _ns(action="add", json=json.dumps([{
             "topic": "t", "node": "a", "claim": "c", "rubric": ["r"], "probe": "p",
-            "production": "prod", "confidence": 60, "kind": "encode"}]), file=None))
+            "production": "prod", "confidence": 60, "kind": "encode",
+            "node_kind": "procedure"}]), file=None))
         stashed = _capture_json(cmd_stash, _ns(action="list", json=None, file=None))
         gold_items = _capture_json(cmd_gold, _ns())
-        # both are BARE ARRAYS, and every field the assessor reads is present in both
+        # both are BARE ARRAYS; every gold key is a stash-shape key; `node_kind` appears
+        # exactly where a real stash would carry it (procedure items) and is ABSENT, not
+        # null, elsewhere — the payload must be indistinguishable from a real settle
+        concept_like = [it for it in gold_items if "node_kind" not in it]
+        proc_like = [it for it in gold_items if it.get("node_kind") == "procedure"]
         return (isinstance(stashed, list) and isinstance(gold_items, list)
                 and set(GOLD_ASSESSOR_KEYS) <= set(stashed[0])
-                and set(GOLD_ASSESSOR_KEYS) == set(gold_items[0]))
+                and all(set(it) <= set(GOLD_ASSESSOR_KEYS) for it in gold_items)
+                and set().union(*(set(it) for it in gold_items)) == set(GOLD_ASSESSOR_KEYS)
+                and concept_like and proc_like
+                and all(it["node_kind"] == "procedure" for it in gold_items
+                        if "node_kind" in it))
     check("`gold` is shaped exactly like `stash list` (the audit grades the REAL assessor)",
           fresh(_gold_matches_stash_shape))
 
@@ -7868,7 +7911,11 @@ def cmd_selftest(_args):
     # -- by_kind: hand-computed split, first-review-only, floor, slip-share denominator --
     def _by_kind_math(h):
         _add_kinds()
-        for n in ("c1", "p1", "f1"):
+        # the ENCODE carries an error_class too — it must NOT count toward slip share
+        # (review-receipts population only; §4.5: the fixture diverges old vs new)
+        _capture(cmd_rate, _ns(topic="k", node="p1", rating="hard", grade="partial",
+                               kind="encode", error_class="slip"))
+        for n in ("c1", "f1"):
             _capture(cmd_rate, _ns(topic="k", node=n, rating="good", kind="encode"))
         os.environ["ENGRAM_TODAY"] = "2026-07-20"
         _capture(cmd_rate, _ns(topic="k", node="c1", rating="good", kind="review"))
@@ -7884,10 +7931,10 @@ def cmd_selftest(_args):
                 and bk["fact"]["n"] == 0 and bk["fact"]["first_review_recall"] is None
                 and bk["read"] == "insufficient-data"     # floor is MODALITY_MIN_N
                 and bk["min_n"] == MODALITY_MIN_N
-                and bk["procedure_slip_share"]["n_classified"] == 2
+                and bk["procedure_slip_share"]["n_classified"] == 2   # reviews only
                 and bk["procedure_slip_share"]["share"] == 0.5
                 and "different material" in bk["caveat"])
-    check("by_kind: hand-computed recall split, honest floor, labeled slip denominator",
+    check("by_kind: hand-computed recall split, honest floor, review-only slip denominator",
           fresh(_by_kind_math))
 
     # -- pre-v1.1 receipts (no stamp) count as concept — the truthful label of the EVENT --
@@ -7909,9 +7956,10 @@ def cmd_selftest(_args):
     check("unstamped (pre-v1.1) receipts bucket as concept, never invented as procedure",
           fresh(_by_kind_prestamp))
 
-    # -- the dashboard renders the kinds section WITH its caveat (§4.8 Q4: the caveat must
-    #    reach the one surface a human actually looks at) — and skips it cleanly when empty --
-    def _report_kinds(h):
+    # -- the dashboard's kinds section: BELOW the floor it shows counts and the caveat but
+    #    NEVER a rate bar (a 100% bar off n=1 is an unearned optimistic rate — §4.8 Q2;
+    #    caught by the pre-release review), and the slip line quotes counts, not a percent --
+    def _report_kinds_subfloor(h):
         _add_kinds()
         _capture(cmd_rate, _ns(topic="k", node="p1", rating="good", kind="encode"))
         os.environ["ENGRAM_TODAY"] = "2026-07-20"
@@ -7921,8 +7969,46 @@ def cmd_selftest(_args):
         with open(out["path"], encoding="utf-8") as f:
             html = f.read()
         return ("Knowledge kinds" in html and "different material" in html
-                and "execution slips" in html)
-    check("dashboard renders by_kind bars + caveat + slip line", fresh(_report_kinds))
+                and "first-review recall" not in html        # no rate bar below the floor
+                and "counts, not rates" in html              # slip n=1: never a percent
+                and "execution slips" not in html)
+    check("dashboard by_kind below floor: counts + caveat, no rate bar, no slip percent",
+          fresh(_report_kinds_subfloor))
+    def _report_kinds_at_floor(h):
+        # 15 concept + 15 procedure nodes, one encode + one review each -> both arms at the
+        # floor; 5 classified procedure reviews -> the slip percentage may speak
+        nodes = {}
+        order = []
+        for i in range(MODALITY_MIN_N):
+            for kind in ("concept", "procedure"):
+                nid = "%s%d" % (kind[0], i)
+                order.append(nid)
+                node = {"claim": "C", "probe": "p"}
+                if kind == "procedure":
+                    node["kind"] = "procedure"
+                    node["practice"] = {"problem_frame": "vary the values"}
+                nodes[nid] = node
+        g = {"topic": "big", "title": "B", "order": order, "nodes": nodes}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        for nid in order:
+            _capture(cmd_rate, _ns(topic="big", node=nid, rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-20"
+        for nid in order:
+            _capture(cmd_rate, _ns(topic="big", node=nid, rating="good", kind="review",
+                                   grade="recalled",
+                                   error_class=("slip" if nid in ("p0", "p1", "p2", "p3")
+                                                else ("conceptual" if nid == "p4" else None))))
+        bk = _capture_json(cmd_stats, _ns())["by_kind"]
+        out = _capture_json(cmd_report, _ns())
+        with open(out["path"], encoding="utf-8") as f:
+            html = f.read()
+        return (bk["read"] == "indistinguishable"
+                and bk["procedure_slip_share"]["n_classified"] == 5
+                and "first-review recall" in html            # bars render at the floor
+                and "execution slips" in html                # percentage may speak at n>=5
+                and "different material" in html)
+    check("dashboard by_kind at floor: bars + slip percent render, read computed",
+          fresh(_report_kinds_at_floor))
     def _report_no_kinds(h):
         _add_ab()
         out = _capture_json(cmd_report, _ns())

@@ -3,8 +3,10 @@
 > The buildable form of `docs/11-the-procedure-gap.md`, in the `docs/10` discipline: why /
 > what / done-when / selftests / risk, shippable by someone who has never seen the repo.
 > **Binding constraint: Engram runs on thousands of machines. Every change below is additive;
-> a v1.0.8 learner state, graph, or receipt log replays byte-identically, and a topic built
-> by a v1.0.8 architect behaves exactly as before on the v1.1.0 engine and skills.**
+> a v1.0.8 learner state, graph, or receipt log replays with identical BEHAVIOR (schedule,
+> grades, flow — new receipts gain a `node_kind` stamp and read payloads gain additive keys),
+> and a topic built by a v1.0.8 architect behaves exactly as before on the v1.1.0 engine
+> and skills.**
 
 ## 0 · The compatibility doctrine (read first, check last)
 
@@ -14,7 +16,7 @@
    topic can exercise — a `procedure` node is `git rebase -i`, a jazz voicing drill, or
    Vietnamese tone-mark placement exactly as it is integration by parts. The **content
    declares the kind per node** (the architect, per Willingham's rule — the same covenant as
-   `viz`), and a topic with zero procedure nodes runs byte-identically to v1.0.8. Math &
+   `viz`), and a topic with zero procedure nodes behaves exactly as on v1.0.8. Math &
    STEM are the layer's hardest customers, not its scope.
 1. **No new commands, no changed flags' meanings, no schema migration.** The layer rides the
    `viz` extension pattern: architect-declared node metadata, stored opaquely, skills own
@@ -86,7 +88,7 @@ minus the documented defaults; a kindless node stamps `node_kind: "concept"`; an
 **Selftests.** (a) kind stored + surfaced in `due`; (b) invalid kind dropped with warning;
 (c) `node_kind_of` on garbage node types returns `"concept"`, never raises; (d) receipt
 carries the stamp; (e) v1.0.8-shaped fixture (no kind anywhere) → every existing behavior
-byte-identical (assert against captured pre-change output).
+unchanged (assert against captured pre-change output; new receipts add only the stamp).
 
 **Risk.** Payload growth on `due` (practice blocks). Bounded: architect instructed to keep
 `error_bank ≤ 3`, `problem_frame` one paragraph.
@@ -184,7 +186,7 @@ rating-map footnote for slips. `coach`: check-in item 5.5 (by_kind, caveat voice
 **Done when.** The §5.5 dogfood (uncontaminated, release-tree agents) walks a procedure
 node end-to-end: architect → add-topic → ladder encode → stash → blind assessor with step
 rubric → receipt carrying `node_kind` + `error_class` → fresh-instance review → by_kind
-telemetry, with concept nodes byte-identical to v1.0.8 behavior throughout.
+telemetry, with concept nodes behaving exactly as on v1.0.8 throughout.
 
 **Risk.** Skill-prose token growth. Budget: `problem-grammar.md` ≤ 95 lines (landed at 93 — the §4.6 review added the grading tiebreak and check-ordering rules); net additions
 to existing SKILL.md files ≤ 25 lines total; platform-neutral wording per §5.7

@@ -67,7 +67,9 @@ The `due` payload gives you `probe`, `claim` (canonical answer), and `rubric` �
 python3 "$ENGRAM" rate --topic <t> --node <n> --rating <r> --confidence <c-or-omit> \
   --grade <g> --production-file <tmp-answer.txt> --kind review --source self
 # procedure items only: append --error-class slip|conceptual per the problem-grammar
-# table (omit the flag entirely on concept/fact items and on recalled grades)
+# table (omit the flag entirely on concept/fact items and on recalled grades).
+# If the engine rejects --error-class (an older engine than these skills), RETRY the
+# same command without the flag — the rating must never be lost to a version skew.
 ```
 
 Relay the returned due date in passing, not ceremonially ("back in 12 days"). **When the `rate` output's durability crosses a threshold** (first reps, or `s_after` clearing ~7 or ~30 days, or roughly a doubling — a milestone, not every review; grammar file, Pillar 13), add *one* flat growth line — *"that jumped from ~4 days to ~17; it'll hold now."* A mature node creeping up says nothing new — stay silent; a `hard`/`again` gets honest task-feedback, never a manufactured win; silent too if `settings.momentum` = `off`.
@@ -99,7 +101,7 @@ Relay the returned due date in passing, not ceremonially ("back in 12 days"). **
 
 ## 3 · Assessor audit (keep self-grading honest)
 
-If the session had ≥8 items, any disputed grade, or ≥3 `partial`s: stash `{topic, node, probe, claim, rubric, production, confidence, kind:"audit", tutor_rating:"<r>"}` (the engine mints the `sid`; the assessor must return it) for each such item, then spawn **engram-assessor** on `stash list` for an audit verdict, and `stash clear` after. Report disagreements to the learner and log a `misconception add` or a note — do **not** re-rate already-committed items (scheduling stands; drift is the coach's monthly business). Disputes from the learner: same path, once.
+If the session had ≥8 items, any disputed grade, or ≥3 `partial`s: stash `{topic, node, probe, claim, rubric, production, confidence, kind:"audit", tutor_rating:"<r>"}` (plus `node_kind:"procedure"` on procedure items, so the auditor step-grades) (the engine mints the `sid`; the assessor must return it) for each such item, then spawn **engram-assessor** on `stash list` for an audit verdict, and `stash clear` after. Report disagreements to the learner and log a `misconception add` or a note — do **not** re-rate already-committed items (scheduling stands; drift is the coach's monthly business). Disputes from the learner: same path, once.
 
 ## 4 · Close
 

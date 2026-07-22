@@ -267,7 +267,8 @@ analysis against the step rubric) — without both, the literature prices this n
 
 - **A "math mode" or domain toggle.** Kinds are declared per node by the architect from
   the content, exactly as `viz` affordance is. Engram remains general; a topic with zero
-  procedure nodes is byte-identical to v1.0.8 behavior.
+  procedure nodes behaves exactly as on v1.0.8 (the only trace: an additive `node_kind`
+  stamp on new receipts, which v1.0.8 code paths never read).
 - **MCQ problem banks.** Recognition stays banned (Constitution art. 1). The discrimination
   *naming* beat is open production, immediately followed by the solve.
 - **CAS/SymPy in the engine.** `engram.py` stays stdlib-only, network-free, does no math.
