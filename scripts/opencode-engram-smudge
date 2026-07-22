@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""
+Git smudge filter for AGENTS.md — prepends the Engram block on checkout.
+
+Reads stdin (git-stored content, without the Engram block), reads the
+block template from .opencode/.engram-smudge-template, prepends it,
+and writes to stdout. No-op if template doesn't exist or block already
+present.
+"""
+import os
+import sys
+
+TEMPLATE_PATH = os.path.join(".opencode", ".engram-smudge-template")
+
+content = sys.stdin.read()
+if "<!-- engram v" in content:
+    sys.stdout.write(content)
+    sys.exit(0)
+
+if not os.path.isfile(TEMPLATE_PATH):
+    sys.stdout.write(content)
+    sys.exit(0)
+
+with open(TEMPLATE_PATH, encoding="utf-8") as fh:
+    template = fh.read()
+
+if template:
+    result = template + content if content else template
+    sys.stdout.write(result)
+else:
+    sys.stdout.write(content)

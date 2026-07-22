@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""
+Git clean filter for AGENTS.md — strips the Engram block before staging.
+
+Used by the git smudge/clean filter pair installed by selfExtract.
+Reads stdin, removes the <!-- engram v{...} --> ... <!-- /engram --> block,
+and writes the result to stdout. No-op if no block is present.
+
+Note: CRLF (\r\n) is normalized to LF (\n) across the entire file, not just
+the block. In practice this is harmless — git's autocrlf converts back on
+checkout — but it does mean the clean filter rewrites line endings in user
+content below the block too.
+"""
+import os
+import re
+import sys
+
+MARKER_RE = re.compile(
+    r"^<!-- engram v.+? -->\n(?:.*?\n)*?^<!-- /engram -->\n?",
+    re.MULTILINE | re.DOTALL,
+)
+
+content = sys.stdin.read()
+# Normalize CRLF to LF so the regex works on Windows
+if "\r\n" in content:
+    content = content.replace("\r\n", "\n")
+sys.stdout.write(MARKER_RE.sub("", content))

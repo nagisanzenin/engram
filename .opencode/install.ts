@@ -6,17 +6,20 @@
  * copyMissing() never overwrites existing files — preserves user edits across updates.
  *
  * Extraction (DIRS): skills/, agents/, scripts/ (new files only, never overwrite)
- * Generated (always overwritten): instructions.md, command/, .engram-version.jsonc
+ * Generated (versioned marker block): AGENTS.md (project root or global)
+ * Generated (always overwritten): command/, .engram-version.jsonc
  *
  * Version bump detection via .engram-version.jsonc idempotency guard.
  * On version bump, writes .engram-update.jsonc for /engram-update pseudo-command.
  * On fresh install, no manifest — bridge registers agents/commands/skills in config hook.
  */
 
-import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, copyFileSync } from "node:fs"
-import { resolve } from "node:path"
+import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, copyFileSync, unlinkSync } from "node:fs"
+import { resolve, basename } from "node:path"
+import { execSync } from "node:child_process"
 import { parseFrontmatter } from "./parse-frontmatter.js"
 import { writeUpdateManifest } from "./update.js"
+import { warnClaudeMdCollision } from "./claude-warning.js"
 
 /** Directory categories copied by selfExtract. docs/ deliberately excluded. */
 const DIRS = ["skills", "agents", "scripts"]
@@ -45,6 +48,171 @@ The following references are available and resolve to the extracted copy in .ope
 - **engram-curriculum-architect** — decomposes topics into concept DAGs
 - **engram-artifact-smith** — builds interactive HTML explorables for threshold concepts
 `
+
+// ---------------------------------------------------------------------------
+// AGENTS.md helpers — versioned marker-based prepend (option B)
+// ---------------------------------------------------------------------------
+
+const MARKER_OPEN = "<!-- engram v"
+const MARKER_CLOSE = "<!-- /engram -->"
+const MARKER_RE = /^<!-- engram v(.+?) -->$/m
+
+function buildEngramBlock(version: string): string {
+  return `${MARKER_OPEN}${version} -->\n${INSTRUCTIONS_TEXT}${MARKER_CLOSE}\n`
+}
+
+function findEngramBlock(content: string): { version: string; start: number; end: number } | null {
+  const match = content.match(MARKER_RE)
+  if (!match) return null
+  const version = match[1]
+  const start = match.index!
+  const closeIdx = content.indexOf(MARKER_CLOSE, start + match[0].length)
+  if (closeIdx === -1) return null
+  return { version, start, end: closeIdx + MARKER_CLOSE.length }
+}
+
+/** Resolves the AGENTS.md path based on extraction target.
+ *  Project-level (target basename is ".opencode") → {parent}/AGENTS.md
+ *  Global (target is ~/.config/opencode) → {target}/AGENTS.md */
+export function resolveAgentsPath(target: string): string {
+  if (basename(target) === ".opencode") {
+    return resolve(target, "..", "AGENTS.md")
+  }
+  return resolve(target, "AGENTS.md")
+}
+
+/**
+ * Writes or prepends the Engram instruction block to AGENTS.md.
+ *
+ * Returns true if the file was created by Engram (didn't exist before),
+ * false otherwise. Used to conditionally install git exclude.
+ *
+ * - File absent → create with versioned marker block (returns true).
+ * - Block present with matching version → no-op (idempotent).
+ * - Block present with different version → replace old block, preserve user content below.
+ * - Block absent → prepend new block at top, preserve existing content.
+ *
+ * No data loss — user content below the block is never modified.
+ */
+export function writeOrPrependAgentsMd(target: string, version: string): boolean {
+  const agentsPath = resolveAgentsPath(target)
+  const block = buildEngramBlock(version)
+
+  if (!existsSync(agentsPath)) {
+    writeFileSync(agentsPath, block)
+    return true
+  }
+
+  const existing = readFileSync(agentsPath, "utf-8")
+  const found = findEngramBlock(existing)
+
+  if (found && found.version === version) return false
+
+  if (found) {
+    const before = existing.slice(0, found.start)
+    const after = existing.slice(found.end).replace(/^\n+/, "")
+    writeFileSync(agentsPath, before + block + (after ? "\n\n" + after : ""))
+  } else {
+    writeFileSync(agentsPath, existing.trim() ? block + "\n\n" + existing : block)
+  }
+  return false
+}
+
+/**
+ * Installs git infrastructure for AGENTS.md lifecycle management.
+ *
+ * Three mechanisms, each covering a different scenario:
+ *
+ * 1. SMUDGE/CLEAN FILTER (.git/config)
+ *      clean — strips the Engram block on git add (git stores only user content).
+ *      smudge — prepends the Engram block on git checkout (disk always has it).
+ *      Guarded: if scripts don't exist, falls back to cat (harmless passthrough).
+ *      Depends on python3 on PATH — skipped with a warning if absent.
+ *
+ * 2. PATH ATTRIBUTES (.git/info/attributes)
+ *      Assigns AGENTS.md filter=engram so git knows to apply the filter.
+ *      Local (not versioned), affects only this clone.
+ *
+ * 3. LOCAL EXCLUDE (.git/info/exclude)
+ *      Prevents git from tracking an otherwise-empty AGENTS.md (no user
+ *      content yet) and .engram-* internal files. Combined with the filter,
+ *      the file is still tracked if the user explicitly git add --force
+ *      (filter strips the block). Local (not versioned), affects only this clone.
+ *      Only written when engramCreated is true (file didn't exist before).
+ *
+ * Each mechanism is checked independently — partial-state repair is supported.
+ * Each mechanism is wrapped in try/catch — a failure in one does not block the others.
+ * Only operates on project-level installs (where .git/config exists).
+ *
+ * Uninstall note: removing Engram leaves the filter config in .git/config,
+ * .git/info/attributes, and .git/info/exclude. Without the scripts, the
+ * filter falls back to cat — harmless. To fully clean up, remove the
+ * [filter "engram"] section from .git/config and the engram lines from
+ * .git/info/attributes and .git/info/exclude.
+ */
+function installGitFilter(projectRoot: string, engramCreated: boolean, log: (msg: string) => void) {
+  const gitConfig = resolve(projectRoot, ".git", "config")
+  if (!existsSync(gitConfig)) return
+
+  // Skip git filter when python3 is not available — the clean/smudge scripts
+  // depend on it. Without the filter, every git add/checkout would print
+  // "python3: not found" errors and leak the block.
+  try { execSync("python3 --version", { stdio: "ignore" }) } catch {
+    log("Engram: WARNING — python3 not found, skipping git filter. AGENTS.md will not be filtered.")
+    return
+  }
+
+  const infoDir = resolve(projectRoot, ".git", "info")
+
+  // 1. SMUDGE/CLEAN FILTER — check independently, no early return
+  try {
+    const configContent = readFileSync(gitConfig, "utf-8")
+    if (!configContent.includes('[filter "engram"]')) {
+      const filterBlock = `[filter "engram"]
+\tclean = "if [ -f .opencode/scripts/opencode-engram-clean ]; then python3 .opencode/scripts/opencode-engram-clean; else cat; fi"
+\tsmudge = "if [ -f .opencode/scripts/opencode-engram-smudge ]; then python3 .opencode/scripts/opencode-engram-smudge; else cat; fi"
+`
+      writeFileSync(gitConfig, configContent.trimEnd() + "\n" + filterBlock)
+    }
+  } catch {}
+
+  // 2. PATH ATTRIBUTES — check independently
+  try {
+    const gitAttrsInfo = resolve(infoDir, "attributes")
+    if (existsSync(gitAttrsInfo)) {
+      const attrs = readFileSync(gitAttrsInfo, "utf-8")
+      if (!attrs.includes("AGENTS.md filter=engram")) {
+        writeFileSync(gitAttrsInfo, attrs.trimEnd() + "\nAGENTS.md filter=engram\n")
+      }
+    } else {
+      mkdirSync(infoDir, { recursive: true })
+      writeFileSync(gitAttrsInfo, "AGENTS.md filter=engram\n")
+    }
+  } catch {}
+
+  // 3. LOCAL EXCLUDE — only when engram created AGENTS.md (avoid hiding user-authored files)
+  if (!engramCreated) return
+
+  try {
+    const excludeFile = resolve(infoDir, "exclude")
+    if (existsSync(excludeFile)) {
+      const exclude = readFileSync(excludeFile, "utf-8")
+      const hasAgents = exclude.split("\n").some(l => l.trim() === "AGENTS.md")
+      const hasDotFiles = exclude.split("\n").some(l => l.trim() === ".engram-*")
+      if (!hasAgents || !hasDotFiles) {
+        const lines: string[] = []
+        if (!hasDotFiles) lines.push("# Engram internal files\n.engram-*")
+        if (!hasAgents) lines.push("# Engram plugin instructions\nAGENTS.md")
+        writeFileSync(excludeFile, exclude.trimEnd() + "\n" + lines.join("\n") + "\n")
+      }
+    } else {
+      mkdirSync(infoDir, { recursive: true })
+      writeFileSync(excludeFile, "# Engram internal files\n.engram-*\n# Engram plugin instructions\nAGENTS.md\n")
+    }
+  } catch {}
+
+  log("Engram: installed git filter (clean+smudge) for AGENTS.md")
+}
 
 /** Extracts the version string from package.json. Falls back to "0.0.0". */
 export function getVERSION(root: string): string {
@@ -183,7 +351,7 @@ function generateCommands(target: string, log: (msg: string) => void) {
  * 1. Version check → skip if same
  * 2. copyMissing skills/, agents/, scripts/ (new files only)
  * 3. Transform agents to OpenCode YAML (mode: subagent, hidden: true)
- * 4. Generate instructions.md, command/ (always overwritten)
+ * 4. Generate AGENTS.md (versioned marker block), command/ (always overwritten)
  * 5. Write .engram-version.jsonc with version + previous
  * 6. On version bump: writeUpdateManifest() → .engram-update.jsonc
  *
@@ -219,7 +387,15 @@ export function selfExtract(packageRoot: string, directory: string, version: str
       }
     }
 
-    writeFileSync(resolve(target, "instructions.md"), INSTRUCTIONS_TEXT)
+    const engramCreated = writeOrPrependAgentsMd(target, version)
+
+    const smudgeTemplate = resolve(target, ".engram-smudge-template")
+    writeFileSync(smudgeTemplate, buildEngramBlock(version))
+
+    const legacyInstructions = resolve(target, "instructions.md")
+    if (existsSync(legacyInstructions)) {
+      unlinkSync(legacyInstructions)
+    }
 
     generateCommands(target, log)
 
@@ -233,6 +409,16 @@ export function selfExtract(packageRoot: string, directory: string, version: str
 
     if (prevVersion) {
       writeUpdateManifest(packageRoot, target, prevVersion, version)
+    }
+
+    if (basename(target) === ".opencode") {
+      const projectRoot = resolve(target, "..")
+      try {
+        installGitFilter(projectRoot, engramCreated, log)
+      } catch {}
+      try {
+        warnClaudeMdCollision(projectRoot, log)
+      } catch {}
     }
 
     return { target, freshlyExtracted: !prevVersion, prevVersion }
