@@ -55,34 +55,43 @@ The following references are available and resolve to the extracted copy in .ope
 
 const MARKER_OPEN = "<!-- engram v"
 const MARKER_CLOSE = "<!-- /engram -->"
-const MARKER_OPEN_RE = /^<!-- engram v(.+?) -->$/gm
-const MARKER_CLOSE_RE = /^<!-- \/engram -->$/m
+const MARKER_OPEN_RE = /^<!-- engram v(.+?) -->\r?$/gm
+const MARKER_CLOSE_RE = /^<!-- \/engram -->\r?$/gm
 
 function buildEngramBlock(version: string): string {
   return `${MARKER_OPEN}${version} -->\n${INSTRUCTIONS_TEXT}${MARKER_CLOSE}\n`
 }
 
 /**
- * Locates the Engram block: the LAST opening marker before the first closing one.
+ * Locates the Engram block. Must stay behaviourally identical to find_block()
+ * in scripts/_engram_block.py — that file carries the full rationale.
  *
- * Taking the *first* opening marker looks equivalent and is not. A user who
- * documents Engram's own marker syntax at line start — above the block — would
- * have everything from their line down to the real close marker deleted, and
- * (via the clean filter) that truncated version is what git stores. Anchoring
- * to the last opening marker keeps their prose. Both markers must be alone on
- * their line; an inline mention is prose, not a marker.
+ * Two rules, each earned from a real failure:
+ *
+ * - The opening marker is the LAST one before the close. A user who documents
+ *   Engram's own marker syntax above the block would otherwise have their prose
+ *   deleted, and via the clean filter that truncated version is what git stores.
+ * - The closing marker is the first one that HAS an opening marker before it.
+ *   Taking the first close outright meant a stray `<!-- /engram -->` above the
+ *   block made the locator return null — so the filter no-oped and committed
+ *   the whole block verbatim.
+ *
+ * Both markers must be alone on their line; an inline mention is prose.
  */
 function findEngramBlock(content: string): { version: string; start: number; end: number } | null {
-  const close = content.match(MARKER_CLOSE_RE)
-  if (close?.index === undefined) return null
-  const closeStart = close.index
+  const openRe = new RegExp(MARKER_OPEN_RE.source, "gm")
+  const opens: RegExpExecArray[] = []
+  for (let m = openRe.exec(content); m !== null; m = openRe.exec(content)) opens.push(m)
+  if (opens.length === 0) return null
 
-  let open: RegExpExecArray | null = null
-  const re = new RegExp(MARKER_OPEN_RE.source, "gm")
-  for (let m = re.exec(content); m !== null && m.index < closeStart; m = re.exec(content)) open = m
-  if (open === null) return null
-
-  return { version: open[1], start: open.index, end: closeStart + close[0].length }
+  const closeRe = new RegExp(MARKER_CLOSE_RE.source, "gm")
+  for (let c = closeRe.exec(content); c !== null; c = closeRe.exec(content)) {
+    const before = opens.filter(o => o.index < c!.index)
+    if (before.length === 0) continue // orphan close above the block — keep looking
+    const open = before[before.length - 1]
+    return { version: open[1], start: open.index, end: c.index + c[0].length }
+  }
+  return null
 }
 
 /** Resolves the AGENTS.md path based on extraction target.

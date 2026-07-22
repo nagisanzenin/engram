@@ -2,47 +2,94 @@
 """
 Git smudge filter for AGENTS.md — prepends the Engram block on checkout.
 
-Reads stdin (git-stored content, which has no Engram block), reads the block
-template from .opencode/.engram-smudge-template, prepends it, writes stdout.
-No-op when the template is missing or a block is already present.
+Reads stdin as BYTES (git-stored content, which should hold no block), reads the
+block template from .opencode/.engram-smudge-template, prepends it, writes bytes
+to stdout. No-op when the template is missing or a complete block is present.
 
-The "already present" test is LINE-ANCHORED, and that is the whole point. A
-substring test treats a user who merely mentions the marker inline —
-"the <!-- engram v --> marker" — as already having a block, so the smudge
-no-ops, the block is never restored on checkout, and Engram's instructions
-silently stop reaching the model. opencode-engram-clean anchors the same way;
-the two must agree or content is lost in one direction or the other.
+"Already present" is decided by find_block() below — byte-identical to the copy
+in opencode-engram-clean. v1.2.0 had the two make this call separately and they
+disagreed: clean wanted an opening AND a closing marker, smudge was satisfied by
+an opening one. A file carrying an unmatched open marker therefore never got its
+block back on checkout, and Engram's instructions silently stopped reaching the
+model — the very bug that release was cut to fix, one function over.
 """
 import os
 import re
 import sys
 
+# --- BEGIN SHARED BLOCK LOCATOR ---
+# Kept BYTE-IDENTICAL between opencode-engram-clean and opencode-engram-smudge.
+# __tests__/git-filter.test.ts asserts that; do not edit one copy alone.
+#
+# Duplicated rather than imported on purpose. These scripts run inside git's
+# object path, and v1.2.0 proved what a crashing filter costs: git reports
+# "external filter failed", falls back to UNFILTERED content, and commits the
+# Engram block into the repository. An import is one more file that can be
+# missing, so the shared code is copied and a test forbids drift instead.
+#
+# Markers must be alone on their line; an inline mention is prose. `\r?$` so
+# CRLF files match without the document being normalised.
+OPEN_RE = re.compile(r"^<!-- engram v.+? -->\r?$", re.MULTILINE)
+CLOSE_RE = re.compile(r"^<!-- /engram -->\r?$", re.MULTILINE)
+
+
+def decode(raw):
+    """Bytes -> str, lossless for arbitrary (even invalid) byte sequences."""
+    return raw.decode("utf-8", errors="surrogateescape")
+
+
+def encode(text):
+    """Inverse of decode(). encode(decode(b)) == b for every b."""
+    return text.encode("utf-8", errors="surrogateescape")
+
+
+def find_block(text):
+    """
+    Span of the complete Engram block, or None.
+
+    - The opening marker is the LAST one before the close, so a user who
+      documents Engram's own marker syntax above the block keeps their prose.
+    - The closing marker is the first one that HAS an opening marker before it.
+      Taking the first close outright made a stray close above the block turn
+      the filter into a no-op, committing the whole block verbatim.
+    """
+    opens = [m.start() for m in OPEN_RE.finditer(text)]
+    if not opens:
+        return None
+
+    for close in CLOSE_RE.finditer(text):
+        before = [o for o in opens if o < close.start()]
+        if not before:
+            continue
+        end = close.end()
+        if text[end:end + 2] == "\r\n":
+            end += 2
+        elif text[end:end + 1] == "\n":
+            end += 1
+        return before[-1], end
+
+    return None
+# --- END SHARED BLOCK LOCATOR ---
+
 TEMPLATE_PATH = os.path.join(".opencode", ".engram-smudge-template")
 
-# Alone on its line — matches OPEN_RE in opencode-engram-clean.
-OPEN_RE = re.compile(r"^<!-- engram v.+? -->$", re.MULTILINE)
 
+def main():
+    raw = sys.stdin.buffer.read()
+    text = decode(raw)
 
-def main() -> None:
-    content = sys.stdin.read()
-
-    probe = content.replace("\r\n", "\n") if "\r\n" in content else content
-    if OPEN_RE.search(probe):
-        sys.stdout.write(content)
+    if find_block(text) is not None or not os.path.isfile(TEMPLATE_PATH):
+        sys.stdout.buffer.write(raw)
         return
 
-    if not os.path.isfile(TEMPLATE_PATH):
-        sys.stdout.write(content)
-        return
-
-    with open(TEMPLATE_PATH, encoding="utf-8") as fh:
-        template = fh.read()
+    with open(TEMPLATE_PATH, "rb") as fh:
+        template = decode(fh.read())
 
     if not template:
-        sys.stdout.write(content)
+        sys.stdout.buffer.write(raw)
         return
 
-    sys.stdout.write(template + content if content else template)
+    sys.stdout.buffer.write(encode(template + text if text else template))
 
 
 if __name__ == "__main__":

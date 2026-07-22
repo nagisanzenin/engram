@@ -1,5 +1,64 @@
 # Changelog
 
+## 1.2.1 — 2026-07-22 · what §7.5 found in v1.2.0, forty minutes later
+
+v1.2.0 shipped with every gate green and **two HIGH defects of the exact class it was cut to
+fix**. Both were found by the adversarial review (§4.6) reporting *after* the tag was pushed.
+npm was never published, so no installer received them; the tag and GitHub release did.
+
+Measured on the shipped v1.2.0 filters, 1000 generated states under `LC_ALL=en_US.UTF-8`:
+**376 crashes, 99 states left with no block on disk, 1 leaking the block into git.**
+The same fuzz on this release: **0, 0, 0.**
+
+### The two HIGH defects
+
+- **`clean` and `smudge` disagreed about what a block is.** `clean` required an opening AND a
+  closing marker; `smudge` was satisfied by an opening one. Any `AGENTS.md` holding an unmatched
+  open marker — a user quoting Engram's own syntax at line start — made `smudge` no-op, so the
+  block was **never restored on checkout and Engram's instructions silently stopped reaching the
+  model.** That is v1.1.1's bug, reintroduced one function over, in the release that fixed it.
+  The two now share one byte-identical locator and a check asserts they cannot drift.
+- **One non-UTF-8 byte disabled the filter and leaked the block into git.** Both scripts used
+  `sys.stdin.read()`, which is strict UTF-8 under any `*.UTF-8` locale — the macOS Terminal and
+  Linux desktop default. A single latin-1 byte raised `UnicodeDecodeError`; git reported
+  *"external filter failed"*, fell back to **unfiltered** content, and committed `AGENTS.md`
+  with the full Engram block in it, on every `git add` and every `git checkout` thereafter.
+  Both filters now read and write **bytes**, decoding with `surrogateescape`, so arbitrary
+  byte sequences round-trip untouched.
+
+### Also fixed
+
+- **Mixed line endings were rewritten wholesale.** One CRLF line anywhere converted the entire
+  file, contradicting the script's own docstring. The markers now tolerate an optional CR
+  instead of the document being normalised.
+- **An orphan `<!-- /engram -->` above the block disabled the filter entirely.** The locator took
+  the first closing marker outright; with no opening marker before it, it returned "no block"
+  and committed the whole thing verbatim. It now takes the first close that *has* an open
+  before it.
+
+### Why the v1.2.0 gates missed both
+
+Worth writing down, because the gates were run and were green.
+
+- **The fuzz asserted the wrong property.** It checked `clean(smudge(x)) == x` — roundtrip
+  stability, which stops the file reading as permanently dirty. It never checked contract 1,
+  *"the block is on disk"*. HIGH 1 satisfies roundtrip perfectly: smudge no-ops, clean no-ops,
+  the value is stable — and the instructions are gone. A stable wrong answer passes a stability
+  check.
+- **The environment hid HIGH 2.** Every filter run during v1.2.0's gates had `LANG` unset, so
+  Python used `surrogateescape` and the latin-1 byte sailed through. Under any desktop locale it
+  raised. **A gate that passes because of an unset environment variable has not run.** The fuzz
+  now pins `LC_ALL` explicitly.
+- **Two unit checks were asserting the bugs.** `opencode-engram-smudge passes through when
+  content already has marker` fed an *unmatched* opening marker and asserted pass-through —
+  that is HIGH 1, written down as the expected result. It went green through the whole release.
+
+### Tests
+
+155 → 160 vitest checks; `selftest` unchanged at 234. The shared locator is duplicated in both
+filters rather than imported: an import is one more file that can go missing, and v1.2.0 proved
+what a crashing filter costs. A check asserts the two copies are byte-identical.
+
 ## 1.2.0 — 2026-07-22 · AGENTS.md, and the instructions that deleted themselves
 
 The OpenCode plugin wrote its model instructions to `.opencode/instructions.md` and registered

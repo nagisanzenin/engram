@@ -2,73 +2,87 @@
 """
 Git clean filter for AGENTS.md — strips the Engram block before staging.
 
-Half of the smudge/clean filter pair installed by selfExtract. Reads stdin,
-removes the <!-- engram v{...} --> ... <!-- /engram --> block, writes the
-result to stdout. No-op when no complete block is present.
+Reads stdin as BYTES, removes the block, writes stdout as bytes. No-op when no
+complete block is present.
 
-Two properties this file exists to hold, both learned from review:
-
-1. The block's opening marker is the LAST one before the closing marker, not
-   the first. A user who documents Engram's own marker syntax at line start,
-   above the block, would otherwise have everything from their line down to
-   the real close marker deleted — and the truncated version is what git
-   stores.
-
-2. The user's line endings survive. CRLF is normalized only so the anchored
-   regex can match, then restored before writing. Rewriting line endings
-   across a user's whole file is not this filter's business.
-
-Must stay behaviourally identical to findEngramBlock() in .opencode/install.ts
-and to opencode-engram-smudge. All three answer "is there a block here?" and a
-disagreement between any two of them silently loses either user content or the
-Engram instructions.
+Bytes, not text, because these filters sit in git's object path. v1.2.0 used
+sys.stdin.read(), which is strict UTF-8 under any *.UTF-8 locale (the macOS
+Terminal and Linux desktop default). One latin-1 byte in AGENTS.md raised
+UnicodeDecodeError, git reported "external filter failed", and committed the
+file WITH the Engram block in it. Line endings are never rewritten either: the
+markers tolerate an optional CR rather than normalising the document.
 
 Self-healing, and the one-time diff it produces: git-stored AGENTS.md should
 never contain a block, but it can — the filter command falls back to `cat` when
 these scripts are missing, so a commit made before extraction stores the block
-verbatim. The first commit made once the scripts exist then strips it, which
-shows up as a one-time diff deleting the block. That is the repo being
-corrected, not content being lost. Fuzzed at 600 cases: every such state reaches
-a fixed point in one pass, none oscillate, and nothing outside the block is
-touched (0 losses in 900).
+verbatim. The first commit made once the scripts exist strips it, showing up as
+a one-time diff deleting the block. That is the repo being corrected.
 """
 import re
 import sys
 
-# Both markers must be alone on their line. An inline mention is prose.
-OPEN_RE = re.compile(r"^<!-- engram v.+? -->$", re.MULTILINE)
-CLOSE_RE = re.compile(r"^<!-- /engram -->$", re.MULTILINE)
+# --- BEGIN SHARED BLOCK LOCATOR ---
+# Kept BYTE-IDENTICAL between opencode-engram-clean and opencode-engram-smudge.
+# __tests__/git-filter.test.ts asserts that; do not edit one copy alone.
+#
+# Duplicated rather than imported on purpose. These scripts run inside git's
+# object path, and v1.2.0 proved what a crashing filter costs: git reports
+# "external filter failed", falls back to UNFILTERED content, and commits the
+# Engram block into the repository. An import is one more file that can be
+# missing, so the shared code is copied and a test forbids drift instead.
+#
+# Markers must be alone on their line; an inline mention is prose. `\r?$` so
+# CRLF files match without the document being normalised.
+OPEN_RE = re.compile(r"^<!-- engram v.+? -->\r?$", re.MULTILINE)
+CLOSE_RE = re.compile(r"^<!-- /engram -->\r?$", re.MULTILINE)
 
 
-def strip_block(content: str) -> str:
-    close = CLOSE_RE.search(content)
-    if not close:
-        return content
+def decode(raw):
+    """Bytes -> str, lossless for arbitrary (even invalid) byte sequences."""
+    return raw.decode("utf-8", errors="surrogateescape")
 
-    opens = [m for m in OPEN_RE.finditer(content) if m.start() < close.start()]
+
+def encode(text):
+    """Inverse of decode(). encode(decode(b)) == b for every b."""
+    return text.encode("utf-8", errors="surrogateescape")
+
+
+def find_block(text):
+    """
+    Span of the complete Engram block, or None.
+
+    - The opening marker is the LAST one before the close, so a user who
+      documents Engram's own marker syntax above the block keeps their prose.
+    - The closing marker is the first one that HAS an opening marker before it.
+      Taking the first close outright made a stray close above the block turn
+      the filter into a no-op, committing the whole block verbatim.
+    """
+    opens = [m.start() for m in OPEN_RE.finditer(text)]
     if not opens:
-        return content
+        return None
 
-    start = opens[-1].start()
-    end = close.end()
-    # Swallow the newline terminating the close marker so removing the block
-    # does not leave a blank line where it used to be.
-    if content[end:end + 1] == "\n":
-        end += 1
+    for close in CLOSE_RE.finditer(text):
+        before = [o for o in opens if o < close.start()]
+        if not before:
+            continue
+        end = close.end()
+        if text[end:end + 2] == "\r\n":
+            end += 2
+        elif text[end:end + 1] == "\n":
+            end += 1
+        return before[-1], end
 
-    return content[:start] + content[end:]
+    return None
+# --- END SHARED BLOCK LOCATOR ---
 
 
-def main() -> None:
-    raw = sys.stdin.read()
-    had_crlf = "\r\n" in raw
-    content = raw.replace("\r\n", "\n") if had_crlf else raw
-
-    out = strip_block(content)
-
-    if had_crlf:
-        out = out.replace("\n", "\r\n")
-    sys.stdout.write(out)
+def main():
+    text = decode(sys.stdin.buffer.read())
+    span = find_block(text)
+    if span is not None:
+        start, end = span
+        text = text[:start] + text[end:]
+    sys.stdout.buffer.write(encode(text))
 
 
 if __name__ == "__main__":

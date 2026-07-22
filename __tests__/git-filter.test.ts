@@ -313,7 +313,9 @@ more rules
   it("opencode-engram-clean handles mixed CRLF and LF line endings", () => {
     const input = "<!-- engram v1.0.0 -->\r\n# block\r\n<!-- /engram -->\n\nuser content\n"
     const result = execSync(`python3 ${resolve(scriptsDir, "opencode-engram-clean")}`, { input })
-    expect(result.toString()).toBe("\r\nuser content\r\n")
+    // Endings are preserved exactly as found — the CRLF lines were all inside
+    // the block, so what remains is LF and stays LF.
+    expect(result.toString()).toBe("\nuser content\n")
   })
 
   it("opencode-engram-smudge prepends block from template", () => {
@@ -347,7 +349,10 @@ more rules
     try {
       mkdirSync(resolve(tmp, ".opencode"), { recursive: true })
       writeFileSync(resolve(tmp, ".opencode", ".engram-smudge-template"), template)
-      const input = "<!-- engram v1.0.0 -->\nuser content\n"
+      // A COMPLETE block — open + close. An unmatched opening marker is not a
+      // block, and the check below pins that; this one used to pass an
+      // unmatched marker and assert pass-through, which is the v1.2.0 bug.
+      const input = "<!-- engram v1.0.0 -->\nmine\n<!-- /engram -->\nuser content\n"
       const result = execSync(`python3 ${resolve(scriptsDir, "opencode-engram-smudge")}`, { input, cwd: tmp })
       expect(result.toString()).toBe(input)
     } finally {
@@ -653,5 +658,80 @@ describe("AGENTS.md exclude tracks CONTENT, not authorship", () => {
     syncProjectState(target, () => {})
 
     expect(excludeText().split("\n").some((l) => l.trim() === "AGENTS.md")).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// v1.2.1 — the two HIGH defects the post-release review found in v1.2.0.
+// ---------------------------------------------------------------------------
+
+describe("clean and smudge cannot disagree", () => {
+  const scriptsDir = resolve(__dirname, "..", "scripts")
+  const SHARED = /# --- BEGIN SHARED BLOCK LOCATOR ---[\s\S]*?# --- END SHARED BLOCK LOCATOR ---/
+
+  // The root cause of HIGH 1: two copies of "where is the block?" that drifted.
+  it("the shared block locator is byte-identical in both scripts", () => {
+    const a = readFileSync(resolve(scriptsDir, "opencode-engram-clean"), "utf-8").match(SHARED)
+    const b = readFileSync(resolve(scriptsDir, "opencode-engram-smudge"), "utf-8").match(SHARED)
+    expect(a, "clean is missing the shared region").not.toBeNull()
+    expect(b, "smudge is missing the shared region").not.toBeNull()
+    expect(a![0]).toBe(b![0])
+  })
+
+  // HIGH 1. smudge tested the OPENING marker alone while clean required a pair,
+  // so a file with an unmatched open marker never got its block back and the
+  // model silently stopped seeing Engram's instructions.
+  it("HIGH 1: an unmatched opening marker still gets the block restored", () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), "engram-h1-"))
+    mkdirSync(resolve(tmp, ".opencode"), { recursive: true })
+    writeFileSync(resolve(tmp, ".opencode", ".engram-smudge-template"),
+      "<!-- engram v1.2.1 -->\nENGRAM RULE\n<!-- /engram -->\n")
+
+    const stored = "my notes\n<!-- engram v9.9.9 -->\nmore\n"
+    const out = execSync(`python3 ${resolve(scriptsDir, "opencode-engram-smudge")}`,
+      { input: stored, cwd: tmp }).toString()
+
+    expect(out).toContain("ENGRAM RULE")
+    expect(out).toContain("my notes")
+    // and the pair still round-trips
+    const back = execSync(`python3 ${resolve(scriptsDir, "opencode-engram-clean")}`,
+      { input: out, cwd: tmp }).toString()
+    expect(back).toBe(stored)
+    rmSync(tmp, { recursive: true })
+  })
+
+  // HIGH 2. sys.stdin.read() is strict UTF-8 under any *.UTF-8 locale, so one
+  // latin-1 byte crashed the filter — and a crashing filter makes git fall back
+  // to UNFILTERED content and commit the block.
+  it("HIGH 2: a non-UTF-8 byte does not crash the filter under a UTF-8 locale", () => {
+    const input = Buffer.concat([
+      Buffer.from("<!-- engram v1.2.1 -->\nENGRAM RULE\n<!-- /engram -->\n# R", "utf-8"),
+      Buffer.from([0xe8]),                       // latin-1 'è', invalid UTF-8
+      Buffer.from("gles\n", "utf-8"),
+    ])
+    const out = execSync(`python3 ${resolve(scriptsDir, "opencode-engram-clean")}`,
+      { input, env: { ...process.env, LC_ALL: "en_US.UTF-8", LANG: "en_US.UTF-8" } })
+
+    expect(out.includes(Buffer.from("ENGRAM RULE"))).toBe(false)  // block stripped
+    expect(out.includes(Buffer.from([0xe8]))).toBe(true)          // byte preserved
+  })
+
+  // MED 3. A blanket CRLF conversion rewrote endings across the user's file.
+  it("MED 3: mixed line endings are never rewritten", () => {
+    const out = execSync(`python3 ${resolve(scriptsDir, "opencode-engram-clean")}`,
+      { input: "a\r\nb\n" }).toString()
+    expect(out).toBe("a\r\nb\n")
+  })
+
+  // MED 5. Taking the first close marker outright meant a stray one above the
+  // block left zero opens before it, so clean was a total no-op and committed
+  // the whole block.
+  it("MED 5: an orphan close marker above the block does not disable the filter", () => {
+    const out = execSync(`python3 ${resolve(scriptsDir, "opencode-engram-clean")}`, {
+      input: "<!-- /engram -->\n<!-- engram v1.2.1 -->\nENGRAM RULE\n<!-- /engram -->\nmy rules\n",
+    }).toString()
+    expect(out).not.toContain("ENGRAM RULE")
+    expect(out).toContain("my rules")
+    expect(out).toContain("<!-- /engram -->")   // the user's orphan line survives
   })
 })
