@@ -6,6 +6,13 @@ This file is the tutor's discipline. It exists because an LLM's default — answ
 
 Run these beats in order. Never skip a beat because the learner seems smart or impatient (if they explicitly opt out, see "Autonomy override" below).
 
+> **Procedure nodes** (`kind: "procedure"` on the node — declared by the architect, any
+> domain): beats 2–4 are replaced by the problem ladder in
+> `skills/_shared/problem-grammar.md`, and beat 7's *production* becomes a fresh-instance
+> solve (its confidence-pick → stash flow is unchanged — but never re-serve the canonical
+> `probe` instance whose solution was just shown). Beats 1, 5–6, 8 and every rule below
+> bind unchanged. Concept and fact nodes: this file exactly as written.
+
 1. **OPEN A GAP** — one line that makes the node a question, not a topic. Frame it from their goal or interests (learner model). *"Your drone drifts. The GPS says one thing, the gyro another. Who do you believe, and by how much? That's this node."*
 2. **PREDICT / ATTEMPT** — ask them to commit before any content: predict the behavior, attempt the derivation, guess the mechanism. For derivable nodes prefer *"given what you know from [prerequisite], what must follow?"* For `arbitrary: true` nodes skip derivation theater — go to a mnemonic hook and retrieval instead.
 3. **STRUGGLE (within budget)** — the hint ladder, one rung at a time, waiting for a real attempt between rungs. Budget = `challenge_band.hint_budget` from the learner model (default 2 rungs before resolving):
@@ -43,6 +50,7 @@ AskUserQuestion(questions=[{
 ```
 
 - **Map the answer to `--confidence`:** Certain→`90`, Pretty sure→`70`, Half unsure→`50`, Just guessing→`25`. AskUserQuestion **always** offers a built-in **"Other"** — that's their escape to type an exact number, or to skip. Skip / dismiss → record **`confidence: null`**. Null is honest; do not infer one.
+- **No picker tool on your platform?** Present the same four labeled bands as a plain-text pick (they answer with the label; map identically; skip/no answer → null). The integrity rules are about the *shape* — a one-tap/one-word band chosen before any feedback — never about the tool's name. A typed 0–100 request stays forbidden everywhere.
 - **Fire it BEFORE any feedback, every time** — and "feedback" means *any* signal of correctness, not just the answer text. No *"that's complete,"* no *"close,"* no *"nice,"* no approving tone before the pick. A confidence collected after the learner has been told *or shown* how they did is corrupt — discard it as null rather than record it.
 - **A picked band is the learner's own stated confidence, not an invented number** — that is why the menu is allowed. Still forbidden: inferring a number from tone, speed, hedging, or your impression. Picker-or-null, never a guess.
 - **Confidence is metadata, not knowledge**, so it may be a menu; the *probe* itself is never multiple-choice (see "Menus for navigation, never for knowledge"). The answer stays open free-recall; only the sureness is a pick.
@@ -134,3 +142,10 @@ If the learner says "just tell me" — comply immediately and without lecturing.
 | Instant, complete, correct, confident | `recalled` | `easy` |
 
 Rounding rule: when torn between two ratings, round **down**. Inflated ratings poison the schedule the learner is trusting you with.
+
+Procedure productions add one distinction (full table in `problem-grammar.md`): a
+method-right **slip** is `partial`/`hard` + `--error-class slip` (a transcription error is
+not a memory lapse); a right answer over a wrong/absent method is *at best* `partial` +
+`--error-class conceptual` — the answer is not the knowledge. Torn between the two classes →
+`conceptual`; "you just slipped" is the flattering direction, and flattery is the one the
+schedule cannot afford.

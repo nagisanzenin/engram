@@ -66,7 +66,7 @@ And voice `by_case_type`'s weakest row when it is materially below the rest — 
 The separation of powers is only real if the oracle is measured. This runs the **real assessor** against the shipped gold set and lets the engine compute the agreement.
 
 ```bash
-python3 "$ENGRAM" gold > /tmp/engram-gold.json     # 66 adversarial items, ANSWERS STRIPPED
+python3 "$ENGRAM" gold > /tmp/engram-gold.json     # 86 adversarial items, ANSWERS STRIPPED
 ```
 
 Then spawn **engram-assessor** — **three independent times**, on the same items.
@@ -118,6 +118,7 @@ Then narrate, in plain language, at most five of these — each one a number plu
 3. **Consistency.** Streak and sessions/week — the habit metric that predicts everything. If broken: shrink, don't shame (offer Sprint default, `quick` reviews).
 4. **Misconceptions open.** Recurring ones deserve a contrast-pair artifact or a re-derivation session — offer to schedule it.
 5. **Backlog & pending.** `due_now` large → triage honestly: FSRS degrades gracefully; propose a two-session catch-up, never a marathon. `pending_verify` > 0 → settle it now (assessor → receipts → `stash clear`).
+5.5. **Knowledge kinds — only when `by_kind` has something to say (v1.1).** Read `stats.by_kind`: recall split by what each node *is* (concept / procedure / fact). When `read` ≠ `insufficient-data`, translate it with both `n`s **and voice the `caveat` verbatim in spirit** — kinds are different material by construction, so this is never a causal claim; it is the learner's own instrument for whether skills hold differently than ideas (docs/11 §7.3). When `procedure_slip_share.n_classified` ≥ 5, you may add one line — *"of your %d classified procedure errors, %d%% were slips, not wrong method — those cost a shorter re-review, not a re-derivation"* — always with `n_classified` said aloud. Below 5, counts only, never a percentage ("2 classified errors so far, both slips" is a fact; "100%" over two is not a rate). Offer nothing; there is no dial here, only honesty.
 6. **Medium yield — only when `modality.read` ≠ `insufficient-data`.** Translate it with its n **and its `caveat` string, which you must voice, not paraphrase away**: the arms are not randomized (explorables go to threshold / high-affordance concepts), so the comparison carries the *material* as well as the medium — plus n-of-1 medium measurement is itself unsettled methodology (`docs/06-visual-encoding.md` §Open). Say it like this: *"your explorable-encoded concepts: 86% first-review recall (n=7) vs 64% dialogue-only (n=11). Suggestive, and softer than it looks — the explorables went to your hardest concepts, so that's not a clean comparison."* Offer the matching dial move arrow-key style (`visuals eager` when ahead / `visuals threshold` when behind), applied only on yes. If the learner loves explorables but the numbers say behind, show both facts and let them choose — preference is theirs to spend; the data just gets a seat at the table. Never present this number as proof the medium works or fails.
 
 **Consent rule:** every `model --set` is offered arrow-key style with its evidence, applied only on yes, and echoed back ("changed X because Y; your file: `~/.claude/learning/learner-model.json`").

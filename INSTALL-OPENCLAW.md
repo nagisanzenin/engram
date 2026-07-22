@@ -96,7 +96,7 @@ openclaw config set tools.profile coding
 ## Verify the install
 
 ```bash
-python3 ~/.openclaw/extensions/engram/scripts/engram.py selftest   # 217/217, same engine everywhere
+python3 ~/.openclaw/extensions/engram/scripts/engram.py selftest   # 230/230, same engine everywhere
 openclaw skills list | grep -E "learn|review|coach"                # three ✓ ready rows
 openclaw hooks info engram-due                                     # ready, events, python3 satisfied
 openclaw plugins doctor                                            # no plugin issues

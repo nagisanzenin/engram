@@ -54,7 +54,9 @@ The rules that keep this from becoming the thing this project despises:
 
 ## 2 · Per item — the retrieval protocol
 
-The `due` payload gives you `probe`, `claim` (canonical answer), and `rubric`. Show a progress marker per item: `[3/6] · residual-stream †`. The order of operations is sacred:
+The `due` payload gives you `probe`, `claim` (canonical answer), and `rubric` — plus `node_kind` and `practice` (v1.1). Show a progress marker per item: `[3/6] · residual-stream †`. The order of operations is sacred:
+
+**`node_kind: "procedure"` items first take a detour** (Read `skills/_shared/problem-grammar.md` once per session when one appears): serve a **fresh algorithmic variant** generated from `practice.problem_frame` — new values, same structure and cover story; never the stored numbers, and never a re-clothed isomorph (that is `transfer_probe`'s job) — computing the answer key by execution before showing anything. When a `practice.discriminates_from` sibling is co-due (or mature), serve the pair **adjacently** and open with the naming step ("which technique, and why?") — and until it's answered, the progress marker shows the topic, never the node id (the id would answer the question). Grade the solve with the problem grammar's table — method-wrong caps the grade regardless of the answer; a slip-only miss is `partial`/`hard` with `--error-class slip`, a wrong-method one carries `--error-class conceptual`. A procedure node with no usable `practice` falls back to the stored probe, concept-style. Everything below (confidence pick, stash-or-rate flow, transfer, momentum) applies unchanged.
 
 1. Show the **probe only**. Free recall — no options, no hints in the prompt, no "remember when we...". Do **not** ask them to type a confidence number.
 2. They produce. (Silence is fine; "no idea" is an answer — treat as lapse, warmly.) **Then collect confidence by calling `AskUserQuestion` (the four-band Confidence picker — exact call in grammar ⚠), BEFORE the reveal.** Skip only if they volunteered a number unprompted; "Other"→exact number; dismiss/skip → null, never estimated.
@@ -64,6 +66,10 @@ The `due` payload gives you `probe`, `claim` (canonical answer), and `rubric`. S
 ```bash
 python3 "$ENGRAM" rate --topic <t> --node <n> --rating <r> --confidence <c-or-omit> \
   --grade <g> --production-file <tmp-answer.txt> --kind review --source self
+# procedure items only: append --error-class slip|conceptual per the problem-grammar
+# table (omit the flag entirely on concept/fact items and on recalled grades).
+# If the engine rejects --error-class (an older engine than these skills), RETRY the
+# same command without the flag — the rating must never be lost to a version skew.
 ```
 
 Relay the returned due date in passing, not ceremonially ("back in 12 days"). **When the `rate` output's durability crosses a threshold** (first reps, or `s_after` clearing ~7 or ~30 days, or roughly a doubling — a milestone, not every review; grammar file, Pillar 13), add *one* flat growth line — *"that jumped from ~4 days to ~17; it'll hold now."* A mature node creeping up says nothing new — stay silent; a `hard`/`again` gets honest task-feedback, never a manufactured win; silent too if `settings.momentum` = `off`.
@@ -90,12 +96,12 @@ Relay the returned due date in passing, not ceremonially ("back in 12 days"). **
   **And the engine now backs that sentence up (v0.8.1).** A failed transfer probe **leaves the memory schedule completely untouched** — same stability, same due date, no lapse recorded. Until v0.8.1 it did not: one failed probe deleted **97% of a mature memory's durability** (s 443 → 12), flipped the node to `learning`, and dropped it below the transfer bar forever. **Answering a harder question wrong demolished the schedule for the original concept** — the exact "fabricated setback" the maturity gate was built to prevent. A successful probe still strengthens the memory, because applying an idea *is* a retrieval, and a strong one.
 
 - **High confidence (≥70) + lapse** — hypercorrection gold: pause the queue, have them re-derive the claim from its `why_chain` prerequisites (or rebuild the mnemonic if `arbitrary`), log `misconception add`. Two minutes here is worth ten elsewhere.
-- **Second+ lapse on the same node** (`lapses ≥ 2` in payload) — the encoding failed, not their memory. After rating, re-encode *differently*: new analogy (use their interests), a contrast case, or an explorable. The payload's `artifact` flag tells you which case you're in: `true` → the *current explorable also isn't holding* — offer to regenerate it differently (spawn **engram-artifact-smith** in the background with the node's current state + open misconceptions; it re-registers on completion; hand off at the close, never mid-queue); `false` → offer to build one (same background spawn) if `settings.artifacts` ≠ `off` or the learner asks. Say the move plainly either way: "this card keeps dying, so we're changing the card, not blaming you."
+- **Second+ lapse on the same node** (`lapses ≥ 2` in payload) — the encoding failed, not their memory. After rating, re-encode *differently*: new analogy (use their interests), a contrast case, or an explorable — and on a **procedure** node, prefer a find-explain-fix erroneous example (problem grammar). The payload's `artifact` flag tells you which case you're in: `true` → the *current explorable also isn't holding* — offer to regenerate it differently (spawn **engram-artifact-smith** in the background with the node's current state + open misconceptions; it re-registers on completion; hand off at the close, never mid-queue); `false` → offer to build one (same background spawn) if `settings.artifacts` ≠ `off` or the learner asks. Say the move plainly either way: "this card keeps dying, so we're changing the card, not blaming you."
 - **Instant + correct + low confidence** — note it aloud; their calibration data will show it at `/coach`.
 
 ## 3 · Assessor audit (keep self-grading honest)
 
-If the session had ≥8 items, any disputed grade, or ≥3 `partial`s: stash `{topic, node, probe, claim, rubric, production, confidence, kind:"audit", tutor_rating:"<r>"}` (the engine mints the `sid`; the assessor must return it) for each such item, then spawn **engram-assessor** on `stash list` for an audit verdict, and `stash clear` after. Report disagreements to the learner and log a `misconception add` or a note — do **not** re-rate already-committed items (scheduling stands; drift is the coach's monthly business). Disputes from the learner: same path, once.
+If the session had ≥8 items, any disputed grade, or ≥3 `partial`s: stash `{topic, node, probe, claim, rubric, production, confidence, kind:"audit", tutor_rating:"<r>"}` (plus `node_kind:"procedure"` on procedure items, so the auditor step-grades) (the engine mints the `sid`; the assessor must return it) for each such item, then spawn **engram-assessor** on `stash list` for an audit verdict, and `stash clear` after. Report disagreements to the learner and log a `misconception add` or a note — do **not** re-rate already-committed items (scheduling stands; drift is the coach's monthly business). Disputes from the learner: same path, once.
 
 ## 4 · Close
 

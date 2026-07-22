@@ -3,11 +3,11 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.8-6D4AA8.svg" alt="Version 1.0.8">
+  <img src="https://img.shields.io/badge/version-1.1.0-6D4AA8.svg" alt="Version 1.1.0">
   <a href="https://www.npmjs.com/package/opencode-engram-learning"><img src="https://img.shields.io/npm/v/opencode-engram-learning?label=npm&color=6D4AA8" alt="npm package"></a>
   <img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="MIT License">
-  <img src="https://img.shields.io/badge/selftest-217%2F217-3E7D5A.svg" alt="217/217 checks">
-  <a href="gold/assessor-gold.jsonl"><img src="https://img.shields.io/badge/grader%20never%20inflates-0%2F198-3E7D5A.svg" alt="0 of 198 blind judgments graded up"></a>
+  <img src="https://img.shields.io/badge/selftest-230%2F230-3E7D5A.svg" alt="230/230 checks">
+  <a href="gold/assessor-gold.jsonl"><img src="https://img.shields.io/badge/grader%20inflations-0%2F258-3E7D5A.svg" alt="0 of 258 blind judgments graded up, on the shipping spec"></a>
   <img src="https://img.shields.io/badge/scheduler-FSRS--4.5-6D4AA8.svg" alt="FSRS-4.5">
   <a href="CONTRIBUTING-DATA.md"><img src="https://img.shields.io/badge/data-100%25%20local-3E7D5A.svg" alt="100% local — the engine has no network code, proven by a permanent selftest"></a>
   <a href="https://discord.gg/temm1e"><img src="https://img.shields.io/badge/discord-community-5865F2.svg" alt="Discord community"></a>
@@ -174,6 +174,7 @@ Engram implements the four most-replicated findings in learning science — and 
 4. **Honest adaptation** — it adapts from your *measured* retention, calibration, and error patterns. Confidence is only recorded when you actually state it; grades only exist as written receipts.
 5. **Motivation & wisdom, honestly** — it makes your *real* competence growth visible at the moment it happens (the memory that now lasts 4× longer — not points or streaks, which backfire on motivated adults), and it carries you through the hard part: struggle named as encoding, lapses absolved not pitied, backlogs met with amnesty. Two new layers, every claim adversarially verified against the primary source — [docs/05-affective-layers.md](docs/05-affective-layers.md).
 6. **Visuals that earn their keep** (v0.5) — interactive explorables are built when the *content* rewards manipulation (a parameter to drag, a process that unfolds — declared per concept by the curriculum architect, never inferred from a "visual learner" label), always wrapped in predict → act → explain guidance, because the guidance is what carries the effect (scaffolded simulations beat identical unscaffolded ones, g+ = 0.60). You choose the eagerness (`visuals eager|threshold|off`), and your own review receipts then measure whether the medium actually holds better *for you* — [docs/06-visual-encoding.md](docs/06-visual-encoding.md).
+7. **Procedures are practiced, not recited** (v1.1) — some knowledge is a *skill executed on instances* (an integral, a `git rebase`, a statistical-test choice — any domain, declared per node by the content, never by a topic label). Those nodes enter by the **worked-example ladder** (study → complete → faded → solve; examples first is the best-replicated novice result in math, g ≈ 0.44) and are reviewed by **solving a fresh variant** — new numbers, same structure — next to the problems they're confused with, because practice format must match use format (transfer d = 0.58 congruent vs 0.28 not). Solutions are step-graded with the arithmetic **verified by execution**, and a slip is priced gentler than a wrong method. Engram stays a general learn-anything system; this layer wakes only where the content is a skill — [docs/11-the-procedure-gap.md](docs/11-the-procedure-gap.md).
 
 <details>
 <summary><b>Citations & full theory</b> (for the skeptical — click)</summary>
@@ -204,7 +205,7 @@ So we built the audit and ran it. **Then the gold set failed before the grader d
 
 | | |
 |---|---|
-| **0 of 198** | blind judgments — 66 adversarial items × 3 independent runs — where the grader awarded **more** credit than the strict rubric reading. **It has never once inflated a grade.** |
+| **0 of 258** | blind judgments — 86 adversarial items × 3 independent runs — where the grader awarded **more** credit than the strict rubric reading. **Zero, on the spec that ships — and it is a repaired zero, not an untested one.** Extending the set to procedure items ran the audit three times over 774 judgments and caught **3 real inflations**, each traced to an ambiguity in the grader's own instructions (one of them introduced by this release). All three are closed; the number was re-earned, not extrapolated. The full account, including what the fixes cost: [docs/release-audits/v1.1.0-grader-audit.md](docs/release-audits/v1.1.0-grader-audit.md). |
 
 That is a claim about **safety**, and it is the reason the badge above says what it says. A grader that errs low makes you re-drill something you had earned — annoying, and it costs you time. A grader that errs *high* tells you that you know something you do not, and **you stop reviewing.** Only one of those is a trap, and this grader has never walked into it.
 
@@ -226,9 +227,9 @@ That is why the badge is no longer a QWK. **`0/198 graded up` is a safety proper
 
 One genuine disagreement (`g_054`) is **deliberately left in**, because the reviewer read both readings and judged the gold's defensible. *An instrument with no disagreement left in it measures nothing.*
 
-**The gold set is public** — [`gold/assessor-gold.jsonl`](gold/assessor-gold.jsonl), 66 items, **88% adversarial**: *fluent-but-empty*, *terse-but-correct*, *confident-and-wrong*, *right-answer-wrong-reason*, *paraphrase*, *partial-credit boundary*. Every corrected item carries a `disputed` record with its original grade, so the correction is auditable rather than laundered. Run it yourself: `/coach audit`. **Dispute an item** — drop it in `gold/local-gold.jsonl` and it overrides ours (the audit will say it did).
+**The gold set is public** — [`gold/assessor-gold.jsonl`](gold/assessor-gold.jsonl), 86 items, **86% adversarial**: *fluent-but-empty*, *terse-but-correct*, *confident-and-wrong*, *right-answer-wrong-reason*, *paraphrase*, *partial-credit boundary*, and — new in v1.1 — *right-answer-wrong-method*, *slip-vs-conceptual*, *fluent-wrong-step*, *terse-but-correct-solution*. Every corrected item carries a `disputed` record with its original grade, so the correction is auditable rather than laundered. Run it yourself: `/coach audit`. **Dispute an item** — drop it in `gold/local-gold.jsonl` and it overrides ours (the audit will say it did).
 
-**What would actually fix this:** one human, who is not us, adjudicating 66 items. That is the highest-value contribution anyone could make to this repository, and until it happens the engine will keep saying so out loud.
+**What would actually fix this:** one human, who is not us, adjudicating 86 items — and the two categories where the author and the grader now disagree in every run (`right-answer-wrong-method`, `procedure-partial-boundary`) are where that human would earn their keep first. That is the highest-value contribution anyone could make to this repository, and until it happens the engine will keep saying so out loud.
 
 **One more thing the literature insists on, and the engine enforces:** high consistency is *not* correctness. A judge has been measured at test–retest **0.992** with a position bias of **0.192** — perfectly reproducible and systematically wrong ([docs/07](docs/07-the-measured-loop.md) §3). Engram's assessor is *prompted* to be a skeptic, so it is self-consistent by construction — precisely the profile that failure mode wears. So the engine **refuses to certify on consistency**: above 0.95 test–retest it demands the leniency bias be strictly under the ceiling, fewer than three runs cannot pass at all, and three *identical* runs are flagged as measuring nothing.
 
@@ -252,7 +253,7 @@ python3 scripts/engram.py export --contributor "@you"     # writes a FILE. Sends
 |---|---|
 | grades, ratings, confidence | **your productions** — every word you wrote |
 | timings, stability, intervals, retrievability | **probes, claims, rubrics** |
-| `kind`, `artifact`, `arm`, `stratum` | **goals, interests, misconception text** |
+| `kind`, `node_kind`, `error_class`, `artifact`, `arm`, `stratum` | **goals, interests, misconception text** |
 | `grader` and its **measured QWK** | **topic names and node ids** — hashed, not carried |
 
 **Four things make that a promise rather than a hope:**
@@ -302,6 +303,9 @@ Anki schedules cards *you* write and grades *yourself*. Engram teaches the mater
 **Non-code topics?**
 Yes — the engine doesn't care. History, music theory, statistics, anatomy (it routes memorization-heavy content to mnemonics instead of derivation-theater).
 
+**Math and STEM specifically?**
+Yes, and since v1.1 with a layer built for the half of STEM that is *doing*: the architect marks skill-type nodes as `procedure`, which swaps in worked-example acquisition and solve-a-fresh-variant reviews, step-graded with execution-checked arithmetic (a dropped sign is priced as a slip, not a forgotten idea; a right answer over a wrong method is capped — the answer is not the knowledge). It is not a "math mode": the same kind fires on a git workflow or a conjugation drill, concepts still run the Socratic grammar, and a topic with no procedure nodes behaves exactly as before. Theory and the adversarial verification behind it: [docs/11-the-procedure-gap.md](docs/11-the-procedure-gap.md).
+
 **What if I just want the answer?**
 Say "just tell me" — it complies immediately, no lecture. It also quietly schedules that concept for earlier review, because told-not-derived decays faster. Your call, honestly priced.
 
@@ -344,7 +348,7 @@ The model never does calendar math; this does:
 | `focus on\|off\|status` | toggle the ADHD Focus profile (Sprint default, growth every review, always-on amnesty) |
 | `visuals eager\|threshold\|off\|status` | the explorables dial: every high-affordance concept · portal concepts only (default) · none |
 | `artifact set\|clear\|list` | register a built explorable on its node (validated; powers regeneration tracking + the medium comparison) |
-| **`gold`** | the 66-item adversarial gold set, **answers stripped by construction** — shaped exactly like a real settle payload, so the audit grades the real assessor |
+| **`gold`** | the 86-item adversarial gold set, **answers stripped by construction** — shaped exactly like a real settle payload, so the audit grades the real assessor |
 | **`assessor-audit --file F`** | **grade the grader.** QWK (headline) · raw agreement (never quoted alone) · signed leniency bias · test–retest · confusion matrix · per-case-type breakdown |
 | **`grader-health`** | the latest audit's verdict. `stats` embeds it, and stamps `grader_unvalidated` on every retention figure until it passes |
 | **`transfer [--topic T]`** | the mature concepts ready for the harder question — the `transfer_probe` the architect wrote and nothing ever asked. `/review` serves it automatically |
@@ -353,7 +357,7 @@ The model never does calendar math; this does:
 | `refit` | fit review intervals to your measured recall (guarded, ≥50 reviews) |
 | **`export [--topic T]`** | a **text-stripped**, **attributed** receipt bundle written **to a file**. Whitelist-constructed — there is no code path by which a production could leave. **Refuses** if your grader is unaudited |
 | `session-start` / `log-session` | ambient nudge (hook) · session telemetry |
-| `selftest` | 217 checks| 214 checks| 213 checks| 213 checks| 207 checks| 201 checks| 200 checks| 192 checks| 191 checks over the FSRS math, state machine, adherence/retention arithmetic, the grader-audit statistics, and every hardened boundary |
+| `selftest` | 230 checks| 217 checks| 214 checks| 213 checks| 213 checks| 207 checks| 201 checks| 200 checks| 192 checks| 191 checks over the FSRS math, state machine, adherence/retention arithmetic, the grader-audit statistics, and every hardened boundary |
 
 </details>
 
@@ -406,6 +410,8 @@ Separation of powers, enforced by construction: the **tutor** teaches but never 
 | **[docs/08-vision.md](docs/08-vision.md)** | **The vision:** the one number Engram exists to move, which appealing metrics are traps, and the final state — tutor → instrument → commons. Includes the exhibit: the founder's own memory decaying on schedule |
 | **[docs/09-target-architecture.md](docs/09-target-architecture.md)** | **The target engine:** schemas, the nine new commands, the invariants that must never break, and the order of operations |
 | **[docs/10-roadmap-to-1.0.md](docs/10-roadmap-to-1.0.md)** | **The road to 1.0:** v0.6 → v1.0 as executable work orders — why / what / done / selftests / risk, each shippable by someone who has never seen the repo |
+| **[docs/11-the-procedure-gap.md](docs/11-the-procedure-gap.md)** | **The procedure gap (v1.1's theory):** Engram was braced for the conceptual half of math & STEM and blind to the procedural half — Pillars 16–17 (the example ladder; the problem as the probe), adversarially verified by three refute-first passes that corrected five claims and inverted one design rule before code shipped |
+| **[docs/12-procedure-layer-work-order.md](docs/12-procedure-layer-work-order.md)** | **The procedure layer's build:** architecture + work orders (WO-1…WO-8), the compatibility doctrine (no breaking changes, no domain mode — Engram stays general), and the pre-answered numbers audit for `by_kind` |
 
 ## More from the same workshop
 

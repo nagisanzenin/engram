@@ -32,7 +32,7 @@ SCHEMA = 1
 # The one place the engine knows its own version. Read by `export`, so a shared receipt states
 # which engine produced it — a corpus of receipts from unknown engine versions is not a corpus.
 # Pinned against .claude-plugin/plugin.json by a selftest, so it cannot drift.
-ENGRAM_VERSION = "1.0.8"
+ENGRAM_VERSION = "1.1.0"
 RETENTION_DEFAULT = 0.90
 INTERVAL_MAX = 365
 RETENTION_MIN, RETENTION_MAX = 0.70, 0.97   # sane desired-retention bounds
@@ -53,6 +53,18 @@ GRADES = ("recalled", "partial", "lapsed")
 # invented kind would be permanently invisible — and receipts are append-only, so
 # it could never be corrected. Validated at ingest; a bad batch dies before any write.
 KINDS = ("encode", "review", "pretest", "transfer", "audit")
+# Node KNOWLEDGE kinds (v1.1, docs/11 — KLI's three-kind taxonomy made data). Distinct name
+# from a receipt's `kind` (the EVENT above) on purpose: two meanings never share a key
+# (RELEASE_PROTOCOL §4.8 Q6). Surfaced everywhere as `node_kind`; the node's own JSON carries
+# the architect's `kind` field, in node namespace, like `viz`. Engram stays fully general —
+# the kind is declared per node by the CONTENT (a `procedure` is a git workflow as readily as
+# an integral); there is no domain routing anywhere in this engine.
+NODE_KINDS = ("concept", "procedure", "fact")
+# Error classes on a graded production (v1.1, docs/11 P17): `conceptual` = the method/model
+# was wrong; `slip` = method right, execution slipped. Different facts with different
+# schedule meanings (slip-only caps the DAMAGE at partial/hard — a transcription error is
+# not a memory lapse). Closed enum, validated at ingest, so export may carry it un-hashed.
+ERROR_CLASSES = ("conceptual", "slip")
 NODE_STATES = ("new", "learning", "review")
 # grade <-> rating are a bijection (dialogue-grammar rating map); used for the
 # calibration outcome fallback and grade/rating mismatch warnings.
@@ -296,6 +308,15 @@ def append_jsonl(path, obj):
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 def read_jsonl(path):
+    """Read a JSONL state file, keeping only OBJECT lines.
+
+    Every consumer of every .jsonl in this store (receipts, stash, sessions, gold)
+    treats entries as dicts. A line holding `5` or `true` is valid JSON and pure
+    corruption — and until v1.1.0 it walked straight into `r.get(...)` and bricked
+    every aggregate read (`stats`, `due`, `report`, `session-start`), a crash that
+    had been reachable since v0.1 and was found by the v1.1.0 fuzz gate. Non-object
+    lines now get exactly the treatment non-JSON lines always got here: skipped at
+    the gate (RELEASE_PROTOCOL §4.7 — fix at the gate, not at twenty call sites)."""
     out = []
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -303,9 +324,11 @@ def read_jsonl(path):
                 line = line.strip()
                 if line:
                     try:
-                        out.append(json.loads(line))
+                        obj = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if isinstance(obj, dict):
+                        out.append(obj)
     except FileNotFoundError:
         pass
     return out
@@ -656,6 +679,25 @@ def cmd_add_topic(args):
             warnings.append("%s: viz hint is not an object — dropped" % nid)
             node["viz"] = None
         node.setdefault("viz", None)
+        # `kind` is the architect's knowledge-kind declaration (v1.1, docs/11) — same
+        # covenant as `viz`: content declares, engine stores opaquely, skills own semantics.
+        # An unknown literal is DROPPED with a warning, never fatal: an older or newer
+        # architect must not brick an add, and absence is byte-compatible v1.0.8 behavior
+        # (node_kind_of treats a kindless node as `concept`, or `fact` when arbitrary).
+        if node.get("kind") is not None and node.get("kind") not in NODE_KINDS:
+            warnings.append("%s: unknown kind %r dropped (use %s)"
+                            % (nid, node.get("kind"), "|".join(NODE_KINDS)))
+            node.pop("kind", None)
+        # `practice` (procedure nodes): problem_frame / discriminates_from / verify /
+        # error_bank. Object-or-dropped, exactly like `viz`.
+        if node.get("practice") is not None and not isinstance(node.get("practice"), dict):
+            warnings.append("%s: practice block is not an object — dropped" % nid)
+            node["practice"] = None
+        if node.get("kind") == "procedure" and not (
+                isinstance(node.get("practice"), dict)
+                and node["practice"].get("problem_frame")):
+            warnings.append("%s: kind=procedure without practice.problem_frame — reviews "
+                            "will fall back to the stored probe (concept-style)" % nid)
         # The engine OWNS scheduling state — never trust payload-supplied state/fsrs
         # (mastery advances only through receipts; Article 10). On --replace, carry
         # the existing schedule forward for surviving node ids so restructuring a
@@ -801,6 +843,21 @@ def valid_artifact(node):
         return None
     return a if os.path.isfile(a if os.path.isabs(a) else p(a)) else None
 
+def node_kind_of(node):
+    """The node's knowledge kind, derived defensively (v1.1, docs/11).
+
+    Explicit valid `kind` wins; else `arbitrary: true` means `fact` (the pre-v1.1 marker,
+    honored forever); else `concept` — which is also the answer for garbage input, because
+    this runs inside read paths that degrade and never brick (RELEASE_PROTOCOL §4.7)."""
+    if not isinstance(node, dict):
+        return "concept"
+    k = node.get("kind")
+    if k in NODE_KINDS:
+        return k
+    if node.get("arbitrary") is True:
+        return "fact"
+    return "concept"
+
 def _requires_of(node):
     """The node's `requires` edges — string ids only. `edges` can be a string after a
     hand-edit, and `requires` can hold a dict, which is unhashable and crashes an `in`."""
@@ -910,6 +967,14 @@ def due_items(topic_filter=None, limit=None, horizon_days=0):
                         _tnodes.get((t, nid))),
                     "transfer_probe": node.get("transfer_probe"),
                     "capstone": node.get("capstone") is True,
+                    # v1.1 (docs/11 P17): the knowledge kind + practice block ride the due
+                    # payload so /review can serve a procedure node a FRESH problem instance
+                    # (never the stored numbers) without a second engine call. `node_kind`,
+                    # not `kind` — a receipt's `kind` is the event, and the two must never
+                    # share a name. Absent/garbage practice degrades to None (probe fallback).
+                    "node_kind": node_kind_of(node),
+                    "practice": (node.get("practice")
+                                 if isinstance(node.get("practice"), dict) else None),
                 })
         items.sort(key=lambda x: -x["overdue_days"])
         if items:
@@ -962,6 +1027,13 @@ def make_receipt(item, extra, kind):
     sid = item.get("sid")
     if isinstance(sid, str) and sid:
         receipt["sid"] = sid
+    # The controlling error on a graded production (v1.1): `slip` (method right, execution
+    # slipped) vs `conceptual` (the model was wrong). Validated upstream (validate_item);
+    # absent on every pre-v1.1 receipt and on any grading that didn't classify — absence
+    # stays honestly absent, it is never inferred.
+    ec = item.get("error_class")
+    if ec in ERROR_CLASSES:
+        receipt["error_class"] = ec
     # Which grader produced this verdict (v0.7, docs/09 §3.3). Recorded when the assessor
     # states it, NEVER invented: a model guessing its own model-id is exactly the fabricated
     # data this repo bans, and v1.0's export must be able to carry each receipt's grader so
@@ -1020,6 +1092,11 @@ def validate_item(item):
         die("bad kind %r (use %s) — an invented kind is invisible to every metric and "
             "receipts are append-only, so it could never be corrected"
             % (k, "|".join(KINDS)))
+    ec = item.get("error_class")
+    if ec is not None and ec not in ERROR_CLASSES:
+        die("bad error_class %r (use %s) — a typo'd class would ride an append-only "
+            "receipt forever and silently vanish from the slip/conceptual split"
+            % (ec, "|".join(ERROR_CLASSES)))
 
 def drop_stash(topic, node):
     """Remove applied (topic, node) entries so the stash self-drains as receipts land."""
@@ -1165,6 +1242,11 @@ def apply_item(item, kind):
     # is not evidence of the medium, and a wrong stamp is append-only forever.
     if valid_artifact(node):
         extra = {**extra, "artifact": True}
+    # The knowledge-kind stamp (v1.1), recorded at grading time like the `artifact` medium
+    # stamp — `stats.by_kind` reads the receipt, never the current graph, so a later graph
+    # edit (or a topic rebuild that reclassifies a node) can never rewrite which kind old
+    # evidence belonged to. Closed enum by construction (node_kind_of).
+    extra = {**extra, "node_kind": node_kind_of(node)}
     # Day 0 is the node's FIRST receipt. Stamping elapsed-days here is what makes the north
     # star (retention at 7/30/90 days — docs/04 named it in Phase 0 and never built it) a
     # one-pass query over the receipt log instead of a join against the graph. On first
@@ -1216,7 +1298,8 @@ def cmd_rate(args):
             die("cannot read --production-file: %s" % args.production_file)
     item = {"topic": args.topic, "node": args.node, "rating": args.rating,
             "confidence": args.confidence, "production": production,
-            "grade": args.grade, "probe": args.probe, "source": args.source}
+            "grade": args.grade, "probe": args.probe, "source": args.source,
+            "error_class": getattr(args, "error_class", None)}
     emit(apply_item(item, args.kind))
 
 def cmd_receipt(args):
@@ -1946,6 +2029,7 @@ def compute_momentum(receipts):
 # Raising this SUPPRESSES a number some existing learners can currently see. That is correct: the
 # number was never earned. Suppressing an unearned number is not a regression, it is the product.
 MODALITY_MIN_N = EXPERIMENT_MIN_PER_ARM   # 15 — powered, and it moves with the experiment floor
+SLIP_SHARE_MIN_N = 5   # below this, narrators quote counts, never a percentage (v1.1)
 
 # Shipped inside the stats block so the narrator cannot forget it (the coach reads
 # this JSON, not the docs). Surfaced live in a dogfood session: explorables are
@@ -2006,6 +2090,81 @@ def compute_modality(receipts):
         out["read"] = "insufficient-data"
     out["min_n"] = MODALITY_MIN_N
     out["caveat"] = MODALITY_CAVEAT
+    return out
+
+BY_KIND_CAVEAT = ("kinds are different material by construction — a procedure node and a "
+                  "concept node differ in content, difficulty, and grading format, so this "
+                  "comparison carries the material along with the kind and is never a causal "
+                  "claim. It exists as the instrument for an open question (docs/11 §7.3: "
+                  "does the forgetting model fit skills as well as declarative memory?), "
+                  "and pre-v1.1 receipts carry no kind stamp — they count as concept, which "
+                  "is what every pre-v1.1 grading event actually was.")
+
+def compute_by_kind(receipts):
+    """Retention telemetry split by knowledge kind (v1.1, docs/11 P17; the compute_modality
+    mold, deliberately: same population (_review_receipts), same one-datum-per-node
+    first-review rule, same _outcome predicate, same floor — so the engine's numbers agree
+    with each other by construction (RELEASE_PROTOCOL §4.8 Q1).
+
+    The `read` compares PROCEDURE vs CONCEPT only: `fact` is reported but never versus'd
+    (three-way reads invite invented metrics), and the caveat ships inside the payload.
+
+    `procedure_slip_share` rides along: of procedure-node gradings that carried an
+    error_class, what fraction were slips? Its denominator is N_CLASSIFIED — receipts the
+    grader actually classified — never all procedure receipts, and it says so by name."""
+    first = {}
+    for r in _review_receipts(receipts):
+        d = safe_date(r.get("ts"))
+        if d is None:
+            continue
+        topic, node = r.get("topic"), r.get("node")
+        if not isinstance(topic, str) or not isinstance(node, str):
+            continue
+        key = (topic, node)
+        if key not in first or d < first[key][0]:
+            first[key] = (d, r)
+    arms = {k: [0.0, 0] for k in NODE_KINDS}
+    for _d, r in first.values():
+        o = _outcome(r)
+        if o is None:
+            continue
+        nk = r.get("node_kind")
+        if nk not in NODE_KINDS:
+            # Pre-v1.1 receipts carry no stamp. Every pre-v1.1 grading WAS a concept-style
+            # free-recall event (procedure nodes did not exist), so `concept` is the truthful
+            # label of the EVENT — not a guess about the content. The caveat says so.
+            nk = "concept"
+        arms[nk][1] += 1
+        arms[nk][0] += o
+    out = {k: {"first_review_recall": (round(ok / n, 3) if n else None), "n": n}
+           for k, (ok, n) in arms.items()}
+    pr, co = out["procedure"], out["concept"]
+    if pr["n"] >= MODALITY_MIN_N and co["n"] >= MODALITY_MIN_N:
+        diff = pr["first_review_recall"] - co["first_review_recall"]
+        out["read"] = ("procedure-encoded ahead" if diff > 0.10 else
+                       "procedure-encoded behind" if diff < -0.10 else
+                       "indistinguishable")
+    else:
+        out["read"] = "insufficient-data"
+    out["min_n"] = MODALITY_MIN_N
+    # The slip split is REVIEW telemetry (docs/12 WO-3: "among procedure-node review
+    # receipts that carry error_class") — encode-stage misses, where the method is still
+    # forming, would bias the share toward "slip", which is precisely this number's
+    # flattering direction. The first cut iterated every receipt kind; caught by the
+    # pre-release adversarial review, fixture made to diverge (§4.5).
+    slips = classified = 0
+    for r in _review_receipts(receipts):
+        if r.get("node_kind") != "procedure":
+            continue
+        ec = r.get("error_class")
+        if ec in ERROR_CLASSES:
+            classified += 1
+            slips += 1 if ec == "slip" else 0
+    out["procedure_slip_share"] = {
+        "share": (round(slips / classified, 3) if classified else None),
+        "n_classified": classified,
+    }
+    out["caveat"] = BY_KIND_CAVEAT
     return out
 
 # ------------------------------------------------- adherence & retention (v0.6)
@@ -2222,7 +2381,7 @@ PARADOX_RETEST = 0.95   # above this consistency, leniency must be strictly unde
 # #5 (the assessor is blind) applied to the audit itself — and RELEASE_PROTOCOL §5.5's
 # hardest lesson: a test that hands the subject the answer is not a test.
 GOLD_ASSESSOR_KEYS = ("topic", "node", "sid", "claim", "rubric", "probe",
-                      "production", "confidence", "kind")
+                      "production", "confidence", "kind", "node_kind")
 # Everything the assessor must never see. The whitelist above already makes that structural;
 # this list is what the BLINDNESS selftest asserts is absent.
 GOLD_SECRET_KEYS = ("gold_grade", "case_type", "rationale")
@@ -2354,7 +2513,12 @@ def cmd_gold(_args):
         sys.stderr.write("engram: %d malformed gold item(s) skipped\n" % meta["skipped"])
     if meta["modified"]:
         sys.stderr.write("engram: ground truth is %s\n" % meta["source"])
-    emit([{k: it.get(k) for k in GOLD_ASSESSOR_KEYS} for it in items])
+    # `node_kind` (v1.1) rides only where it exists — a real stash carries the key on
+    # procedure entries and OMITS it on concept ones, and the audit payload must be
+    # indistinguishable from a real settle. `confidence` stays even when null (null
+    # confidence is legitimate data the assessor must pass through untouched).
+    emit([{k: it.get(k) for k in GOLD_ASSESSOR_KEYS
+           if k != "node_kind" or it.get(k) is not None} for it in items])
 
 def _qwk(pairs):
     """Quadratic weighted kappa over (gold, grader) grade pairs. None if undefined.
@@ -3385,6 +3549,9 @@ def compute_stats():
         "streak_days": compute_streak(receipts),
         "momentum": compute_momentum(receipts),
         "modality": compute_modality(receipts),
+        # v1.1: retention split by knowledge kind (concept/procedure/fact), the instrument
+        # for docs/11 §7.3. Same predicates as modality; caveat ships inside the payload.
+        "by_kind": compute_by_kind(receipts),
         "due_now": len(due_items()),
         "pending_verify": len(read_jsonl(p(STASH_FILE))),
         "topics": topics,
@@ -3759,10 +3926,13 @@ EXPORT_STRIPPED = ("production", "probe", "claim", "rubric", "goal", "interests"
 EXPORT_RECEIPT_KEYS = ("topic_hash", "node_hash", "kind", "grade", "rating", "confidence",
                        "days_since_encode", "s_before", "s_after", "interval_days",
                        "retrievability", "artifact", "arm_hash", "stratum_hash",
-                       "grader_hash", "grader_qwk")
-# `kind`/`grade`/`rating` are the only strings that leave un-hashed, because each is a CLOSED ENUM
-# the engine validates — not free text. Anything a human authored is hashed.
-_EXPORT_ENUM = {"kind": KINDS, "grade": GRADES, "rating": tuple(RATINGS)}
+                       "grader_hash", "grader_qwk", "node_kind", "error_class")
+# `kind`/`grade`/`rating`/`node_kind`/`error_class` are the only strings that leave un-hashed,
+# because each is a CLOSED ENUM the engine validates — not free text. Anything a human
+# authored is hashed. (`node_kind` and `error_class` are stamped by the engine itself from
+# validated enums — v1.1; they are exactly the fields a retention-of-skills finding needs.)
+_EXPORT_ENUM = {"kind": KINDS, "grade": GRADES, "rating": tuple(RATINGS),
+                "node_kind": NODE_KINDS, "error_class": ERROR_CLASSES}
 
 def _hash12(s):
     """A stable 12-hex-char digest. Groups a learner's own receipts and lets the corpus compare
@@ -3831,6 +4001,10 @@ def cmd_export(args):
                 "grader_hash": (_hash12("grader|" + r["grader"])
                                 if isinstance(r.get("grader"), str) and r["grader"] else None),
                 "grader_qwk": qwk,          # a receipt carries its oracle's MEASURED validity
+                "node_kind": (r.get("node_kind")
+                              if r.get("node_kind") in _EXPORT_ENUM["node_kind"] else None),
+                "error_class": (r.get("error_class")
+                                if r.get("error_class") in _EXPORT_ENUM["error_class"] else None),
             }
             out.append({k: rec[k] for k in EXPORT_RECEIPT_KEYS})
 
@@ -4220,6 +4394,52 @@ def cmd_report(args):
                      "(explorable-encoded: %d, dialogue: %d so far) — the honest verdict "
                      "appears when both sides have history.</p>"
                      % (mod["min_n"], mod["explorable"]["n"], mod["dialogue"]["n"]))
+
+    # v1.1 (docs/11): knowledge-kind split, rendered in the modality section's mold — which
+    # means the FLOOR is the modality floor: percentage bars render only when the compared
+    # arms both clear MODALITY_MIN_N (`read` != insufficient-data). The first cut rendered
+    # a full-width 100% bar off a single first-review — an unearned optimistic rate on the
+    # one surface a human actually looks at (§4.8 Q2, release-blocking direction; caught by
+    # the pre-release adversarial review). Below the floor: honest counts, no rates. The
+    # caveat must reach this page either way (§4.8 Q4).
+    bk = stats["by_kind"]
+    kind_arms = [(k, bk[k]) for k in NODE_KINDS
+                 if isinstance(bk.get(k), dict) and bk[k].get("n")]
+    if kind_arms:
+        parts.append("<h2>Knowledge kinds</h2>")
+        slip = bk.get("procedure_slip_share") or {}
+        slip_line = ""
+        # Quote the slip PERCENTAGE only at a real n; below the floor, counts are facts
+        # and rates are noise ("100% were slips" off n=1 is the flattering read).
+        if (slip.get("n_classified") or 0) >= SLIP_SHARE_MIN_N:
+            slip_line = (" Of the %d classified procedure-review errors, %d%% were "
+                         "execution slips rather than wrong method — a slip is priced "
+                         "gentler (partial/hard), because a transcription error is not a "
+                         "memory lapse." % (slip["n_classified"],
+                                            int((slip.get("share") or 0) * 100)))
+        elif slip.get("n_classified"):
+            slip_line = (" %d procedure-review error(s) classified so far — counts, not "
+                         "rates, until there are at least %d."
+                         % (slip["n_classified"], SLIP_SHARE_MIN_N))
+        if bk["read"] != "insufficient-data":
+            for k, v in kind_arms:
+                parts.append("<div class='hbar'><span class='lab mono'>%s</span>"
+                             "<span class='track'><span class='fill' style='width:%d%%'></span></span>"
+                             "<span class='val'>%d%% first-review recall · n=%d</span></div>"
+                             % (escape(k), int(v["first_review_recall"] * 100),
+                                int(v["first_review_recall"] * 100), v["n"]))
+            parts.append("<p class='note'>%s — recall split by what each node IS (concept / "
+                         "procedure / fact), from your own receipts.%s <b>Read it carefully:"
+                         "</b> %s</p>"
+                         % (escape(bk["read"]), escape(slip_line), escape(bk["caveat"])))
+        else:
+            counts = " · ".join("%s: %d" % (k, v["n"]) for k, v in kind_arms)
+            parts.append("<p class='note'>Splitting recall by knowledge kind needs ≥%d "
+                         "first-reviews in both compared kinds (%s so far) — the honest "
+                         "verdict appears when both sides have history.%s "
+                         "<b>Read it carefully:</b> %s</p>"
+                         % (bk["min_n"], escape(counts), escape(slip_line),
+                            escape(bk["caveat"])))
 
     mis = _open_misconceptions()
     if mis:
@@ -5992,7 +6212,8 @@ def cmd_selftest(_args):
                 # the override actually took effect (so the flag is not decorative)…
                 and next(g["gold_grade"] for g in items if g["sid"] == "g_001") == "recalled"
                 # …and the blindness whitelist still holds for the local items
-                and all(set(it) == set(GOLD_ASSESSOR_KEYS)
+                # (node_kind is optional-per-item since v1.1: subset, never beyond)
+                and all(set(it) <= set(GOLD_ASSESSOR_KEYS)
                         for it in _capture_json(cmd_gold, _ns())))
     check("a local gold set that RE-ADJUDICATES the answer is recorded, never passed off as bundled",
           fresh(_local_gold_cannot_certify_silently))
@@ -6209,7 +6430,10 @@ def cmd_selftest(_args):
         items = _capture_json(cmd_gold, _ns())
         gold, _ = load_gold()
         blob = json.dumps(items)
-        keys_exact = all(set(it) == set(GOLD_ASSESSOR_KEYS) for it in items)
+        # subset per item (node_kind rides only on procedure items since v1.1), union
+        # exactly the whitelist — nothing beyond it may ever appear
+        keys_exact = (all(set(it) <= set(GOLD_ASSESSOR_KEYS) for it in items)
+                      and set().union(*(set(it) for it in items)) == set(GOLD_ASSESSOR_KEYS))
         no_secret_key = all(k not in blob for k in GOLD_SECRET_KEYS)
         # property-based: not one rationale or case_type VALUE may survive into the payload
         no_values = (all(g["rationale"] not in blob for g in gold)
@@ -6223,13 +6447,22 @@ def cmd_selftest(_args):
         _add_ab()
         _capture(cmd_stash, _ns(action="add", json=json.dumps([{
             "topic": "t", "node": "a", "claim": "c", "rubric": ["r"], "probe": "p",
-            "production": "prod", "confidence": 60, "kind": "encode"}]), file=None))
+            "production": "prod", "confidence": 60, "kind": "encode",
+            "node_kind": "procedure"}]), file=None))
         stashed = _capture_json(cmd_stash, _ns(action="list", json=None, file=None))
         gold_items = _capture_json(cmd_gold, _ns())
-        # both are BARE ARRAYS, and every field the assessor reads is present in both
+        # both are BARE ARRAYS; every gold key is a stash-shape key; `node_kind` appears
+        # exactly where a real stash would carry it (procedure items) and is ABSENT, not
+        # null, elsewhere — the payload must be indistinguishable from a real settle
+        concept_like = [it for it in gold_items if "node_kind" not in it]
+        proc_like = [it for it in gold_items if it.get("node_kind") == "procedure"]
         return (isinstance(stashed, list) and isinstance(gold_items, list)
                 and set(GOLD_ASSESSOR_KEYS) <= set(stashed[0])
-                and set(GOLD_ASSESSOR_KEYS) == set(gold_items[0]))
+                and all(set(it) <= set(GOLD_ASSESSOR_KEYS) for it in gold_items)
+                and set().union(*(set(it) for it in gold_items)) == set(GOLD_ASSESSOR_KEYS)
+                and concept_like and proc_like
+                and all(it["node_kind"] == "procedure" for it in gold_items
+                        if "node_kind" in it))
     check("`gold` is shaped exactly like `stash list` (the audit grades the REAL assessor)",
           fresh(_gold_matches_stash_shape))
 
@@ -7048,12 +7281,20 @@ def cmd_selftest(_args):
                       # an UNHASHABLE state: `st not in STATE_DOTS` raises TypeError and took
                       # the dashboard down. state_counts() was guarded; cmd_report was not.
                       "e": {"claim": "c", "probe": "p", "state": {}, "fsrs": {}},
-                      "f": {"claim": "c", "probe": "p", "state": ["x"], "fsrs": {}}}})
+                      "f": {"claim": "c", "probe": "p", "state": ["x"], "fsrs": {}},
+                      # v1.1 garbage: unhashable kind, non-dict practice — node_kind_of and
+                      # the due/report paths must degrade, never brick
+                      "g": {"claim": "c", "probe": "p", "state": "review", "fsrs": {},
+                            "kind": {"un": "hashable"}, "practice": 42},
+                      "h2": {"claim": "c", "probe": "p", "state": "review", "fsrs": {},
+                             "kind": ["procedure"], "practice": ["x"]}}})
         write_json(p("graphs", "worse.json"), {"topic": "worse", "nodes": "not-an-object"})
         with open(p("receipts", "bad.jsonl"), "w", encoding="utf-8") as f:
             f.write(json.dumps({"ts": 20260701, "topic": {"x": 1}, "node": ["y"],
                                 "kind": "review", "rating": {"bad": 1}, "grade": ["worse"],
-                                "s_before": "NaN", "sid": []}) + "\n")
+                                "s_before": "NaN", "sid": [],
+                                "node_kind": {"un": "hashable"},
+                                "error_class": ["slip"]}) + "\n")
             f.write("THIS LINE IS NOT JSON\n")
             f.write(json.dumps({"ts": "2026-07-01", "topic": "bad", "node": "a",
                                 "kind": "review", "rating": "good"}) + "\n")
@@ -7571,6 +7812,249 @@ def cmd_selftest(_args):
                "nodes": {"a": "just a string"}})))
               and not os.path.exists(os.path.join(h, "graphs", "t.json"))))
 
+    # ============== v1.1 · the procedure layer (docs/11, docs/12) ==============
+    def _add_kinds(replace=False):
+        g = {"topic": "k", "title": "K", "order": ["c1", "p1", "f1"], "nodes": {
+            "c1": {"claim": "C", "probe": "pc"},
+            "p1": {"claim": "P", "probe": "compute 12*17 via distribution",
+                   "kind": "procedure",
+                   "rubric": ["setup: splits 17 into 10+7",
+                              "execution: both partial products correct",
+                              "verification: recombines and sanity-checks magnitude"],
+                   "practice": {"problem_frame": "two-digit by two-digit product via "
+                                                 "distribution; operands stay in 11-19",
+                                "verify": "multiply directly and compare",
+                                "error_bank": [{"error": "adds the tens partials",
+                                                "misconception": "place-value collapse"}]},
+                   "edges": {"requires": ["c1"]}},
+            "f1": {"claim": "F", "probe": "pf", "arbitrary": True}}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g), replace=replace))
+
+    check("node_kind_of: explicit kind wins, arbitrary=fact, default+garbage=concept",
+          node_kind_of({"kind": "procedure"}) == "procedure"
+          and node_kind_of({"kind": "procedure", "arbitrary": True}) == "procedure"
+          and node_kind_of({"arbitrary": True}) == "fact"
+          and node_kind_of({}) == "concept"
+          and node_kind_of({"kind": "PROCEDURE"}) == "concept"
+          and node_kind_of("junk") == "concept"
+          and node_kind_of(None) == "concept")
+
+    # -- add-topic: valid kind+practice kept; unknown kind dropped; non-object practice
+    #    dropped; procedure without problem_frame warned — all with warnings, never fatal --
+    def _kind_validation(h):
+        g = {"topic": "t", "title": "T", "order": ["a", "b", "c"], "nodes": {
+            "a": {"claim": "A", "probe": "pa", "kind": "procedure",
+                  "practice": {"problem_frame": "vary the operands"}},
+            "b": {"claim": "B", "probe": "pb", "kind": "quiz"},
+            "c": {"claim": "C", "probe": "pc", "kind": "procedure",
+                  "practice": "just drill it"}}}
+        out = json.loads(_capture(cmd_add_topic, _ns(json=json.dumps(g))))
+        saved = load_graph("t")["nodes"]
+        return (saved["a"]["kind"] == "procedure"
+                and saved["a"]["practice"]["problem_frame"] == "vary the operands"
+                and "kind" not in saved["b"]
+                and saved["c"]["practice"] is None
+                and any("unknown kind" in w for w in out["warnings"])
+                and any("practice block is not an object" in w for w in out["warnings"])
+                and any("without practice.problem_frame" in w for w in out["warnings"]))
+    check("add-topic validates kind + practice like viz (warn+drop, never die)",
+          fresh(_kind_validation))
+
+    # -- due payload: node_kind + practice ride along; kindless stays concept/None
+    #    (byte-compatible v1.0.8 behavior) --
+    def _due_kinds(h):
+        _add_kinds()
+        for n in ("c1", "p1", "f1"):
+            _capture(cmd_rate, _ns(topic="k", node=n, rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-09-01"
+        d = {i["id"]: i for i in due_items()}
+        return (d["p1"]["node_kind"] == "procedure"
+                and d["p1"]["practice"]["problem_frame"].startswith("two-digit")
+                and d["c1"]["node_kind"] == "concept" and d["c1"]["practice"] is None
+                and d["f1"]["node_kind"] == "fact")
+    check("due payload carries node_kind + practice (concept/None when undeclared)",
+          fresh(_due_kinds))
+
+    # -- the node_kind STAMP: written at grading time, immune to later reclassification --
+    def _kind_stamp(h):
+        _add_kinds()
+        _capture(cmd_rate, _ns(topic="k", node="p1", rating="good", kind="encode"))
+        r1 = read_jsonl(p("receipts", "k.jsonl"))[-1]
+        g = load_graph("k")
+        g["nodes"]["p1"].pop("kind", None)
+        save_graph(g)
+        _capture(cmd_rate, _ns(topic="k", node="p1", rating="good", kind="review"))
+        r2 = read_jsonl(p("receipts", "k.jsonl"))[-1]
+        return r1.get("node_kind") == "procedure" and r2.get("node_kind") == "concept"
+    check("receipts stamp node_kind at grading time (old evidence keeps its kind)",
+          fresh(_kind_stamp))
+
+    # -- error_class: valid value flows rate -> receipt; absent stays absent;
+    #    a typo dies before any write (append-only receipts, §4.8 Q5) --
+    def _error_class_flow(h):
+        _add_kinds()
+        _capture(cmd_rate, _ns(topic="k", node="p1", rating="hard", grade="partial",
+                               kind="encode", error_class="slip"))
+        r1 = read_jsonl(p("receipts", "k.jsonl"))[-1]
+        _capture(cmd_rate, _ns(topic="k", node="c1", rating="good", kind="encode"))
+        r2 = read_jsonl(p("receipts", "k.jsonl"))[-1]
+        return r1.get("error_class") == "slip" and "error_class" not in r2
+    check("error_class flows to the receipt and absence stays absent", fresh(_error_class_flow))
+    def _error_class_typo(h):
+        _add_kinds()
+        bad = [{"topic": "k", "node": "c1", "rating": "good", "error_class": "typo"}]
+        died = raises(cmd_receipt, _ns(json=json.dumps(bad)))
+        return died and not os.path.exists(p("receipts", "k.jsonl"))
+    check("error_class typo dies in the pre-flight before any receipt is written",
+          fresh(_error_class_typo))
+
+    # -- by_kind: hand-computed split, first-review-only, floor, slip-share denominator --
+    def _by_kind_math(h):
+        _add_kinds()
+        # the ENCODE carries an error_class too — it must NOT count toward slip share
+        # (review-receipts population only; §4.5: the fixture diverges old vs new)
+        _capture(cmd_rate, _ns(topic="k", node="p1", rating="hard", grade="partial",
+                               kind="encode", error_class="slip"))
+        for n in ("c1", "f1"):
+            _capture(cmd_rate, _ns(topic="k", node=n, rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-20"
+        _capture(cmd_rate, _ns(topic="k", node="c1", rating="good", kind="review"))
+        _capture(cmd_rate, _ns(topic="k", node="p1", rating="again", grade="lapsed",
+                               kind="review", error_class="conceptual"))
+        # p1's SECOND review must not move its first-review number; its error_class counts
+        _capture(cmd_rate, _ns(topic="k", node="p1", rating="hard", grade="partial",
+                               kind="review", error_class="slip"))
+        bk = _capture_json(cmd_stats, _ns())["by_kind"]
+        return (bk["concept"]["first_review_recall"] == 1.0 and bk["concept"]["n"] == 1
+                and bk["procedure"]["first_review_recall"] == 0.0
+                and bk["procedure"]["n"] == 1
+                and bk["fact"]["n"] == 0 and bk["fact"]["first_review_recall"] is None
+                and bk["read"] == "insufficient-data"     # floor is MODALITY_MIN_N
+                and bk["min_n"] == MODALITY_MIN_N
+                and bk["procedure_slip_share"]["n_classified"] == 2   # reviews only
+                and bk["procedure_slip_share"]["share"] == 0.5
+                and "different material" in bk["caveat"])
+    check("by_kind: hand-computed recall split, honest floor, review-only slip denominator",
+          fresh(_by_kind_math))
+
+    # -- pre-v1.1 receipts (no stamp) count as concept — the truthful label of the EVENT --
+    def _by_kind_prestamp(h):
+        _add_kinds()
+        _capture(cmd_rate, _ns(topic="k", node="p1", rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-20"
+        _capture(cmd_rate, _ns(topic="k", node="p1", rating="good", kind="review"))
+        path = p("receipts", "k.jsonl")
+        rs = read_jsonl(path)
+        for r in rs:
+            r.pop("node_kind", None)
+        os.remove(path)
+        for r in rs:
+            append_jsonl(path, r)
+        _RECEIPTS_CACHE.clear()
+        bk = _capture_json(cmd_stats, _ns())["by_kind"]
+        return bk["concept"]["n"] == 1 and bk["procedure"]["n"] == 0
+    check("unstamped (pre-v1.1) receipts bucket as concept, never invented as procedure",
+          fresh(_by_kind_prestamp))
+
+    # -- the dashboard's kinds section: BELOW the floor it shows counts and the caveat but
+    #    NEVER a rate bar (a 100% bar off n=1 is an unearned optimistic rate — §4.8 Q2;
+    #    caught by the pre-release review), and the slip line quotes counts, not a percent --
+    def _report_kinds_subfloor(h):
+        _add_kinds()
+        _capture(cmd_rate, _ns(topic="k", node="p1", rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-20"
+        _capture(cmd_rate, _ns(topic="k", node="p1", rating="hard", grade="partial",
+                               kind="review", error_class="slip"))
+        out = _capture_json(cmd_report, _ns())
+        with open(out["path"], encoding="utf-8") as f:
+            html = f.read()
+        return ("Knowledge kinds" in html and "different material" in html
+                and "first-review recall" not in html        # no rate bar below the floor
+                and "counts, not rates" in html              # slip n=1: never a percent
+                and "execution slips" not in html)
+    check("dashboard by_kind below floor: counts + caveat, no rate bar, no slip percent",
+          fresh(_report_kinds_subfloor))
+    def _report_kinds_at_floor(h):
+        # 15 concept + 15 procedure nodes, one encode + one review each -> both arms at the
+        # floor; 5 classified procedure reviews -> the slip percentage may speak
+        nodes = {}
+        order = []
+        for i in range(MODALITY_MIN_N):
+            for kind in ("concept", "procedure"):
+                nid = "%s%d" % (kind[0], i)
+                order.append(nid)
+                node = {"claim": "C", "probe": "p"}
+                if kind == "procedure":
+                    node["kind"] = "procedure"
+                    node["practice"] = {"problem_frame": "vary the values"}
+                nodes[nid] = node
+        g = {"topic": "big", "title": "B", "order": order, "nodes": nodes}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        for nid in order:
+            _capture(cmd_rate, _ns(topic="big", node=nid, rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-20"
+        for nid in order:
+            _capture(cmd_rate, _ns(topic="big", node=nid, rating="good", kind="review",
+                                   grade="recalled",
+                                   error_class=("slip" if nid in ("p0", "p1", "p2", "p3")
+                                                else ("conceptual" if nid == "p4" else None))))
+        bk = _capture_json(cmd_stats, _ns())["by_kind"]
+        out = _capture_json(cmd_report, _ns())
+        with open(out["path"], encoding="utf-8") as f:
+            html = f.read()
+        return (bk["read"] == "indistinguishable"
+                and bk["procedure_slip_share"]["n_classified"] == 5
+                and "first-review recall" in html            # bars render at the floor
+                and "execution slips" in html                # percentage may speak at n>=5
+                and "different material" in html)
+    check("dashboard by_kind at floor: bars + slip percent render, read computed",
+          fresh(_report_kinds_at_floor))
+    def _report_no_kinds(h):
+        _add_ab()
+        out = _capture_json(cmd_report, _ns())
+        with open(out["path"], encoding="utf-8") as f:
+            html = f.read()
+        return "Knowledge kinds" not in html
+    check("dashboard omits the kinds section when no kind has evidence", fresh(_report_no_kinds))
+
+    # -- export: node_kind/error_class leave as validated enums; garbage leaves as null --
+    def _export_kinds(h):
+        _add_kinds()
+        _capture(cmd_rate, _ns(topic="k", node="p1", rating="hard", grade="partial",
+                               kind="encode", error_class="slip"))
+        _capture(cmd_rate, _ns(topic="k", node="c1", rating="good", kind="encode"))
+        path = p("receipts", "k.jsonl")
+        rs = read_jsonl(path)
+        rs[-1]["node_kind"] = "PROCEDURE!"          # hand-edited garbage must not ride out
+        rs[-1]["error_class"] = ["slip"]
+        os.remove(path)
+        for r in rs:
+            append_jsonl(path, r)
+        _RECEIPTS_CACHE.clear()
+        out = _capture_json(cmd_export, _ns(contributor="@t", allow_unvalidated=True))
+        recs = read_json(out["path"])["receipts"]
+        return (recs[0]["node_kind"] == "procedure" and recs[0]["error_class"] == "slip"
+                and recs[1]["node_kind"] is None and recs[1]["error_class"] is None)
+    check("export carries node_kind/error_class as closed enums, nulls garbage",
+          fresh(_export_kinds))
+
+    # -- read_jsonl gates out valid-JSON-NON-OBJECT lines (a bare `5` in receipts bricked
+    #    every aggregate read since v0.1; found by the v1.1.0 fuzz) --
+    def _jsonl_non_object_lines(h):
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="encode"))
+        path = p("receipts", "t.jsonl")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("5\ntrue\n[1,2]\n\"just a string\"\n")
+        _RECEIPTS_CACHE.clear()
+        s = _capture_json(cmd_stats, _ns())          # must not raise
+        _capture_json(cmd_due, _ns())
+        _capture(cmd_session_start, _ns())           # human-line output, not JSON
+        kept = read_jsonl(path)
+        return s["receipts"] == 1 and len(kept) == 1 and all(isinstance(r, dict) for r in kept)
+    check("read_jsonl drops valid-JSON non-object lines (reads degrade, never brick)",
+          fresh(_jsonl_non_object_lines))
+
     print("\n%d/%d checks passed" % (total[0] - len(failures), total[0]))
     sys.exit(1 if failures else 0)
 
@@ -7655,6 +8139,9 @@ def main():
     sp.add_argument("--grade", choices=GRADES); sp.add_argument("--probe")
     sp.add_argument("--source", default="self")
     sp.add_argument("--kind", default="review", choices=KINDS)
+    # v1.1: slip vs conceptual on a graded production. choices= so a typo dies in argparse,
+    # before validate_item even runs — receipts are append-only (§4.8 Q5).
+    sp.add_argument("--error-class", dest="error_class", choices=ERROR_CLASSES)
 
     sp = sub.add_parser("receipt")
     sp.add_argument("--json"); sp.add_argument("--file")

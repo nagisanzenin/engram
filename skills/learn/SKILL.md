@@ -66,7 +66,7 @@ python3 "$ENGRAM" stash count   # productions left ungraded by a previous sessio
 
 Take the first **3** nodes of `order` (more feels like an exam, not a diagnostic). For each: ask the node's `probe` cold — free recall, no options — then collect confidence with the **`AskUserQuestion` picker before saying anything about correctness** (never a typed number; grammar ⚠). Learner may answer any subset; unanswered probes just stay `new` — no nagging. Then:
 
-- Solid answer → `rate --rating easy --kind pretest --grade recalled --confidence <c-or-omit> --production "<their words>"` (schedules it far out; it's known).
+- Solid answer → write their words to a temp file, then `rate --rating easy --kind pretest --grade recalled --confidence <c-or-omit> --production-file <tmpfile>` (schedules it far out; it's known). Never inline their answer into the command — the shell-safety rule applies to pretests too.
 - Miss → leave it `new`, and say so without judgment — verbatim spirit: *"Good — a wrong guess before learning measurably improves what sticks next (the pretesting effect). That's now a scheduled destination, not a failure."*
 
 ## 3 · Encode nodes (the heart)
@@ -79,6 +79,8 @@ python3 "$ENGRAM" next --topic <topic>
 
 Run the **dialogue grammar** beats 1–8 on the returned node (gap → predict → struggle → resolve → self-explain → connect → verify → close), with a one-line progress marker between nodes (`node 2/3 · residual-stream †`). Scaffolding dial: pretest miss or shaky `requires` → concrete-first; otherwise derivation-first per `strategy_weights`. `arbitrary: true` → mnemonic + retrieval, no derivation theater.
 
+**If the node carries `kind: "procedure"`** (a skill executed on instances — declared by the architect, any domain): Read `skills/_shared/problem-grammar.md` and run its **ladder** in place of beats 2–4 — worked example → completion → faded → cold solve, rung from the same scaffolding signals — and VERIFY becomes a fresh-instance solve (answer key computed by execution, never inspection). Beats 1 and 5–8, confidence integrity, and the stash flow are unchanged; the stash entry's `rubric` is the node's step rubric as authored. Concept and fact nodes: nothing changes.
+
 **Fire the mentor register at its moments** (grammar file, Pillar 14): when they hit real difficulty inside the struggle budget, name struggle as encoding and hold the budget (don't rescue early); if motivation visibly sags, *elicit* the goal-link ("where does this touch what you're building?") rather than preach relevance. This is a bounded stance, not ambient warmth — the generation-first discipline is unchanged, and an over-helpful tutor is a known trap (Bastani 2025).
 
 **At VERIFY, run the confidence pick first (the Confidence step below), then stash immediately — do not rate, do not wait.** (The pick's value is a field in the stash entry, so it must precede the stash.) Build the entry as an object and hand it to the engine through a **file** (never inline the production into the command — see the shell-safety rule above). Write it with the Write tool, then:
@@ -88,6 +90,8 @@ python3 "$ENGRAM" stash add --file <tmpfile.json>
 # tmpfile.json = {"topic":"<t>","node":"<id>","probe":"<probe>",
 #   "production":"<their words, verbatim; note omissions factually>",
 #   "confidence":<n or null>,"claim":"<node claim>","rubric":[...],"kind":"encode"}
+# On a procedure node, add "node_kind":"procedure" (and the probe is the fresh
+# instance you served) — it tells the assessor to step-grade and classify errors.
 # The engine mints a `sid` on every stash entry. It MUST survive the round-trip to the
 # receipt (see step 4) — it is what makes the settle idempotent (issue #3).
 ```

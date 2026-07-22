@@ -66,7 +66,7 @@ Codex's default `workspace-write` sandbox restricts writes to the current worksp
 ## Verify the install
 
 ```bash
-python3 scripts/engram.py selftest     # 217/217 checks — same engine on every agent
+python3 scripts/engram.py selftest     # 230/230 checks — same engine on every agent
 python3 scripts/engram.py doctor       # state + environment diagnostics
 ```
 

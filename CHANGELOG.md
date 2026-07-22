@@ -1,5 +1,81 @@
 # Changelog
 
+## 1.1.0 — 2026-07-22 · The procedure layer — practice what must be performed
+
+Engram could teach *why* and could not teach *doing*. Every node was a declarative claim,
+every probe verbal free recall, every receipt graded prose — which converts "differentiate
+this" into "recite how differentiation works," and the transfer literature prices that
+conversion at half the effect or, without elaborated feedback, near zero (Pan & Rickard
+2018: congruent d = 0.58, incongruent 0.28, neither-condition ≈ 0 bias-adjusted). v1.1
+adds the third knowledge kind. **Engram stays a general learn-anything system** — the kind
+is declared per node by the content (a `procedure` is a git workflow or a conjugation as
+readily as an integral); there is no math mode, and a topic with zero procedure nodes
+behaves exactly as on v1.0.8 — same schedule, same grades, same flow. (Precisely, not
+byte-identically: new receipts carry a `node_kind` stamp, `due` gains two additive keys,
+`stats` gains `by_kind` — additions old code paths never read.)
+
+**Theory (docs/11 + docs/12).** Two new pillars, adversarially verified before code: three
+independent refute-first passes over the acquisition, retention, and grading literature
+(ten full-text reads) **corrected five claims, deflated two effect sizes to their adult
+magnitudes, and inverted one design rule** — the honest parts are in docs/11 §Method,
+including the ones that made the first draft wrong: interleaved-math d = 0.83 is a
+7th-grade number (adults: g ≈ 0.3–0.4); "always serve fresh isomorphs" was backwards
+(retention lives in *algorithmic variants* — new values, same structure; re-clothed
+isomorphs stay with `transfer_probe`); and the erroneous-example novice gate did not
+survive its replication literature (rewritten: after instruction, always scaffolded, never
+a default).
+
+**Engine (`scripts/engram.py`, all additive, zero migration).** Node `kind`
+(`concept|procedure|fact`) + `practice` blocks stored under the `viz` opaque-metadata
+covenant with warn-don't-die validation; `node_kind` stamped on receipts at grading time
+(the `artifact`-stamp discipline); `error_class` (`conceptual|slip`) validated at ingest,
+carried on receipts, `rate --error-class`; `due` payload carries `node_kind` + `practice`;
+`stats.by_kind` (first-review recall per kind, the modality mold: same predicates, honest
+floor, confound caveat *inside the payload*, slip share with its own `n_classified`
+denominator); dashboard "Knowledge kinds" section (the caveat reaches the page); export
+gains `node_kind`/`error_class` as closed enums. Selftest 217 → **230**, every new check
+mutation-tested (11/11 fail when their fix is reverted).
+
+**Behavior (skills + agents).** New `skills/_shared/problem-grammar.md`: the worked-example
+ladder (study → complete → faded → cold solve, faded step = the principle-bearing one,
+pace from measured state), fresh algorithmic variants with **answer keys computed by
+execution — never inspection** (generated-problem pipelines carry a measured ~3–5%
+wrong-key rate even with execution checks), the discrimination beat (confusable
+`discriminates_from` siblings served adjacently — juxtaposition carries the interleaving
+effect: g 0.73 adjacent vs 0.22 scattered), slip ≠ lapse pricing, and the scaffolded
+erroneous-example rung. The architect declares kinds + practice frames and seeds error
+banks from documented misconception catalogs (FCI, DIRECT, CAOS/SCI, natural-number bias,
+progmiscon.org). The assessor gains the execution duty and `error_class`, with
+right-answer-wrong-method capped at `partial` — the step-graded LLM literature is bimodal,
+and reference-plus-engineered-rubric is the configuration that reaches human parity.
+
+**The grader is measured on solutions before its solution verdicts count — and the
+measurement bit back.** The gold set grows 66 → **86** (20 adversarial procedure items:
+right-answer-wrong-method, slip-vs-conceptual both directions, fluent-wrong-step,
+terse-but-correct-solution, alternate-valid-method, clean/lapsed/boundary anchors — every
+number verified by execution at authoring time).
+
+Extending the set falsified the badge. **v0.7's "0 of 198 · it has never once inflated a
+grade" did not survive**: three audits over **774 judgments** caught **3 real inflations**,
+and both root causes were ambiguities in the grader's *own instructions* —
+
+- `cap at partial` was read as an instruction to **award** partial rather than to limit it
+  (one run wrote "MISSED" against all three criteria and then graded `partial`);
+- the right-answer-wrong-method tiebreak **this release introduced** generalized into a
+  universal criteria-counting rule that overrode `lapsed = core absent or wrong`.
+
+Both are closed; the shipping spec measures **0 inflations in 258 judgments**, and the badge
+now reads `0/258` with that history stated rather than hidden. Every fix made the grader
+*stricter*, so agreement with the author fell as safety rose (QWK 0.983 → 0.964) — and the
+two categories where all three runs now disagree with the author are **left contested on
+purpose**, because three rounds of conceding to your own instrument is not adjudication.
+Full account: [`docs/release-audits/v1.1.0-grader-audit.md`](docs/release-audits/v1.1.0-grader-audit.md).
+
+**Still honestly open** (docs/11 §7): FSRS has no published validation on procedural skill
+(DAS3H is the citable precedent; `by_kind` is the per-learner instrument); slip pricing is
+a labeled engineering inference, now n-of-1-testable; nobody anywhere has published a
+delayed-retention math-tutoring RCT — the Commons question extends to procedures.
+
 ## 1.0.8 — 2026-07-19 · OpenClaw — the sixth platform, and the tutor leaves the terminal
 
 Engram now installs on **[OpenClaw](https://docs.openclaw.ai)**, the self-hosted gateway

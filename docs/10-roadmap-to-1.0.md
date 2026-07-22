@@ -138,6 +138,14 @@ skeptic as *"the tutor is trying to make me feel guilty,"* it is a defect — cu
 > The failure mode this release was built to catch **does not exist in this grader** — it errs
 > only in the safe direction. That was not knowable before the audit existed.
 >
+> **⚠ SUPERSEDED IN PART, v1.1.0.** The numbers above are the accurate v0.7 record. The
+> *claim* attached to them — "it has never once inflated a grade" — **did not survive the
+> gold set being extended.** Adding 20 procedure items and re-running found **3 real
+> inflations across 774 judgments**, each caused by an ambiguity in the grader's own
+> instructions rather than by model leniency. All three are closed and the shipping spec
+> measures 0 / 258, but the lesson stands on its own: *a safety property is only as broad as
+> the set it was measured on.* See [`release-audits/v1.1.0-grader-audit.md`](release-audits/v1.1.0-grader-audit.md).
+>
 > **Weakest case type: `right-answer-wrong-reason`, 52% agreement, bias −0.48** — it grades a
 > correct conclusion reached by a broken derivation *harsher* than the gold set does. Whether
 > the grader or the gold is right there is **open**, and it ships written down.
