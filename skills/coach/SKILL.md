@@ -66,7 +66,7 @@ And voice `by_case_type`'s weakest row when it is materially below the rest — 
 The separation of powers is only real if the oracle is measured. This runs the **real assessor** against the shipped gold set and lets the engine compute the agreement.
 
 ```bash
-python3 "$ENGRAM" gold > /tmp/engram-gold.json     # 66 adversarial items, ANSWERS STRIPPED
+python3 "$ENGRAM" gold > /tmp/engram-gold.json     # 86 adversarial items, ANSWERS STRIPPED
 ```
 
 Then spawn **engram-assessor** — **three independent times**, on the same items.
