@@ -308,6 +308,15 @@ def append_jsonl(path, obj):
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 def read_jsonl(path):
+    """Read a JSONL state file, keeping only OBJECT lines.
+
+    Every consumer of every .jsonl in this store (receipts, stash, sessions, gold)
+    treats entries as dicts. A line holding `5` or `true` is valid JSON and pure
+    corruption — and until v1.1.0 it walked straight into `r.get(...)` and bricked
+    every aggregate read (`stats`, `due`, `report`, `session-start`), a crash that
+    had been reachable since v0.1 and was found by the v1.1.0 fuzz gate. Non-object
+    lines now get exactly the treatment non-JSON lines always got here: skipped at
+    the gate (RELEASE_PROTOCOL §4.7 — fix at the gate, not at twenty call sites)."""
     out = []
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -315,9 +324,11 @@ def read_jsonl(path):
                 line = line.strip()
                 if line:
                     try:
-                        out.append(json.loads(line))
+                        obj = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if isinstance(obj, dict):
+                        out.append(obj)
     except FileNotFoundError:
         pass
     return out
@@ -7940,6 +7951,23 @@ def cmd_selftest(_args):
                 and recs[1]["node_kind"] is None and recs[1]["error_class"] is None)
     check("export carries node_kind/error_class as closed enums, nulls garbage",
           fresh(_export_kinds))
+
+    # -- read_jsonl gates out valid-JSON-NON-OBJECT lines (a bare `5` in receipts bricked
+    #    every aggregate read since v0.1; found by the v1.1.0 fuzz) --
+    def _jsonl_non_object_lines(h):
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="encode"))
+        path = p("receipts", "t.jsonl")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("5\ntrue\n[1,2]\n\"just a string\"\n")
+        _RECEIPTS_CACHE.clear()
+        s = _capture_json(cmd_stats, _ns())          # must not raise
+        _capture_json(cmd_due, _ns())
+        _capture(cmd_session_start, _ns())           # human-line output, not JSON
+        kept = read_jsonl(path)
+        return s["receipts"] == 1 and len(kept) == 1 and all(isinstance(r, dict) for r in kept)
+    check("read_jsonl drops valid-JSON non-object lines (reads degrade, never brick)",
+          fresh(_jsonl_non_object_lines))
 
     print("\n%d/%d checks passed" % (total[0] - len(failures), total[0]))
     sys.exit(1 if failures else 0)

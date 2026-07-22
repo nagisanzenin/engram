@@ -31,7 +31,7 @@ carried on receipts, `rate --error-class`; `due` payload carries `node_kind` + `
 `stats.by_kind` (first-review recall per kind, the modality mold: same predicates, honest
 floor, confound caveat *inside the payload*, slip share with its own `n_classified`
 denominator); dashboard "Knowledge kinds" section (the caveat reaches the page); export
-gains `node_kind`/`error_class` as closed enums. Selftest 217 → **228**, every new check
+gains `node_kind`/`error_class` as closed enums. Selftest 217 → **229**, every new check
 mutation-tested (11/11 fail when their fix is reverted).
 
 **Behavior (skills + agents).** New `skills/_shared/problem-grammar.md`: the worked-example
