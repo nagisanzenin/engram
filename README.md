@@ -3,10 +3,10 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.8-6D4AA8.svg" alt="Version 1.0.8">
+  <img src="https://img.shields.io/badge/version-1.1.0-6D4AA8.svg" alt="Version 1.1.0">
   <a href="https://www.npmjs.com/package/opencode-engram-learning"><img src="https://img.shields.io/npm/v/opencode-engram-learning?label=npm&color=6D4AA8" alt="npm package"></a>
   <img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="MIT License">
-  <img src="https://img.shields.io/badge/selftest-217%2F217-3E7D5A.svg" alt="217/217 checks">
+  <img src="https://img.shields.io/badge/selftest-228%2F228-3E7D5A.svg" alt="228/228 checks">
   <a href="gold/assessor-gold.jsonl"><img src="https://img.shields.io/badge/grader%20never%20inflates-0%2F198-3E7D5A.svg" alt="0 of 198 blind judgments graded up"></a>
   <img src="https://img.shields.io/badge/scheduler-FSRS--4.5-6D4AA8.svg" alt="FSRS-4.5">
   <a href="CONTRIBUTING-DATA.md"><img src="https://img.shields.io/badge/data-100%25%20local-3E7D5A.svg" alt="100% local — the engine has no network code, proven by a permanent selftest"></a>
@@ -174,6 +174,7 @@ Engram implements the four most-replicated findings in learning science — and 
 4. **Honest adaptation** — it adapts from your *measured* retention, calibration, and error patterns. Confidence is only recorded when you actually state it; grades only exist as written receipts.
 5. **Motivation & wisdom, honestly** — it makes your *real* competence growth visible at the moment it happens (the memory that now lasts 4× longer — not points or streaks, which backfire on motivated adults), and it carries you through the hard part: struggle named as encoding, lapses absolved not pitied, backlogs met with amnesty. Two new layers, every claim adversarially verified against the primary source — [docs/05-affective-layers.md](docs/05-affective-layers.md).
 6. **Visuals that earn their keep** (v0.5) — interactive explorables are built when the *content* rewards manipulation (a parameter to drag, a process that unfolds — declared per concept by the curriculum architect, never inferred from a "visual learner" label), always wrapped in predict → act → explain guidance, because the guidance is what carries the effect (scaffolded simulations beat identical unscaffolded ones, g+ = 0.60). You choose the eagerness (`visuals eager|threshold|off`), and your own review receipts then measure whether the medium actually holds better *for you* — [docs/06-visual-encoding.md](docs/06-visual-encoding.md).
+7. **Procedures are practiced, not recited** (v1.1) — some knowledge is a *skill executed on instances* (an integral, a `git rebase`, a statistical-test choice — any domain, declared per node by the content, never by a topic label). Those nodes enter by the **worked-example ladder** (study → complete → faded → solve; examples first is the best-replicated novice result in math, g ≈ 0.44) and are reviewed by **solving a fresh variant** — new numbers, same structure — next to the problems they're confused with, because practice format must match use format (transfer d = 0.58 congruent vs 0.28 not). Solutions are step-graded with the arithmetic **verified by execution**, and a slip is priced gentler than a wrong method. Engram stays a general learn-anything system; this layer wakes only where the content is a skill — [docs/11-the-procedure-gap.md](docs/11-the-procedure-gap.md).
 
 <details>
 <summary><b>Citations & full theory</b> (for the skeptical — click)</summary>
@@ -252,7 +253,7 @@ python3 scripts/engram.py export --contributor "@you"     # writes a FILE. Sends
 |---|---|
 | grades, ratings, confidence | **your productions** — every word you wrote |
 | timings, stability, intervals, retrievability | **probes, claims, rubrics** |
-| `kind`, `artifact`, `arm`, `stratum` | **goals, interests, misconception text** |
+| `kind`, `node_kind`, `error_class`, `artifact`, `arm`, `stratum` | **goals, interests, misconception text** |
 | `grader` and its **measured QWK** | **topic names and node ids** — hashed, not carried |
 
 **Four things make that a promise rather than a hope:**
@@ -301,6 +302,9 @@ Anki schedules cards *you* write and grades *yourself*. Engram teaches the mater
 
 **Non-code topics?**
 Yes — the engine doesn't care. History, music theory, statistics, anatomy (it routes memorization-heavy content to mnemonics instead of derivation-theater).
+
+**Math and STEM specifically?**
+Yes, and since v1.1 with a layer built for the half of STEM that is *doing*: the architect marks skill-type nodes as `procedure`, which swaps in worked-example acquisition and solve-a-fresh-variant reviews, step-graded with execution-checked arithmetic (a dropped sign is priced as a slip, not a forgotten idea; a right answer over a wrong method is capped — the answer is not the knowledge). It is not a "math mode": the same kind fires on a git workflow or a conjugation drill, concepts still run the Socratic grammar, and a topic with no procedure nodes behaves exactly as before. Theory and the adversarial verification behind it: [docs/11-the-procedure-gap.md](docs/11-the-procedure-gap.md).
 
 **What if I just want the answer?**
 Say "just tell me" — it complies immediately, no lecture. It also quietly schedules that concept for earlier review, because told-not-derived decays faster. Your call, honestly priced.
@@ -353,7 +357,7 @@ The model never does calendar math; this does:
 | `refit` | fit review intervals to your measured recall (guarded, ≥50 reviews) |
 | **`export [--topic T]`** | a **text-stripped**, **attributed** receipt bundle written **to a file**. Whitelist-constructed — there is no code path by which a production could leave. **Refuses** if your grader is unaudited |
 | `session-start` / `log-session` | ambient nudge (hook) · session telemetry |
-| `selftest` | 217 checks| 214 checks| 213 checks| 213 checks| 207 checks| 201 checks| 200 checks| 192 checks| 191 checks over the FSRS math, state machine, adherence/retention arithmetic, the grader-audit statistics, and every hardened boundary |
+| `selftest` | 228 checks| 217 checks| 214 checks| 213 checks| 213 checks| 207 checks| 201 checks| 200 checks| 192 checks| 191 checks over the FSRS math, state machine, adherence/retention arithmetic, the grader-audit statistics, and every hardened boundary |
 
 </details>
 
@@ -406,7 +410,8 @@ Separation of powers, enforced by construction: the **tutor** teaches but never 
 | **[docs/08-vision.md](docs/08-vision.md)** | **The vision:** the one number Engram exists to move, which appealing metrics are traps, and the final state — tutor → instrument → commons. Includes the exhibit: the founder's own memory decaying on schedule |
 | **[docs/09-target-architecture.md](docs/09-target-architecture.md)** | **The target engine:** schemas, the nine new commands, the invariants that must never break, and the order of operations |
 | **[docs/10-roadmap-to-1.0.md](docs/10-roadmap-to-1.0.md)** | **The road to 1.0:** v0.6 → v1.0 as executable work orders — why / what / done / selftests / risk, each shippable by someone who has never seen the repo |
-| **[docs/11-the-procedure-gap.md](docs/11-the-procedure-gap.md)** | **The STEM audit (theory, pre-implementation):** Engram is braced for the conceptual half of math & STEM and blind to the procedural half — Pillars 16–17 (the example ladder; the problem as the probe), the `kind` layer that fixes it, and the gates it must pass first |
+| **[docs/11-the-procedure-gap.md](docs/11-the-procedure-gap.md)** | **The procedure gap (v1.1's theory):** Engram was braced for the conceptual half of math & STEM and blind to the procedural half — Pillars 16–17 (the example ladder; the problem as the probe), adversarially verified by three refute-first passes that corrected five claims and inverted one design rule before code shipped |
+| **[docs/12-procedure-layer-work-order.md](docs/12-procedure-layer-work-order.md)** | **The procedure layer's build:** architecture + work orders (WO-1…WO-8), the compatibility doctrine (no breaking changes, no domain mode — Engram stays general), and the pre-answered numbers audit for `by_kind` |
 
 ## More from the same workshop
 
