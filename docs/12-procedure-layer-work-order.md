@@ -186,7 +186,7 @@ node end-to-end: architect → add-topic → ladder encode → stash → blind a
 rubric → receipt carrying `node_kind` + `error_class` → fresh-instance review → by_kind
 telemetry, with concept nodes byte-identical to v1.0.8 behavior throughout.
 
-**Risk.** Skill-prose token growth. Budget: `problem-grammar.md` ≤ 90 lines; net additions
+**Risk.** Skill-prose token growth. Budget: `problem-grammar.md` ≤ 95 lines (landed at 93 — the §4.6 review added the grading tiebreak and check-ordering rules); net additions
 to existing SKILL.md files ≤ 25 lines total; platform-neutral wording per §5.7
 (capabilities, never platform names).
 
