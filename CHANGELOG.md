@@ -1,5 +1,85 @@
 # Changelog
 
+## 1.6.0 — 2026-07-24 · The fitted learner
+
+"Fits your memory" has been **one coarse interval multiplier** since v0.2, and no real user
+has ever earned even that. This release makes the claim literal — and, after measuring what
+the alternative was worth, deliberately does **not** do the other half the roadmap planned.
+
+**The fitting ladder.** `refit` now fits the model, not just a rescale:
+
+| tier | gate | what it fits |
+|---|---|---|
+| 0 | ≥50 review receipts | the interval multiplier (unchanged since v0.2) |
+| 1 | **64 usable reviews** | the four initial-stability weights, one per first rating |
+| 2 | **400 usable reviews** | the whole 17-parameter vector, coordinate descent, hard-clamped |
+
+Every tier ends in **the acceptance check**: a fit ships only if it beats the learner's
+current parameters *on the learner's own reviews*. Otherwise `refit` says so and changes
+nothing — Anki's "parameters appear optimal" behaviour, and the only thing that makes a
+low-n fit safe. Re-running on unchanged evidence is therefore a no-op, by construction.
+
+Stdlib, no framework, and that is not a compromise: production `fsrs-rs` replaced its ML
+framework with hand-derived gradients, so a framework-free fit is the shipping norm. What
+it needs is the *scaffolding* — bounds, an L1 prior toward the shipped defaults, a
+monotonicity repair across ratings, and validation so a hand-edited `fsrs_params` is
+clamped rather than trusted into the scheduler.
+
+**`stats.workload` — the trade-off, drawn and never recommended.** Reviews/day and mean
+interval at 80/85/90/95% desired retention, computed from the learner's own stabilities,
+on the dashboard. **No auto-recommendation**: Anki — holding the largest review dataset in
+existence — *removed* its "compute minimum recommended retention" feature in 25.07, and
+every implementation needs per-review **duration** telemetry that Engram's receipts do not
+carry and could not honestly attribute (a review here is embedded in a tutoring dialogue).
+Drawing the curve is honest; naming a point on it would be theatre.
+
+### What this release deliberately does NOT ship, and why
+
+`docs/14` v1.6 planned an **FSRS-6 migration by replay**. It is not here, and the reasoning
+is the release's most useful output:
+
+- **The measured benefit for this user base is ~zero.** On the 10k-user benchmark, *fitted*
+  FSRS-4.5 (log loss 0.3624) matches or beats *default-parameter* FSRS-6 (0.3664) and
+  FSRS-7 (0.3629). Engram's users run near-defaults, so a version bump alone buys them
+  nothing anyone could honestly announce. **Fitting is worth about two version upgrades** —
+  so this release shipped the fitting.
+- **The cost is real.** Migration re-derives every stored `s`/`d` and moves every due date
+  on thousands of machines. Risk with no measured benefit is not a trade.
+- **The one genuine argument for it is currently moot.** FSRS-6's short-term formula is
+  where same-day dynamics *would* live — but v1.5 deliberately excludes relearn rows from
+  the model until a validation earns them a place.
+- **And the honest blocker:** the 21 default weights would have to be verified against the
+  primary source before being written into a scheduler that governs other people's
+  memories. Unverified constants are fabricated data, whatever the changelog says.
+
+Measured on the founder's own state while deciding: **13 usable rows** against a tier-1
+floor of 64. Nobody is close to fitting yet, which makes shipping the ladder now (and the
+migration never-on-a-hunch) the right order.
+
+### The defects this release's gates found — and one is the sharpest yet
+
+- **The S0 fitter was a NO-OP on real receipts**, and it looked like it worked: loss fell a
+  hair, output was monotone, and the synthetic instrument test passed. The loss used each
+  row's *recorded* `s_before` — computed under the **old** weights — so it never depended
+  on the parameters being fitted. Only first reviews can teach S0, and only if their
+  stability is recomputed from the candidate. **Found by mutating the tier floor**: removing
+  the gate changed nothing, because there was nothing to gate.
+- **The L1 prior was calibrated for a summed loss and applied to a mean**, so it outweighed
+  the data ~15:1 and the fitter silently never moved. Recovery of a known parameter went
+  from 3.79 to **20.25 against a true 20.0** once scaled. Caught by the §5.5 instrument test
+  — generate data from known parameters and demand recovery.
+- **Four checks came back FAKE across the run** (§4.5): a floor test that passed `--force`
+  and therefore bypassed the floor; an acceptance test blocked by the floor instead;
+  a fixture with no later reviews; and no check at all asserting the fitted vector
+  *reaches the scheduler*. All rewritten. One mutation was **correctly** fake — the
+  first-reviews filter is genuinely a no-op optimization, not a correctness guard, and the
+  comment now says so instead of overclaiming.
+
+### Tests
+
+253 → **258** checks; every new check mutation-tested. Fuzz: **0 crashes / 600 states**.
+
+
 ## 1.5.0 — 2026-07-24 · The relearning loop
 
 `docs/07` flagged successive relearning in v0.6 as *"the most promising unexploited item in

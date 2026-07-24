@@ -32,7 +32,7 @@ SCHEMA = 1
 # The one place the engine knows its own version. Read by `export`, so a shared receipt states
 # which engine produced it — a corpus of receipts from unknown engine versions is not a corpus.
 # Pinned against .claude-plugin/plugin.json by a selftest, so it cannot drift.
-ENGRAM_VERSION = "1.5.0"
+ENGRAM_VERSION = "1.6.0"
 RETENTION_DEFAULT = 0.90
 INTERVAL_MAX = 365
 RETENTION_MIN, RETENTION_MAX = 0.70, 0.97   # sane desired-retention bounds
@@ -186,31 +186,36 @@ def interval_for(stability, retention, multiplier=1.0):
     days = stability / FACTOR * (retention ** (1.0 / DECAY) - 1.0) * multiplier
     return int(clamp(round(days), 1, INTERVAL_MAX))
 
-def init_stability(g):
-    return clamp(W[g - 1], 0.1, 100.0)
+def init_stability(g, w=None):
+    w = W if w is None else w
+    return clamp(w[g - 1], 0.1, 100.0)
 
-def init_difficulty(g):
-    return clamp(W[4] - (g - 3) * W[5], 1.0, 10.0)
+def init_difficulty(g, w=None):
+    w = W if w is None else w
+    return clamp(w[4] - (g - 3) * w[5], 1.0, 10.0)
 
-def next_difficulty(d, g):
-    nd = d - W[6] * (g - 3)
+def next_difficulty(d, g, w=None):
+    w = W if w is None else w
+    nd = d - w[6] * (g - 3)
     # FSRS-4.5 mean-reverts toward D0(3) (Good), not D0(4); D0(4) is the FSRS-5
     # rule and would inflate stability growth ~20% under this 4.5 weight vector.
-    nd = W[7] * init_difficulty(3) + (1.0 - W[7]) * nd
+    nd = w[7] * init_difficulty(3, w) + (1.0 - w[7]) * nd
     return clamp(nd, 1.0, 10.0)
 
-def next_stability_recall(d, s, r, g):
-    hard_penalty = W[15] if g == 2 else 1.0
-    easy_bonus = W[16] if g == 4 else 1.0
-    grow = (math.exp(W[8]) * (11.0 - d) * (s ** -W[9])
-            * (math.exp(W[10] * (1.0 - r)) - 1.0) * hard_penalty * easy_bonus)
+def next_stability_recall(d, s, r, g, w=None):
+    w = W if w is None else w
+    hard_penalty = w[15] if g == 2 else 1.0
+    easy_bonus = w[16] if g == 4 else 1.0
+    grow = (math.exp(w[8]) * (11.0 - d) * (s ** -w[9])
+            * (math.exp(w[10] * (1.0 - r)) - 1.0) * hard_penalty * easy_bonus)
     return clamp(s * (1.0 + grow), 0.1, 36500.0)
 
-def next_stability_forget(d, s, r):
-    sf = W[11] * (d ** -W[12]) * (((s + 1.0) ** W[13]) - 1.0) * math.exp(W[14] * (1.0 - r))
+def next_stability_forget(d, s, r, w=None):
+    w = W if w is None else w
+    sf = w[11] * (d ** -w[12]) * (((s + 1.0) ** w[13]) - 1.0) * math.exp(w[14] * (1.0 - r))
     return clamp(min(sf, s), 0.1, 36500.0)  # a lapse never increases stability
 
-def apply_rating(fsrs, rating_name, on_date, cap_days=None):
+def apply_rating(fsrs, rating_name, on_date, cap_days=None, w=None):
     """Pure transition: fsrs dict + rating -> new fsrs dict (+ receipt fields).
 
     `cap_days` shortens the booked interval WITHOUT touching stability or difficulty — the
@@ -223,15 +228,16 @@ def apply_rating(fsrs, rating_name, on_date, cap_days=None):
         s0 = clamp(s0, 0.1, 36500.0)   # corrupt s=0 would make s**-w blow up
     last = fsrs.get("last")
     if s0 is None:  # first exposure (or unrecoverable s -> treat as first)
-        s, d, r = init_stability(g), init_difficulty(g), None
+        s, d, r = init_stability(g, w), init_difficulty(g, w), None
     else:
         if d0 is None:
-            d0 = init_difficulty(3)     # corrupt difficulty -> re-anchor
+            d0 = init_difficulty(3, w)  # corrupt difficulty -> re-anchor
         last_d = safe_date(last)
         elapsed = max(0, (on_date - last_d).days) if last_d else 0
         r = retrievability(elapsed, s0)
-        d = next_difficulty(d0, g)
-        s = next_stability_forget(d0, s0, r) if g == 1 else next_stability_recall(d0, s0, r, g)
+        d = next_difficulty(d0, g, w)
+        s = (next_stability_forget(d0, s0, r, w) if g == 1
+             else next_stability_recall(d0, s0, r, g, w))
     ivl = interval_for(s, as_number(fsrs.get("retention"), RETENTION_DEFAULT),
                        as_number(fsrs.get("im"), 1.0))
     capped = False
@@ -1529,7 +1535,8 @@ def apply_item(item, kind):
             done = max(0, int(as_number(node["fsrs"].get("reps"), 0) or 0)) - 1
             if 0 <= done < DOSE_REPS:
                 cap = DOSE_CAPS[done]
-        node["fsrs"], extra = apply_rating(node["fsrs"], rating, today(), cap_days=cap)
+        node["fsrs"], extra = apply_rating(node["fsrs"], rating, today(), cap_days=cap,
+                                           w=learner_weights(model))
         node["fsrs"].pop("retention", None)
         node["fsrs"].pop("im", None)
     if transfer_lapse:
@@ -4498,6 +4505,10 @@ def compute_stats():
         "self_grading": compute_self_grading(receipts),
         # v1.5: did sessions end at criterion, and is relearning getting cheap?
         "relearning": compute_relearning(receipts),
+        # v1.6: the retention/workload trade-off, drawn and never recommended
+        # read_model, NOT load_model: `stats` is a read path and must never persist a heal
+        # (the read-only-commands check exists because three of them once did).
+        "workload": workload_curve(receipts, read_model()),
         "due_now": len(due_items()),
         "pending_verify": len(read_jsonl(p(STASH_FILE))),
         "topics": topics,
@@ -4882,6 +4893,206 @@ def cmd_path(_args):
 
 # ---------------------------------------------------------------- refit
 
+# ── THE FITTING LADDER (v1.6, docs/13 §2.6) ──────────────────────────────────────────
+#
+# "Fits your memory" has been one coarse interval multiplier since v0.2, and no real user
+# has ever earned even that. The measured picture: personalized fitting is worth about as
+# much as TWO algorithm-version upgrades (fitted 4.5 matches or beats default-parameter
+# FSRS-6 and FSRS-7 on the 10k-user benchmark), and production Anki fits the first four
+# parameters from as few as 8 usable reviews.
+#
+# The tiers mirror upstream practice, with Engram's floors set deliberately higher: this
+# project's brand is never shipping a number it cannot stand behind, and a fit nobody can
+# validate per-user is exactly such a number. The gap between our floor and upstream's is
+# POLICY, not evidence, and says so.
+FIT_TIER1_MIN = 64        # S0-only (upstream fits S0 from 8; we want a real sample)
+FIT_TIER2_MIN = 400       # full vector (upstream's own floor is 64; see above)
+FIT_W_BOUNDS = [(0.05, 100.0)] * 4 + [(1.0, 10.0), (0.1, 5.0), (0.1, 5.0), (0.0, 0.9),
+                                      (-2.0, 3.0), (0.0, 0.8), (0.01, 4.0), (0.01, 4.0),
+                                      (0.01, 2.0), (0.01, 0.8), (0.01, 4.0), (0.0, 1.0),
+                                      (1.0, 6.0)]
+
+def _fit_sample(receipts):
+    """(first_rating_grade, elapsed_days, recalled) for every USABLE review.
+
+    Usable = a genuine retention review with a recorded prediction and real elapsed time.
+    Same-day rows are excluded upstream (`relearn`, and the elapsed guard) because their
+    retrievability is 1.0 by construction and would bias both sides of the fit — G11."""
+    by_node = _by_node(receipts)
+    out = []
+    for (_t, _n), slot in by_node.items():
+        first = slot["first"]
+        g = RATINGS.get(first.get("rating"))
+        if not g:
+            continue
+        prev_ts = first.get("ts")
+        for r in slot["reviews"]:
+            if r.get("relearn") is True:
+                continue
+            elapsed = days_between(prev_ts, r.get("ts"))
+            rv = as_number(r.get("retrievability"))
+            if elapsed is None or elapsed <= 0 or rv is None or rv >= 1.0:
+                prev_ts = r.get("ts") or prev_ts
+                continue
+            # ⚠ THE FIRST REVIEW OF A NODE IS THE ONLY ROW S0 CAN LEARN FROM, and it must
+            # carry s_before = 0 so the loss RECOMPUTES stability from the candidate weights.
+            # The first cut passed the RECORDED `s_before` on every row — which was computed
+            # under the OLD weights — so `_fit_loss` never depended on w[0..3] and the S0
+            # fitter was a NO-OP on real receipts. It looked fine (loss fell a hair, output
+            # monotone) because the synthetic instrument test happened to pass 0.0 by hand.
+            # Found by mutating the tier floor: removing the gate changed nothing, because
+            # there was nothing to gate. (§4.5, and it is the sharpest catch of this release.)
+            is_first = not any(row[4] == (_t, _n) for row in out)
+            out.append((g, elapsed, 1.0 if r.get("rating") != "again" else 0.0,
+                        0.0 if is_first else (as_number(r.get("s_before")) or 0.0),
+                        (_t, _n)))
+            prev_ts = r.get("ts") or prev_ts
+    return out
+
+def _fit_loss(w, sample):
+    """Binary cross-entropy of predicted recall vs what happened. Lower is better."""
+    if not sample:
+        return None
+    tot = 0.0
+    for row in sample:
+        g, elapsed, recalled, s_before = row[0], row[1], row[2], row[3]
+        s = s_before if s_before > 0 else init_stability(g, w)
+        pr = clamp(retrievability(elapsed, s), 1e-6, 1 - 1e-6)
+        tot += -(recalled * math.log(pr) + (1.0 - recalled) * math.log(1.0 - pr))
+    return tot / float(len(sample))
+
+def _fit_s0(sample, base):
+    """Tier 1: the four initial-stability weights, one per first rating.
+
+    Upstream's recipe, transposed: a 1-D search per rating group, an L1 pull toward the
+    default so a thin group cannot run away, and a monotonicity repair afterwards — S0 must
+    not decrease as the first rating improves, or the schedule contradicts itself."""
+    w = list(base)
+    for g in (1, 2, 3, 4):
+        # FIRST reviews only (s_before == 0): those are the rows whose predicted stability
+        # IS w[g-1]. A later review's stability came from the previous transition and tells
+        # us nothing about the initial value.
+        #
+        # ⚠ Honest note, because the mutation gate asked: this filter is CLARITY, not a
+        # correctness guard. Later rows carry a fixed `s_before`, so their loss does not
+        # depend on the candidate at all — including them would add a constant and leave the
+        # argmin identical (verified). The load-bearing line is the `is_first` zeroing in
+        # `_fit_sample`; mutate THAT and the fit stops working, which is what the check pins.
+        grp = [row for row in sample if row[0] == g and row[3] == 0.0]
+        if len(grp) < 4:
+            continue                       # too thin to move: keep the default, honestly
+        best, best_loss = w[g - 1], None
+        for cand in [0.1 * (1.15 ** i) for i in range(60)]:
+            trial = list(w); trial[g - 1] = cand
+            l = _fit_loss(trial, grp)
+            if l is None:
+                continue
+            # L1 prior toward the shipped default, so a thin group cannot run away.
+            # ⚠ DIVIDED BY THE GROUP SIZE, because `_fit_loss` returns a MEAN while
+            # upstream's identical-looking prior sits beside a SUM. Un-scaled it is ~1.0
+            # against a loss difference of ~0.07 — the prior wins every time and the fitter
+            # silently never moves. It "worked" (no crash, monotone output, loss went down a
+            # hair) and recovered 3.79 for a true 20.0. Caught only by the §5.5 instrument
+            # test: generate data from KNOWN parameters and demand recovery.
+            l += abs(cand - base[g - 1]) / (16.0 * len(grp))
+            if best_loss is None or l < best_loss:
+                best, best_loss = cand, l
+        w[g - 1] = best
+    for i in range(1, 4):                  # monotonicity repair across ratings
+        w[i] = max(w[i], w[i - 1])
+    return w
+
+def _fit_full(sample, base):
+    """Tier 2: coordinate descent over the whole vector, hard-clamped.
+
+    Deliberately simple and deliberately bounded. The engine is stdlib-only, and it does not
+    need a framework: production `fsrs-rs` replaced its ML framework with hand-derived
+    gradients, so a framework-free fit is the shipping norm, not a compromise. What it DOES
+    need is the safety scaffolding — bounds, a prior, and an acceptance check — because the
+    failure mode at low n is a confident overfit, not a crash."""
+    w = list(base)
+    for _sweep in range(3):
+        for i, (lo, hi) in enumerate(FIT_W_BOUNDS):
+            cur = w[i]
+            best, best_loss = cur, _fit_loss(w, sample)
+            if best_loss is None:
+                return w
+            for scale in (0.8, 0.9, 1.1, 1.25):
+                cand = clamp(cur * scale if cur else (lo + hi) / 2.0, lo, hi)
+                trial = list(w); trial[i] = cand
+                l = _fit_loss(trial, sample)
+                if l is not None and l < best_loss:
+                    best, best_loss = cand, l
+            w[i] = best
+    for i in range(1, 4):
+        w[i] = max(w[i], w[i - 1])
+    return w
+
+def learner_weights(model):
+    """The learner's fitted vector, or None. Validated: a hand-edited model must never
+    push garbage into the scheduler — wrong length, wrong type, or out of bounds means the
+    engine falls back to the shipped defaults rather than trusting the file."""
+    fp = (model.get("memory") or {}).get("fsrs_params")
+    if not isinstance(fp, dict):
+        return None
+    vec = fp.get("w")
+    if not isinstance(vec, list) or len(vec) != len(W):
+        return None
+    out = []
+    for i, v in enumerate(vec):
+        n = as_number(v)
+        if n is None:
+            return None
+        lo, hi = FIT_W_BOUNDS[i]
+        out.append(clamp(n, lo, hi))
+    return out
+
+def workload_curve(receipts, model):
+    """Reviews/day and projected retention across a desired-retention grid (v1.6).
+
+    NOT a recommendation. Anki — holding the largest review dataset in existence — REMOVED
+    its "compute minimum recommended retention" feature in 25.07 and fell back to a
+    simulator plus human judgment; and every implementation of it needs per-review DURATION
+    telemetry, which Engram's receipts do not carry and could not honestly attribute (a
+    review here is embedded in a tutoring dialogue). So the engine draws the trade-off and
+    the learner chooses. Auto-setting this number would be theatre on top of a measurement
+    nobody made.
+
+    The curve is the learner's OWN: it uses their fitted (or default) parameters and the
+    stabilities actually on their graph."""
+    stabs = []
+    for _t, g in iter_graphs():
+        for node in (g.get("nodes") or {}).values():
+            if not isinstance(node, dict) or is_retired(node):
+                continue
+            s = as_number(_fsrs_of(node).get("s"))
+            if s and s > 0:
+                stabs.append(s)
+    if not stabs:
+        return {"points": [], "n_nodes": 0,
+                "read": "nothing scheduled yet — no workload to trade off"}
+    im = as_number((model.get("memory") or {}).get("interval_multiplier"), 1.0)
+    cur = as_number((model.get("memory") or {}).get("desired_retention"), RETENTION_DEFAULT)
+    points = []
+    for target in (0.80, 0.85, 0.90, 0.95):
+        ivls = [interval_for(s, target, im) for s in stabs]
+        per_day = sum(1.0 / max(1, i) for i in ivls)
+        points.append({"desired_retention": target,
+                       "reviews_per_day": round(per_day, 2),
+                       "mean_interval_days": round(sum(ivls) / float(len(ivls)), 1)})
+    base = next((pt for pt in points if abs(pt["desired_retention"] - 0.90) < 1e-9), points[0])
+    return {"points": points, "n_nodes": len(stabs), "current": cur,
+            "guardrails": "default 0.90; workload climbs steeply above it; never above 0.97",
+            "basis": "model-derived (your own stabilities through the FSRS interval formula); "
+                     "NOT a recommendation — Anki removed theirs, and Engram's receipts carry "
+                     "no review durations to price the trade honestly (docs/13 §2.6)",
+            "read": ("at %d%% desired retention you'd clear about %.1f reviews a day across "
+                     "%d scheduled concepts; raising it to 95%% roughly %s that."
+                     % (round(base["desired_retention"] * 100), base["reviews_per_day"],
+                        len(stabs),
+                        "doubles" if points[-1]["reviews_per_day"] > 1.7 * base["reviews_per_day"]
+                        else "increases"))}
+
 def cmd_refit(args):
     """Coarse per-user schedule fit (v1): a single interval multiplier.
 
@@ -4908,6 +5119,43 @@ def cmd_refit(args):
         emit({"ok": False, "reason": "need >=50 review receipts with predictions, have %d" % n,
               "hint": "keep reviewing; refit is meaningful only with real evidence"})
         return
+
+    # ── TIER 1 / TIER 2: fit the MODEL, not just a multiplier (v1.6) ──────────────────
+    #
+    # Runs before the multiplier, because they answer a strictly better question: the
+    # multiplier rescales every interval by one number, while these fit the curve the
+    # intervals come FROM. Both are gated, both are labeled, and neither ships a fit that
+    # does not beat what the learner already has — Anki's own "parameters appear optimal"
+    # behaviour, and the only guard that makes a low-n fit safe.
+    m0 = load_model()
+    sample = _fit_sample(collect_receipts())
+    tier, fitted, before_loss, after_loss = 0, None, None, None
+    if len(sample) >= FIT_TIER1_MIN or (args.force and sample):
+        base = learner_weights(m0) or list(W)
+        before_loss = _fit_loss(base, sample)
+        cand = (_fit_full(sample, base) if len(sample) >= FIT_TIER2_MIN
+                else _fit_s0(sample, base))
+        tier = 2 if len(sample) >= FIT_TIER2_MIN else 1
+        after_loss = _fit_loss(cand, sample)
+        # THE ACCEPTANCE CHECK. A fit that does not improve the learner's own data is not a
+        # fit, it is noise with 17 decimal places — and shipping it would move every future
+        # due date on the strength of nothing.
+        if before_loss is not None and after_loss is not None and after_loss < before_loss:
+            fitted = cand
+        else:
+            tier = 0
+    if fitted is not None:
+        m0.setdefault("memory", {})["fsrs_params"] = {
+            "w": [round(x, 4) for x in fitted],
+            "tier": tier, "n_usable": len(sample),
+            "fitted": today().isoformat(),
+            "loss_before": round(before_loss, 5), "loss_after": round(after_loss, 5),
+            # inv. 14: the label rides WITH the number, in the payload
+            "basis": ("fitted from %d usable reviews (tier %d); FSRS is a flashcard-derived "
+                      "model with no published validation on conceptual or procedural "
+                      "material — docs/13 §2.6" % (len(sample), tier)),
+        }
+        write_json(p("learner-model.json"), m0)
     observed = sum(1.0 for r in receipts if r["rating"] != "again") / n
     predicted = sum(r["retrievability"] for r in receipts) / n
     def inv(r):  # proportional to elapsed/S at recall probability r (power curve)
@@ -4918,7 +5166,20 @@ def cmd_refit(args):
     m["memory"]["interval_multiplier"] = round(multiplier, 3)
     m["memory"]["last_refit"] = today().isoformat()
     write_json(p("learner-model.json"), m)
-    emit({"ok": True, "n_reviews": n, "observed_recall": round(observed, 3),
+    emit({"ok": True, "n_reviews": n,
+          "fit": {"tier": tier, "n_usable": len(sample),
+                  "loss_before": (round(before_loss, 5) if before_loss is not None else None),
+                  "loss_after": (round(after_loss, 5) if after_loss is not None else None),
+                  "accepted": fitted is not None,
+                  "next_tier_at": (FIT_TIER1_MIN if len(sample) < FIT_TIER1_MIN
+                                   else (FIT_TIER2_MIN if len(sample) < FIT_TIER2_MIN else None)),
+                  "read": ("parameters fitted (tier %d) — they beat your previous ones on your "
+                           "own reviews" % tier) if fitted is not None else
+                          ("no parameter fit: %d usable reviews, %d needed"
+                           % (len(sample), FIT_TIER1_MIN)) if len(sample) < FIT_TIER1_MIN else
+                          "a fit was computed and REFUSED — it did not beat your current "
+                          "parameters on your own data, so nothing changed"},
+          "observed_recall": round(observed, 3),
           "predicted_recall": round(predicted, 3),
           "interval_multiplier": {"before": prev, "after": round(multiplier, 3)},
           "read": ("intervals shortened — memory decays faster than the default model"
@@ -5381,6 +5642,16 @@ def cmd_report(args):
     # yours. Rendered HERE because §4.8 Q4 now requires it: a number whose failure state reaches
     # the JSON, the CLI and the skill — and not the page a human actually looks at — is the exact
     # bug v0.7 shipped. "NO CAPABILITY HAS EVER BEEN MEASURED" belongs on the screen, in red.
+    # THE WORKLOAD TRADE-OFF (v1.6) — drawn on the page, recommended nowhere.
+    wl = stats.get("workload") or {}
+    if wl.get("points"):
+        parts.append("<h2>Workload vs retention — your own curve</h2>")
+        parts.append("<div class='chips'>%s</div>" % "".join(
+            "<span class='chip'>%d%% <b>%.1f/day</b></span>"
+            % (round(pt["desired_retention"] * 100), pt["reviews_per_day"])
+            for pt in wl["points"]))
+        parts.append("<p class='note'>%s</p>" % escape(wl.get("read", "")))
+        parts.append("<p class='note'>%s</p>" % escape(wl.get("basis", "")))
     tr = stats["transfer"]
     parts.append("<h2>Transfer — does the idea fire in different clothes?</h2>")
     if not tr["n"]:
@@ -9722,6 +9993,157 @@ def cmd_selftest(_args):
         return refused
     check("retrieval-to-criterion is refused on PROCEDURE nodes (the measured boundary)",
           fresh(_relearn_not_for_procedures))
+
+    # ══ v1.6 · THE FITTED LEARNER ══════════════════════════════════════════════════════
+    #
+    # -- THE INSTRUMENT TEST (§5.5): generate a learner whose memory is genuinely
+    #    different from the default model, and demand the fit MOVE TOWARD it. A fitter
+    #    that cannot recover known parameters from data it generated itself is not a
+    #    fitter; it is a random number with a changelog entry.
+    def _fit_recovers(h):
+        true_w = list(W)
+        true_w[2] = 20.0                       # this learner's `good` memories start far
+                                               # stickier than the shipped default (3.71)
+        sample = []
+        rng = random.Random(11)
+        for _ in range(300):
+            elapsed = rng.choice([3, 7, 14, 30, 60])
+            s = true_w[2]
+            pr = retrievability(elapsed, s)
+            sample.append((3, elapsed, 1.0 if rng.random() < pr else 0.0, 0.0,
+                           ("t", "n%d" % len(sample))))
+        default_loss = _fit_loss(list(W), sample)
+        fitted = _fit_s0(sample, list(W))
+        fitted_loss = _fit_loss(fitted, sample)
+        return (fitted_loss < default_loss                      # it learned something
+                and abs(fitted[2] - true_w[2]) < abs(W[2] - true_w[2]) * 0.5   # …toward truth
+                and fitted[1] <= fitted[2] <= fitted[3])        # monotone across ratings
+    check("the S0 fitter recovers a known parameter from that learner's own data",
+          fresh(_fit_recovers))
+
+    # -- a fit that does not beat the current parameters is REFUSED, not shipped --
+    def _fit_refuses_worse(h):
+        # 60 usable reviews: ENOUGH to clear the multiplier's >=50 gate, and deliberately
+        # BELOW the tier-1 floor of 64 — so the floor is the only thing stopping a fit.
+        # (The first version of this check passed `--force`, which bypasses the floor, so
+        # mutating the floor away changed nothing: §4.5's fake-check pattern again.)
+        n_nodes = FIT_TIER1_MIN - 4
+        g = {"topic": "t", "title": "T", "order": ["n%02d" % i for i in range(n_nodes)],
+             "nodes": {"n%02d" % i: {"claim": "C", "probe": "p"} for i in range(n_nodes)}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        for i in range(n_nodes):
+            _capture(cmd_rate, _ns(topic="t", node="n%02d" % i, rating="good", kind="encode"))
+        # VARIED elapsed and a success pattern that implies a stickier-than-default S0 —
+        # so a fit WOULD be accepted here if the floor let it run. A uniform fixture makes
+        # the loss identical either way, and the floor mutation then changes nothing.
+        for day, lo, hi in (("2026-07-16", 0, 20), ("2026-07-26", 20, 40),
+                            ("2026-08-15", 40, n_nodes)):
+            os.environ["ENGRAM_TODAY"] = day
+            for i in range(lo, hi):
+                _capture(cmd_rate, _ns(topic="t", node="n%02d" % i,
+                                       rating="good" if i % 8 else "again"))
+        _RECEIPTS_CACHE.clear()
+        out = _capture_json(cmd_refit, _ns())          # NO --force: the real path
+        m = read_json(p("learner-model.json"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (out["ok"] is True                       # the multiplier gate DID clear
+                and out["fit"]["n_usable"] == n_nodes
+                and out["fit"]["tier"] == 0 and out["fit"]["accepted"] is False
+                and out["fit"]["next_tier_at"] == FIT_TIER1_MIN
+                and (m.get("memory") or {}).get("fsrs_params") is None)
+    check("no parameter fit below the floor (the gate, not the acceptance check)",
+          fresh(_fit_refuses_worse))
+
+    # -- ABOVE the floor, a fit that does not improve the learner's own data is REFUSED --
+    def _fit_acceptance(h):
+        n_nodes = FIT_TIER1_MIN + 6            # clears the floor
+        g = {"topic": "t", "title": "T", "order": ["n%02d" % i for i in range(n_nodes)],
+             "nodes": {"n%02d" % i: {"claim": "C", "probe": "p"} for i in range(n_nodes)}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        for i in range(n_nodes):
+            _capture(cmd_rate, _ns(topic="t", node="n%02d" % i, rating="good", kind="encode"))
+        # THREE rounds, so nodes carry LATER reviews too — rows whose `s_before` came from a
+        # previous transition and therefore say nothing about the INITIAL stability. Without
+        # them in the fixture, the "first reviews only" filter is untestable (dropping it
+        # changes nothing), which is exactly what the mutation run found.
+        for day in ("2026-07-20", "2026-08-05", "2026-09-01"):
+            os.environ["ENGRAM_TODAY"] = day
+            for i in range(n_nodes):
+                _capture(cmd_rate, _ns(topic="t", node="n%02d" % i, rating="good"))
+        _RECEIPTS_CACHE.clear()
+        sample = _fit_sample(collect_receipts())
+        firsts = [r for r in sample if r[3] == 0.0]
+        if not (len(firsts) == n_nodes and len(sample) > len(firsts)):
+            return False                    # the fixture must actually contain both kinds
+        first = _capture_json(cmd_refit, _ns())         # a real improvement: accepted
+        fitted = read_json(p("learner-model.json"))["memory"]["fsrs_params"]["w"]
+        # RUN IT AGAIN on the same evidence. The candidate now starts FROM the fitted
+        # weights, so there is nothing left to win — and the acceptance check is the only
+        # thing standing between the learner and a second, pointless rewrite of every
+        # future due date. (Constructing "degenerate data the default already explains" is
+        # not possible in general; idempotence on unchanged evidence is the same property,
+        # and it is the one a real learner actually hits, every month, forever.)
+        _RECEIPTS_CACHE.clear()
+        second = _capture_json(cmd_refit, _ns())
+        after = read_json(p("learner-model.json"))["memory"]["fsrs_params"]["w"]
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        # …AND THE FIT MUST REACH THE SCHEDULER. A fitted vector that nothing schedules with
+        # is a number in a JSON file — the "dead code shipped as a feature" bug class, on the
+        # release whose entire claim is that the schedule now fits the learner.
+        _capture(cmd_add_topic, _ns(json=json.dumps(
+            {"topic": "z", "title": "Z", "order": ["q"],
+             "nodes": {"q": {"claim": "Q", "probe": "pq"}}})))
+        with_fit = _capture_json(cmd_rate, _ns(topic="z", node="q", rating="good",
+                                               kind="encode"))["s_after"]
+        default_s0 = init_stability(RATINGS["good"])
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (first["fit"]["n_usable"] >= FIT_TIER1_MIN   # the floor was NOT the blocker
+                and first["fit"]["accepted"] is True
+                and fitted != [round(x, 4) for x in W]      # the fit actually moved
+                and second["fit"]["accepted"] is False
+                and "REFUSED" in second["fit"]["read"]
+                and fitted == after                         # …and nothing moved on re-run
+                and abs(with_fit - default_s0) > 0.01)      # …and the schedule uses it
+    check("re-fitting unchanged evidence is refused, and nothing moves (acceptance gate)",
+          fresh(_fit_acceptance))
+
+    # -- a hand-edited fsrs_params must never push garbage into the scheduler --
+    def _fit_validated(h):
+        _add_ab()
+        for bad in ({"w": "nonsense"}, {"w": [1, 2, 3]}, {"w": ["x"] * len(W)}, "not-a-dict"):
+            m = read_json(p("learner-model.json"))
+            m["memory"]["fsrs_params"] = bad
+            write_json(p("learner-model.json"), m)
+            if learner_weights(read_json(p("learner-model.json"))) is not None:
+                return False
+            _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="encode"))
+            _capture(cmd_stats, _ns())          # must not raise
+        m = read_json(p("learner-model.json"))
+        m["memory"]["fsrs_params"] = {"w": [10 ** 9] * len(W)}       # wildly out of bounds
+        write_json(p("learner-model.json"), m)
+        got = learner_weights(read_json(p("learner-model.json")))
+        return got is not None and got[0] == FIT_W_BOUNDS[0][1]      # clamped, not trusted
+    check("a hand-edited fsrs_params is validated and clamped, never trusted",
+          fresh(_fit_validated))
+
+    # -- the workload curve is a TRADE-OFF, not a recommendation --
+    def _workload(h):
+        _add_ab()
+        for nid in ("a", "b"):
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", kind="encode"))
+        _RECEIPTS_CACHE.clear()
+        wl = _capture_json(cmd_stats, _ns())["workload"]
+        pts = {round(pt["desired_retention"], 2): pt for pt in wl["points"]}
+        before = read_json(p("learner-model.json"))["memory"]["desired_retention"]
+        after = read_json(p("learner-model.json"))["memory"]["desired_retention"]
+        return (len(wl["points"]) == 4
+                # higher desired retention MUST cost more reviews — the trade-off, not a hint
+                and pts[0.95]["reviews_per_day"] > pts[0.80]["reviews_per_day"]
+                and pts[0.95]["mean_interval_days"] < pts[0.80]["mean_interval_days"]
+                and "NOT a recommendation" in wl["basis"]
+                and before == after)          # …and reading it changes nothing
+    check("the workload curve trades reviews against retention and recommends nothing",
+          fresh(_workload))
 
     print("\n%d/%d checks passed" % (total[0] - len(failures), total[0]))
     sys.exit(1 if failures else 0)

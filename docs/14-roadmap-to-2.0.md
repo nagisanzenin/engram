@@ -492,7 +492,22 @@ blocks the ship, whatever the tests say.
 
 ---
 
-# v1.6 — **The Fitted Learner** *(the scheduler earns its parameters)*
+# v1.6 — **The Fitted Learner** — ✅ SHIPPED 2026-07-24 (item B deferred, with reasons)
+
+> **RESULT.** The fitting ladder shipped (tier 1 at 64 usable reviews, tier 2 at 400, both
+> behind an acceptance check that refuses a fit which does not beat the learner's current
+> parameters), plus the workload trade-off curve with no recommendation attached.
+>
+> **⚠ ITEM B — the FSRS-6 replay migration — WAS DELIBERATELY NOT SHIPPED**, and this
+> supersedes the work order below. Measured: *fitted* 4.5 matches or beats *default* 6 and
+> 7 on the benchmark, and Engram's users run near-defaults — so the migration is real risk
+> (every due date on every machine) for no announceable benefit. Its one genuine argument
+> (same-day modelling) is moot while v1.5 keeps relearn rows out of the model. And the 21
+> default weights would need primary-source verification before entering a scheduler that
+> governs other people's memories; unverified constants are fabricated data. **Revisit when
+> the ecosystem case changes or same-day modelling is actually wanted — never on a hunch.**
+
+# v1.6 — the original work order *(the scheduler earns its parameters)*
 
 > *One coarse multiplier, never yet earned by a real user, is the entire "fits your
 > memory" story. Production Anki fits four parameters at 8 reviews and the full vector at

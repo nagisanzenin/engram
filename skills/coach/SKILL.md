@@ -170,7 +170,15 @@ The report renders: per-topic mastery maps with progress bars, retention-by-stre
 python3 "$ENGRAM" refit
 ```
 
-Guarded: needs ≥50 review receipts with recorded predictions; before that it refuses with an honest reason — relay it and move on. When it runs, it compares predicted vs. observed recall and rescales intervals (a single multiplier, clamped 0.5–1.5); explain the result in one sentence (*"your memory held better than the default model — intervals stretched 12%"*). This is the v1 coarse fit; full per-parameter FSRS optimization is future work and says so in the README.
+Guarded: needs ≥50 review receipts with recorded predictions; before that it refuses with an honest reason — relay it and move on. When it runs, it compares predicted vs. observed recall and rescales intervals (a single multiplier, clamped 0.5–1.5); explain the result in one sentence (*"your memory held better than the default model — intervals stretched 12%"*). 
+
+**And read `fit` (v1.6) — the schedule can now fit the learner's memory, not just rescale it.** Three tiers, and the engine picks:
+
+- **`tier: 0`** — no parameter fit. If `next_tier_at` is set, say what it takes: *"parameter fitting needs 64 usable reviews; you have 31."* Never imply the schedule is broken without it — the shipped defaults are a benchmark-grade model.
+- **`accepted: false` with `n_usable` above the floor** — a fit was computed and **refused**, because it did not beat their current parameters on their own reviews. Say that plainly; it is the system declining to move every future due date on the strength of nothing.
+- **`tier: 1 | 2` accepted** — one honest sentence: *"your intervals now come from your own review history rather than the default curve."* **Voice the `basis` caveat too**: FSRS is a flashcard-derived model with no published validation on conceptual or procedural material. The fit is real; the model's scope is narrower than what you are teaching.
+
+**`stats.workload` — the trade-off, and you never recommend a point on it.** Reviews/day at 80/85/90/95% desired retention, from their own stabilities. If they ask "should I change it?": Anki — with the largest review dataset in existence — **removed** its auto-recommendation, and Engram's receipts carry no per-review durations to price the trade honestly. Show the curve, name the guardrails (0.90 default, never above 0.97), and let them choose via the usual consented `model --set`.
 
 ## `experiment` — n-of-1 strategy trials, done properly (v0.9)
 
