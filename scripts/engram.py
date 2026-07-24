@@ -32,7 +32,7 @@ SCHEMA = 1
 # The one place the engine knows its own version. Read by `export`, so a shared receipt states
 # which engine produced it — a corpus of receipts from unknown engine versions is not a corpus.
 # Pinned against .claude-plugin/plugin.json by a selftest, so it cannot drift.
-ENGRAM_VERSION = "1.7.0"
+ENGRAM_VERSION = "1.8.0"
 RETENTION_DEFAULT = 0.90
 INTERVAL_MAX = 365
 RETENTION_MIN, RETENTION_MAX = 0.70, 0.97   # sane desired-retention bounds
@@ -412,8 +412,12 @@ DEFAULT_MODEL = {
     "settings": {"default_mode": "standard", "artifacts": "threshold-only", "ambient": "quiet",
                  "momentum": "on", "profile": None,
                  "commitment": None, "decay_notice": "on",
-                 "relearning": "on"},
-    "rhythms": {},
+                 "relearning": "on", "srl": "on"},
+    # `rhythms` was defined here, written by nothing, and "read" by /coach for four
+    # releases — a promised adaptation surface that could never fire (removed in v1.8).
+    # What replaces it is DESCRIPTION, not scheduling: `stats.sessions` reports the
+    # learner's own session pattern, and chronotype-based scheduling stays killed (>80% of
+    # adult studies find no main effect on outcomes; no intervention study exists at all).
     "accessibility": [],
 }
 
@@ -1807,8 +1811,18 @@ def cmd_model(args):
                 if not isinstance(val, (int, float)) or isinstance(val, bool):
                     die("%s expects a number in [%s, %s]" % (key, bounds[0], bounds[1]))
                 val = clamp(val, bounds[0], bounds[1])
+            before = ref.get(leaf)
             ref[leaf] = val
             changed = True
+            # ARTICLE 12: the consent flow is the only writer of a system-proposed change,
+            # and it writes the ledger in the same breath. `--because` carries the engine's
+            # own evidence; without it the row still lands, marked `learner` — a change the
+            # learner made themselves is equally worth remembering, and equally reversible.
+            if before != val:
+                record_adaptation(key, before, val,
+                                  getattr(args, "because", None) or "set by the learner",
+                                  getattr(args, "grade", None) or "learner",
+                                  "consented" if getattr(args, "because", None) else "learner")
     for interest in (args.add_interest or []):
         if interest not in m["interests"]:
             m["interests"].append(interest)
@@ -4585,6 +4599,17 @@ def compute_stats():
         # read_model, NOT load_model: `stats` is a read path and must never persist a heal
         # (the read-only-commands check exists because three of them once did).
         "workload": workload_curve(receipts, read_model()),
+        # v1.8: DESCRIPTIVE session facts (replacing the inert `rhythms` field). Never a
+        # scheduling input — chronotype adaptation has no adult outcome evidence.
+        "sessions": {"by_month": _sessions_by_daypart(sessions),
+                     "total": len(sessions),
+                     "note": ("description only — Engram does not schedule by time of day; "
+                              "the adult evidence for chronotype effects on learning "
+                              "outcomes does not support it")},
+        # v1.8: how many adaptations the engine could justify right now — RECOMPUTED, never
+        # stored, because `propose` is read-only and nothing persists a pending queue.
+        "proposals_pending": len(compute_proposals(receipts, read_model(),
+                                                   workload_curve(receipts, read_model()))),
         "due_now": len(due_items()),
         "pending_verify": len(read_jsonl(p(STASH_FILE))),
         "topics": topics,
@@ -5168,6 +5193,157 @@ def workload_curve(receipts, model):
                         len(stabs),
                         "doubles" if points[-1]["reviews_per_day"] > 1.7 * base["reviews_per_day"]
                         else "increases"))}
+
+# ── ARTICLE 12 · THE ADAPTATION LEDGER (v1.8) ────────────────────────────────────────
+#
+# Engram computes a great deal about a learner and steers on almost none of it. Making it
+# steer is the v2.0 thesis — and it is one hallucinated correlation away from a horoscope.
+# So every adaptation the SYSTEM proposes is: computed by the engine from receipts, offered
+# with its evidence quoted, applied only on consent, written to an append-only ledger, and
+# reversible. Nothing here infers a trait, and nothing applies itself.
+ADAPTATIONS_FILE = "adaptations.jsonl"
+PROPOSAL_MAX = 3          # a screen of "suggestions" is a nag; three is an offer
+
+def record_adaptation(field, before, after, evidence, grade, source="consented"):
+    """Append one ledger row. The consent flow is the ONLY writer (invariant 15)."""
+    append_jsonl(p(ADAPTATIONS_FILE),
+                 {"ts": today().isoformat(), "field": field, "from": before, "to": after,
+                  "evidence": evidence, "grade": grade, "source": source,
+                  "reversible": True})
+
+def _sessions_by_daypart(sessions):
+    """DESCRIPTIVE session facts. Chronotype scheduling stays killed (>80% of adult studies
+    find no main effect, and no intervention study exists) — this describes, it never
+    schedules, and `/coach` is told so in as many words."""
+    out = {}
+    for s in sessions:
+        ts = s.get("ts") if isinstance(s, dict) else None
+        if not isinstance(ts, str):
+            continue
+        out[ts[:7]] = out.get(ts[:7], 0) + 1        # by month: honest, and not a chronotype
+    return out
+
+def compute_proposals(receipts, model, stats_like=None):
+    """At most three adaptations the ENGINE can justify from this learner's own receipts.
+
+    Read-only (invariant 11). Every proposal carries its evidence and its grade —
+    `evidence-backed` where a replicated finding licenses the SHAPE of the move,
+    `model-derived` where the engine's own arithmetic decides it, `heuristic` otherwise —
+    and `/coach` is required to quote both.
+
+    THE FAMILIES ARE CLOSED, and that is the whole safety argument. Adaptivity's evidence
+    base is mostly a graveyard: learning styles (dead), the general aptitude-treatment
+    program (dead — prior-knowledge x guidance is the one replicated survivor), chronotype
+    scheduling (no main effect in adults), learner control over method (worse than
+    non-personalized). What survives is: assistance level from demonstrated prior knowledge,
+    scheduling from individually fitted forgetting, metacognitive prompts that are specific
+    and fading, and small real choices. Nothing else may be proposed, ever."""
+    out = []
+    # Every read here has to survive a hand-edited state: `stats` calls this on every run,
+    # so a garbage receipt must degrade, never brick (§4.7). The fuzz found 472 crashes in
+    # 600 states the moment this function joined the stats path — an unhashable `topic`
+    # poisoning the `firsts` dict key, which is the same shape of bug `_by_node` was
+    # hardened against in v0.6 and which every new receipt-walking function re-earns.
+    settings = model.get("settings") if isinstance(model.get("settings"), dict) else {}
+    sessions = [s for s in read_jsonl(p("sessions.jsonl")) if isinstance(s, dict)]
+
+    # 1 · SESSION SHAPE — from completion telemetry, not preference (model-derived).
+    recent = [s for s in sessions if s.get("kind") in ("learn", "review")]
+    short = [s for s in recent[-8:] if (as_number(s.get("items")) or 0) <= 1]
+    if len(recent) >= 6 and len(short) >= 5 and settings.get("default_mode") != "sprint":
+        out.append({
+            "id": "session-shape", "field": "settings.default_mode",
+            "current": settings.get("default_mode"), "proposed": "sprint",
+            "evidence": ("%d of your last %d sessions covered one item or fewer — the mode "
+                         "you have set is sized for two to three"
+                         % (len(short), len(recent[-8:]))),
+            "grade": "model-derived"})
+
+    # 2 · SCAFFOLD ENTRY — the one replicated aptitude-treatment interaction there is
+    #     (expertise reversal: assistance helps novices d=+0.505, harms the knowledgeable
+    #     d=-0.428). Proposed ONLY from measured first-attempt outcomes, and only upward
+    #     when the evidence is clean — the meta-analysts' own asymmetry says assist when
+    #     unsure, so the engine never proposes REMOVING assistance on thin data.
+    firsts = {}
+    for r in receipts:
+        if not isinstance(r, dict) or r.get("kind") != "encode" or not r.get("rating"):
+            continue
+        topic, node = r.get("topic"), r.get("node")
+        if not isinstance(topic, str) or not isinstance(node, str):
+            continue                # an unhashable key would take the whole command down
+        key = (topic, node)
+        if key not in firsts:
+            firsts[key] = r
+    clean = [r for r in firsts.values() if r.get("grade") == "recalled"]
+    if len(firsts) >= 12 and len(clean) >= int(0.9 * len(firsts)):
+        out.append({
+            "id": "scaffold-entry", "field": "challenge_band.target_success",
+            "current": (model.get("challenge_band") or {}).get("target_success"),
+            "proposed": 0.80,
+            "evidence": ("%d of your last %d first attempts were clean — you are being met "
+                         "below your level, and assistance measurably costs the "
+                         "already-knowledgeable" % (len(clean), len(firsts))),
+            "grade": "evidence-backed"})
+
+    # 3 · DESIRED RETENTION — never a number the engine invents; it points at the CURVE.
+    wl = stats_like if isinstance(stats_like, dict) else None
+    if wl and wl.get("points") and len(wl["points"]) > 1:
+        per_day = {round(pt["desired_retention"], 2): pt["reviews_per_day"]
+                   for pt in wl["points"]}
+        cur = as_number((model.get("memory") or {}).get("desired_retention"), 0.9)
+        if per_day.get(0.90) and per_day[0.90] > 12 and cur >= 0.90:
+            out.append({
+                "id": "workload", "field": "memory.desired_retention",
+                "current": cur, "proposed": None,          # ← deliberately no number
+                "evidence": ("your schedule is asking for ~%.0f reviews a day at %d%%; the "
+                             "curve in `stats.workload` shows what each setting costs"
+                             % (per_day[0.90], round(cur * 100))),
+                "grade": "model-derived",
+                "note": ("the engine does NOT recommend a value — Anki removed its own "
+                         "auto-recommendation and our receipts carry no review durations "
+                         "to price the trade honestly. Show the curve; they choose.")})
+
+    # 4 · SRL PROMPT CADENCE — specific, feedback-paired, and FADING. Generic prompting at
+    #     scale is a documented null; the moderators that make it work (specificity,
+    #     feedback, adaptivity) are the conditions, not decoration.
+    conf = [r for r in receipts if isinstance(r, dict) and r.get("kind") == "review"
+            and as_number(r.get("confidence")) is not None and r.get("grade")]
+    overconf = [r for r in conf if (as_number(r.get("confidence")) or 0) >= 70
+                and r.get("grade") == "lapsed"]
+    if len(conf) >= 10 and len(overconf) >= 3 and settings.get("srl", "on") != "off":
+        out.append({
+            "id": "srl-calibration", "field": "prompt:calibration",
+            "current": None, "proposed": "one calibration line at the review close",
+            "evidence": ("%d of your %d confidence-rated reviews were high-confidence misses "
+                         "— that specific gap is what a calibration prompt is for"
+                         % (len(overconf), len(conf))),
+            "grade": "evidence-backed",
+            "note": "fades after two clean weeks; `settings.srl = off` silences it"})
+    return out[:PROPOSAL_MAX]
+
+def cmd_propose(_args):
+    """Read-only. Emits at most three engine-justified adaptations, never applies one."""
+    receipts = collect_receipts()
+    model = read_model()
+    props = compute_proposals(receipts, model, workload_curve(receipts, model))
+    emit({"proposals": props, "n": len(props),
+          "families": ["session-shape", "scaffold-entry", "workload", "srl-calibration"],
+          "read": ("nothing to propose — the engine only steers on families with surviving "
+                   "evidence, and none of them has enough of your data yet" if not props else
+                   "%d proposal%s, each with its evidence; none is applied until you say so"
+                   % (len(props), "" if len(props) == 1 else "s")),
+          "contract": ("proposed by the engine from receipts · consented by you · logged with "
+                       "its evidence · reversible (Article 12). The engine never infers a "
+                       "trait and never applies a change itself.")})
+
+def cmd_adaptations(_args):
+    """The ledger: every adaptation, its evidence, and whether it is still in force."""
+    rows = [r for r in read_jsonl(p(ADAPTATIONS_FILE)) if isinstance(r, dict)]
+    emit({"n": len(rows), "adaptations": rows,
+          "read": ("no adaptation has ever been applied — every setting is where you or the "
+                   "defaults put it" if not rows else
+                   "%d adaptation%s on record, newest last; every one is reversible"
+                   % (len(rows), "" if len(rows) == 1 else "s"))})
 
 def cmd_refit(args):
     """Coarse per-user schedule fit (v1): a single interval multiplier.
@@ -10345,6 +10521,151 @@ def cmd_selftest(_args):
     check("doctor --fix restores a quarantined file only once it actually parses",
           fresh(_doctor_fix))
 
+    # ══ v1.8 · THE STEERING MIRROR ═════════════════════════════════════════════════════
+    #
+    # -- propose is READ-ONLY, floors before it speaks, and the loop closes on consent --
+    def _propose_loop(h):
+        n_nodes = 14
+        g = {"topic": "t", "title": "T", "order": ["n%02d" % i for i in range(n_nodes)],
+             "nodes": {"n%02d" % i: {"claim": "C", "probe": "p"} for i in range(n_nodes)}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        empty = _capture_json(cmd_propose, _ns())          # nothing yet: floors hold
+        for i in range(n_nodes):
+            _capture(cmd_rate, _ns(topic="t", node="n%02d" % i, rating="good", kind="encode",
+                                   grade="recalled", confidence=90))
+        for _ in range(6):
+            _capture(cmd_log_session, _ns(kind="review", minutes=2, items=1))
+        _RECEIPTS_CACHE.clear()
+        before_state = json.dumps(read_json(p("learner-model.json")), sort_keys=True)
+        props = _capture_json(cmd_propose, _ns())
+        after_state = json.dumps(read_json(p("learner-model.json")), sort_keys=True)
+        ids = {pr["id"] for pr in props["proposals"]}
+        # consent applies it, and the LEDGER records the evidence with it
+        _capture(cmd_model, _ns(set=["settings.default_mode=sprint"],
+                                because="6 of 6 sessions covered one item",
+                                grade="model-derived"))
+        led = _capture_json(cmd_adaptations, _ns())
+        after = _capture_json(cmd_propose, _ns())
+        return (empty["n"] == 0                                  # floors: silence, not noise
+                and "session-shape" in ids and "scaffold-entry" in ids
+                and before_state == after_state                  # propose WROTE NOTHING
+                and len(props["proposals"]) <= PROPOSAL_MAX
+                and all(pr.get("evidence") and pr.get("grade") for pr in props["proposals"])
+                and led["n"] == 1 and led["adaptations"][0]["source"] == "consented"
+                and led["adaptations"][0]["from"] == "standard"
+                and led["adaptations"][0]["reversible"] is True
+                and "session-shape" not in {pr["id"] for pr in after["proposals"]})
+    check("propose is read-only, floored, evidence-carrying — and consent closes the loop",
+          fresh(_propose_loop))
+
+    # -- the floors are REAL: below them the engine stays silent, whatever the pattern --
+    def _propose_floors(h):
+        g = {"topic": "t", "title": "T", "order": ["n%d" % i for i in range(5)],
+             "nodes": {"n%d" % i: {"claim": "C", "probe": "p"} for i in range(5)}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        for i in range(5):                       # 5 PERFECT first attempts — the pattern is
+            _capture(cmd_rate, _ns(topic="t", node="n%d" % i, rating="good",   # there, the
+                                   kind="encode", grade="recalled"))           # evidence isn't
+        _RECEIPTS_CACHE.clear()
+        thin = _capture_json(cmd_propose, _ns())
+        return "scaffold-entry" not in {pr["id"] for pr in thin["proposals"]}
+    check("a pattern below its floor proposes NOTHING (silence, not a guess)",
+          fresh(_propose_floors))
+
+    # -- and never more than PROPOSAL_MAX, even when every family fires --
+    def _propose_capped(h):
+        n_nodes = 40
+        g = {"topic": "t", "title": "T", "order": ["n%02d" % i for i in range(n_nodes)],
+             "nodes": {"n%02d" % i: {"claim": "C", "probe": "p"} for i in range(n_nodes)}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        for i in range(n_nodes):                          # family 2: clean first attempts
+            _capture(cmd_rate, _ns(topic="t", node="n%02d" % i, rating="good", kind="encode",
+                                   grade="recalled", confidence=90))
+        for _ in range(6):                                # family 1: one-item sessions
+            _capture(cmd_log_session, _ns(kind="review", minutes=2, items=1))
+        os.environ["ENGRAM_TODAY"] = "2026-07-12"         # family 4: confident misses
+        for i in range(n_nodes):
+            _capture(cmd_rate, _ns(topic="t", node="n%02d" % i,
+                                   rating="again" if i < 4 else "good",
+                                   grade="lapsed" if i < 4 else "recalled", confidence=90))
+        # family 3: a genuinely heavy schedule. Set stabilities directly — this fixture is
+        # testing the PROPOSAL engine, not the scheduler, and driving 40 nodes to a one-day
+        # interval through real reviews would test FSRS instead.
+        gph = load_graph("t")
+        for node in gph["nodes"].values():
+            if isinstance(node, dict) and node.get("state") != "new":
+                node["fsrs"]["s"] = 1.0
+        save_graph(gph)
+        _RECEIPTS_CACHE.clear()
+        props = _capture_json(cmd_propose, _ns())
+        raw = compute_proposals(collect_receipts(), read_model(),
+                                workload_curve(collect_receipts(), read_model()))
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        # THE CAP MUST BIND, or this check proves nothing. The fixture qualifies for a
+        # FOURTH family (srl-calibration: 40 confidence-rated reviews, 4 high-confidence
+        # misses) — so its absence from the output is the truncation, observed rather than
+        # assumed.
+        conf = [r for r in collect_receipts() if r.get("kind") == "review"
+                and as_number(r.get("confidence")) is not None and r.get("grade")]
+        overconf = [r for r in conf if (as_number(r.get("confidence")) or 0) >= 70
+                    and r.get("grade") == "lapsed"]
+        qualifies_for_four = len(conf) >= 10 and len(overconf) >= 3
+        return (len(props["proposals"]) == PROPOSAL_MAX and len(raw) == PROPOSAL_MAX
+                and props["n"] == PROPOSAL_MAX
+                and qualifies_for_four
+                and "srl-calibration" not in {pr["id"] for pr in raw})
+    check("propose never exceeds PROPOSAL_MAX, even when every family fires",
+          fresh(_propose_capped))
+
+    # -- the ledger remembers a learner's OWN change too, and marks it as theirs --
+    def _ledger_sources(h):
+        _capture(cmd_model, _ns(set=["settings.momentum=off"]))
+        led = _capture_json(cmd_adaptations, _ns())
+        rows = led["adaptations"]
+        # …and a no-op set writes NO row: the ledger records changes, not commands
+        _capture(cmd_model, _ns(set=["settings.momentum=off"]))
+        again = _capture_json(cmd_adaptations, _ns())
+        return (len(rows) == 1 and rows[0]["source"] == "learner"
+                and rows[0]["grade"] == "learner" and again["n"] == 1)
+    check("the adaptation ledger records who changed what, and never a no-op",
+          fresh(_ledger_sources))
+
+    # -- and the proposal engine degrades on hand-edited state, like every read path --
+    def _propose_degrades(h):
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="encode"))
+        # an unhashable topic in a receipt poisoned the `firsts` key and took `stats` (and
+        # therefore the dashboard, and therefore /coach) down with it — 472 crashes in 600
+        # fuzzed states the moment `propose` joined the stats path
+        append_jsonl(p("receipts", "t.jsonl"),
+                     {"id": "r_bad", "ts": "2026-07-06", "topic": {"a": 1}, "node": ["x"],
+                      "kind": "encode", "rating": "good", "grade": "recalled"})
+        append_jsonl(p("sessions.jsonl"), 5)
+        append_jsonl(p("sessions.jsonl"), {"ts": {"nope": 1}, "kind": "review", "items": {}})
+        _RECEIPTS_CACHE.clear()
+        _capture_json(cmd_propose, _ns())        # must not raise
+        s = _capture_json(cmd_stats, _ns())      # nor here, nor on the page
+        _capture_json(cmd_report, _ns())
+        return isinstance(s["proposals_pending"], int)
+    check("propose degrades on hand-edited receipts and sessions (never bricks stats)",
+          fresh(_propose_degrades))
+
+    # -- `rhythms` is GONE, and what replaced it describes without scheduling --
+    def _rhythms_retired(h):
+        m = read_json(p("learner-model.json"))
+        _capture(cmd_log_session, _ns(kind="learn", minutes=10, items=2))
+        s = _capture_json(cmd_stats, _ns())
+        # a v1.7 model carrying the dead key still loads, and does not get it back
+        m2 = read_json(p("learner-model.json")); m2["rhythms"] = {"morning": 3}
+        write_json(p("learner-model.json"), m2)
+        healed = _capture_json(cmd_model, _ns())
+        return ("rhythms" not in m
+                and s["sessions"]["total"] == 1
+                and "does not schedule by time of day" in s["sessions"]["note"]
+                and "rhythms" in healed)     # an existing key is PRESERVED, never deleted
+    check("`rhythms` is retired for new models; description replaces it, scheduling does not",
+          fresh(_rhythms_retired))
+
     print("\n%d/%d checks passed" % (total[0] - len(failures), total[0]))
     sys.exit(1 if failures else 0)
 
@@ -10364,7 +10685,8 @@ def _ns(**kw):
                     canary=False, grader_context=None, audited_rating=None,  # v1.4
                     rater=None, gold=None, contributor=None, allow_unvalidated=False,
                     relearn=False, attempt=None,   # v1.5
-                    extend=False, frontier_of=None, fix=False)   # v1.7
+                    extend=False, frontier_of=None, fix=False,   # v1.7
+                    because=None)   # v1.8  (`grade` already defaults above)
     defaults.update(kw)
     for k, v in defaults.items():
         setattr(ns, k, v)
@@ -10500,10 +10822,18 @@ def main():
     sp.add_argument("action", choices=("add", "list", "count", "clear"))
     sp.add_argument("--json"); sp.add_argument("--file")
 
+    for name in ("propose", "adaptations"):
+        sub.add_parser(name)
+
     sp = sub.add_parser("model")
     sp.add_argument("--set", action="append")
     sp.add_argument("--add-interest", action="append")
     sp.add_argument("--add-goal", action="append")
+    sp.add_argument("--because", help="the engine's evidence for this change (goes in the "
+                                      "adaptation ledger; marks the row `consented`)")
+    sp.add_argument("--grade", choices=("evidence-backed", "model-derived", "heuristic",
+                                        "learner"),
+                    help="how well-founded this change is (ledger only)")
 
     sp = sub.add_parser("focus")
     sp.add_argument("action", choices=("on", "off", "status"))
@@ -10558,6 +10888,7 @@ def main():
         "transfer": cmd_transfer, "capstone": cmd_capstone,
         "export": cmd_export, "retire": cmd_retire,
         "adjudication-stats": cmd_adjudication_stats,
+        "propose": cmd_propose, "adaptations": cmd_adaptations,
     }
     # Serialize state mutators: the skills run engine processes concurrently by
     # design (background artifact-smith registering while the tutor rates), and

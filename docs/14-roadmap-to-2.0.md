@@ -705,7 +705,15 @@ brick an existing topic: the byte-equality fixture for old nodes is the tripwire
 
 ---
 
-# v1.8 — **The Steering Mirror** *(the consented adaptation loop — the v2.0 thesis)*
+# v1.8 — **The Steering Mirror** — ✅ SHIPPED 2026-07-24
+
+> **RESULT.** Article 12 is constitutional; `propose` (read-only, floored, ≤3, evidence and
+> grade on every row) and `adaptations` (the append-only ledger) ship; `rhythms` is retired
+> in favour of description that cannot steer. The closed families are the safety argument:
+> session shape, assistance level (the one surviving ATI), the workload curve (no number
+> proposed), and one fading metacognitive prompt.
+
+# v1.8 — the original work order *(the consented adaptation loop — the v2.0 thesis)*
 
 > *The measurement layer is complete; the adaptation policy is prose. v2.0's claim —
 > "the system evolves with the user" — becomes real here, as proposals the engine

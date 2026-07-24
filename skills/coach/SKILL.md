@@ -276,9 +276,35 @@ gh api repos/nagisanzenin/engram-data/discussions -f title="…" -f body="…"
 
 Point them at **[CONTRIBUTING-DATA.md](../../CONTRIBUTING-DATA.md)** for the full document — including how to withdraw, which is: **it is a GitHub post; delete it.** That is the entire mechanism, deliberately.
 
+## `propose` — the adaptation loop (v1.8, Article 12)
+
+```bash
+python3 "$ENGRAM" propose
+```
+
+At most **three** adaptations the engine can justify from this learner's own receipts, each with its `evidence` string and its `grade` (`evidence-backed` / `model-derived` / `heuristic`). It is **read-only** — nothing is applied until the learner says yes.
+
+**How to run it, and the rules that keep it from becoming a horoscope:**
+
+1. **Quote the evidence, verbatim.** *"Five of your last six sessions covered one item — want Sprint as the default?"* Never *"I think you'd do better with…"*. If you cannot say the number, do not make the offer.
+2. **Say the grade when it is not `evidence-backed`.** A `model-derived` proposal is the engine's own arithmetic, not a finding: *"that's from your numbers, not from a study."*
+3. **Arrow-key, one at a time, and "no" is free.** Never present three at once as a to-do list. A declined proposal is not re-raised in the same check-in.
+4. **Apply through the consent path so the ledger records WHY:**
+   ```bash
+   python3 "$ENGRAM" model --set <field>=<value> \
+     --because "<the engine's evidence string>" --grade <the proposal's grade>
+   ```
+   That writes `adaptations.jsonl`. A change with no `--because` is recorded as the learner's own — equally worth remembering, equally reversible.
+5. **`memory.desired_retention` is never a number you propose.** Show `stats.workload`'s curve and let them choose; Anki removed its own auto-recommendation and our receipts carry no durations to price the trade.
+6. **Explain current settings from the ledger, not from memory:** `python3 "$ENGRAM" adaptations` — *"Sprint has been your default since 30 July, because five of six sessions ended early. Revert any time."*
+
+**What the engine will never propose, and neither may you:** anything derived from a trait, a style, a personality, or a time of day. The families are closed on purpose — adaptivity's evidence base is mostly a graveyard, and the survivors are few.
+
 ## `schedule`
 
-Read `rhythms` + sessions.jsonl patterns; offer (never impose): best-slot suggestions, spacing-across-nights reminders if they cram (foundations P11 — say it as their data: "3 sessions Tuesday, none since; spaced would beat this by your own week-bucket numbers"), and a default-mode change if sessions routinely run over.
+Read `stats.sessions` (v1.8 — it replaces the `rhythms` field, which was written by nothing for four releases). It is **descriptive only**: how many sessions, and when. Offer, never impose: spacing-across-nights if they cram (foundations P11 — say it as their data: *"three sessions Tuesday, none since; spaced beats that by your own numbers"*), and a default-mode change if sessions routinely run over — via `propose`, so it lands in the ledger.
+
+**Do not schedule by time of day.** Engram does not adapt to chronotype: in adults, over 80% of studies find no main effect on cognitive performance and no intervention study shows that scheduling by it improves learning. Describing a pattern back to someone is honest; steering on it would be a horoscope with timestamps.
 
 ## Always
 
