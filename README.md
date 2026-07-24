@@ -3,10 +3,10 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.3.0-6D4AA8.svg" alt="Version 1.3.0">
+  <img src="https://img.shields.io/badge/version-1.4.0-6D4AA8.svg" alt="Version 1.4.0">
   <a href="https://www.npmjs.com/package/opencode-engram-learning"><img src="https://img.shields.io/npm/v/opencode-engram-learning?label=npm&color=6D4AA8" alt="npm package"></a>
   <img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="MIT License">
-  <img src="https://img.shields.io/badge/selftest-243%2F243-3E7D5A.svg" alt="243/243 checks">
+  <img src="https://img.shields.io/badge/selftest-249%2F249-3E7D5A.svg" alt="249/249 checks">
   <a href="gold/assessor-gold.jsonl"><img src="https://img.shields.io/badge/grader%20inflations-0%2F258-3E7D5A.svg" alt="0 of 258 blind judgments graded up, on the shipping spec"></a>
   <img src="https://img.shields.io/badge/scheduler-FSRS--4.5-6D4AA8.svg" alt="FSRS-4.5">
   <a href="CONTRIBUTING-DATA.md"><img src="https://img.shields.io/badge/data-100%25%20local-3E7D5A.svg" alt="100% local — the engine has no network code, proven by a permanent selftest"></a>
@@ -352,14 +352,14 @@ The model never does calendar math; this does:
 | `artifact set\|clear\|list` | register a built explorable on its node (validated; powers regeneration tracking + the medium comparison) |
 | **`gold`** | the 86-item adversarial gold set, **answers stripped by construction** — shaped exactly like a real settle payload, so the audit grades the real assessor |
 | **`assessor-audit --file F`** | **grade the grader.** QWK (headline) · raw agreement (never quoted alone) · signed leniency bias · test–retest · confusion matrix · per-case-type breakdown |
-| **`grader-health`** | the latest audit's verdict. `stats` embeds it, and stamps `grader_unvalidated` on every retention figure until it passes |
+| **`grader-health [--grader-context S]`** | the latest audit's verdict — **and it EXPIRES** (v1.4): a grader swap voids the badge, because a swapped model grades measurably more lenient. `stats` embeds it, and stamps `grader_unvalidated` on every retention figure until it passes |
 | **`transfer [--topic T]`** | the mature concepts ready for the harder question — the `transfer_probe` the architect wrote and nothing ever asked. `/review` serves it automatically |
 | **`capstone --topic T`** | materialize the build as a real NODE in the DAG (idempotent). New topics get one from `add-topic`; it requires every concept, so it cannot be silently skipped |
 | `stats` / `report` | telemetry JSON (incl. `modality` — explorable vs dialogue retention) · self-contained HTML dashboard |
 | `refit` | fit review intervals to your measured recall (guarded, ≥50 reviews) |
 | **`export [--topic T]`** | a **text-stripped**, **attributed** receipt bundle written **to a file**. Whitelist-constructed — there is no code path by which a production could leave. **Refuses** if your grader is unaudited |
 | `session-start` / `log-session` | ambient nudge (hook) · session telemetry |
-| `selftest` | 243 checks| 234 checks| 230 checks| 217 checks| 214 checks| 213 checks| 213 checks| 207 checks| 201 checks| 200 checks| 192 checks| 191 checks over the FSRS math, state machine, adherence/retention arithmetic, the grader-audit statistics, and every hardened boundary |
+| `selftest` | 249 checks| 243 checks| 234 checks| 230 checks| 217 checks| 214 checks| 213 checks| 213 checks| 207 checks| 201 checks| 200 checks| 192 checks| 191 checks over the FSRS math, state machine, adherence/retention arithmetic, the grader-audit statistics, and every hardened boundary |
 
 </details>
 

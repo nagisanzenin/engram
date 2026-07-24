@@ -46,8 +46,14 @@ Never dress this number up and never soften it into a compliment. It is the one 
 ## 0.5 · The oracle behind every number — say this BEFORE any retention figure (v0.7)
 
 ```bash
-python3 "$ENGRAM" grader-health
+python3 "$ENGRAM" grader-health --grader-context "<platform>/<model label you actually know>"
 ```
+
+**Pass `--grader-context` whenever your platform tells you which model you are** (e.g.
+`claude-code/opus-4.8`). Never guess one — an invented label is fabricated data, and omitting
+it is honest: the engine falls back to time-based staleness. A badge belongs to the grader
+that earned it, and a silent model swap grades *measurably more lenient*, which is Engram's
+one dangerous direction.
 
 Every grade in this dashboard was written by the blind assessor. **Until v0.7 nobody had ever graded the grader** — and if it is lenient, every retention number Engram has ever shown is inflated and the system could not know. So `stats.retention` now carries `grader_unvalidated`, and it is your job to voice it.
 
@@ -61,7 +67,10 @@ Every grade in this dashboard was written by the blind assessor. **Until v0.7 no
 
   **Offer it exactly once, when it would actually change something (v1.3):** if `stats.receipts` ≥ 20 and `settings.audit_offered` is unset, make it an arrow-key choice — *run the audit now / later* — then record the offer (`model --set settings.audit_offered=<today>`) whichever they pick, and **never offer again**. Below 20 receipts, or once offered, it stays the one calm line. Declining costs nothing and is never mentioned.
 - **`verdict: "fail" | "incomplete" | "insufficient-runs"`** (`grader_unvalidated: true`) — say it **first, plainly, before any retention number**, and say what it means: *"the grader failed its own audit (QWK 0.42, floor is 0.60). Every recall number below was produced by it, so treat all of them as unearned until it's fixed."* Read `reasons` aloud; they are written for a human.
+- **`verdict: "stale-model" | "stale-age"`** (v1.4, `grader_unvalidated: true`) — the badge **expired**, and the fix is cheap. Say it plainly and offer the canary: *"the QWK below was earned by a different model than the one grading you now. `/coach audit --canary` re-checks 15 hand-picked items in about a minute — a clean run re-licenses the badge; a dirty one means the full audit."* Do **not** report retention as validated in the meantime, and do not treat this as a failure of the grader — nothing has been measured against it yet.
 - **`verdict: "pass" | "warn"`** — one line with the real numbers: *"grader checks out: QWK 0.93 against the gold set, and it has never once graded UP."* Then move on.
+
+**And read `by_gold_band` before you quote the headline (v1.4).** Rubric-anchored graders are near-human at the extremes and measurably weaker in the middle, so a healthy pooled QWK can sit on top of a soft `partial` band — exactly where a learner's borderline answers live. If `by_gold_band["partial"]["agreement"]` is materially below the others, say so: *"it agrees almost perfectly on clear passes and clear misses, and it is weakest on the borderline ones — which is where most of your `partial`s are."*
 
 **Never quote `exact_agreement` on its own.** Raw agreement overstates chance-corrected agreement by 34–41 points in the measured literature (`docs/07` §3) — *"the grader looks right 89% of the time"* is compatible with κ ≈ 0.45. **QWK is the headline. Raw agreement never travels alone.**
 
@@ -83,6 +92,17 @@ Then spawn **engram-assessor** — **three independent times**, on the same item
 > 2. **The answers are not in the file, by construction.** `gold` builds each item from a whitelist, so `gold_grade`, `case_type` and `rationale` cannot leak — and `assessor-audit` **dies** if the grader's output carries any of them, because that could only mean it was shown them. (v0.6 shipped a dead feature that a dogfood *certified*, purely because the dogfood prompt handed the assessor the answer. Never again.)
 > 3. **Three runs, independent, no shared context.** One run cannot certify anything: with fewer than three, the consistency–bias paradox check cannot run, and the engine will refuse to pass it (`insufficient-runs`).
 
+**`--canary` — the cheap re-licensing run (v1.4).** When `grader-health` says `stale-model` or `stale-age`, do this FIRST rather than the full ceremony:
+
+```bash
+python3 "$ENGRAM" gold --canary > /tmp/engram-canary.json     # 15 items, answers stripped
+# …three independent assessor spawns on that file, same three rules as above…
+python3 "$ENGRAM" assessor-audit --file /tmp/engram-canary.json-runs --canary \
+  --grader-context "<platform>/<model>"
+```
+
+A `canary-pass` re-licenses the last full audit and says so; a `canary-fail` means the full 86-item run, now. **A canary can never certify a grader on its own** — it grades 15 deliberately hard items and the engine refuses to let it mint a `pass`. Never present it as an audit.
+
 Collect the three output arrays and settle:
 
 ```bash
@@ -91,6 +111,8 @@ python3 "$ENGRAM" assessor-audit --file /tmp/engram-runs.json
 ```
 
 The engine computes **QWK** (headline), raw agreement (never alone), **signed leniency bias** (`+` = inflating), **test–retest**, the confusion matrix, and a per-case-type breakdown, then writes `audits/<date>-NN.json`. Audits are append-only: a re-audit never overwrites the last one.
+
+Pass `--grader-context` here too, so the badge records *which grader earned it*.
 
 **Narrate the engine's verdict; never compute your own.** If it says `fail`, say so — including in the README, if it is your project. A system whose whole thesis is honest measurement does not get to hide its own worst measurement.
 

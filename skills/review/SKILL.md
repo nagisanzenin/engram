@@ -113,7 +113,17 @@ Relay the returned due date in passing, not ceremonially ("back in 12 days"). **
 
 ## 3 · Assessor audit (keep self-grading honest)
 
-If the session had ≥8 items, any disputed grade, or ≥3 `partial`s: stash `{topic, node, probe, claim, rubric, production, confidence, kind:"audit", tutor_rating:"<r>"}` (plus `node_kind:"procedure"` on procedure items, so the auditor step-grades) (the engine mints the `sid`; the assessor must return it) for each such item, then spawn **engram-assessor** on `stash list` for an audit verdict, and `stash clear` after. Report disagreements to the learner and log a `misconception add` or a note — do **not** re-rate already-committed items (scheduling stands; drift is the coach's monthly business). Disputes from the learner: same path, once.
+If the session had ≥8 items, any disputed grade, or **any `partial`** (v1.4 — the mid-band is where graders measurably diverge, so it is oversampled on purpose): stash `{topic, node, probe, claim, rubric, production, confidence, kind:"audit", tutor_rating:"<r>"}` (plus `node_kind:"procedure"` on procedure items, so the auditor step-grades) (the engine mints the `sid`; the assessor must return it) for each such item, then spawn **engram-assessor** on `stash list` for an audit verdict, and `stash clear` after.
+
+**Then PERSIST the verdict — it is evidence, not conversation (v1.4).** For each audited item:
+
+```bash
+python3 "$ENGRAM" rate --topic <t> --node <n> --kind audit \
+  --rating <the ASSESSOR's rating> --audited-rating <what YOU committed> \
+  --grade <assessor grade> --production-file <tmp-answer.txt>
+```
+
+This writes an `audit` receipt and **changes nothing else** — no FSRS state, no due date, no `reps`. Audits inform; they never reschedule (re-rating an item the learner already acted on would let a second opinion silently rewrite their schedule). The receipts feed `stats.self_grading`: how often the tutor agrees with the blind assessor, and **in which direction it differs** — the only measurement of the one grader `/coach audit` cannot reach, since the tutor grades in-context with the dialogue in front of it. Report disagreements to the learner; do **not** re-rate committed items. Disputes from the learner: same path, once.
 
 ## 4 · Close
 

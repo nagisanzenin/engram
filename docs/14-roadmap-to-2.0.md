@@ -227,7 +227,24 @@ and uncapped behavior is untouched.
 
 ---
 
-# v1.4 — **The Audited Tutor** *(the instrument keeps its edge)*
+# v1.4 — **The Audited Tutor** — ✅ SHIPPED 2026-07-24
+
+> **RESULT.** The tutor is measured (`stats.self_grading`, agreement with the blind
+> assessor, direction published, limits in the `read`); audit receipts persist and
+> reschedule nothing; the badge **expires** on a grader swap and `export` refuses behind
+> it; the canary re-licenses in 15 items and can never mint a `pass`; audits report
+> `by_gold_band`; and `docs/ADJUDICATION.md` + `adjudication-stats` finally make an
+> outside human's work countable.
+>
+> **Three build-time corrections to this work order**, each caught by a gate:
+> (1) the canary must be **quota-stratified across all three bands** — the specified
+> "oversample partial" produced a 100% mid-band set, structurally blind to a grader
+> failing the clear cases; (2) `_latest_audit` must **skip canary files**, or running a
+> canary replaces an 86-item verdict with a 15-item one and `canary-pass` reads as
+> `unreadable`, voiding a good badge; (3) `export` needed its **own** `--grader-context`
+> to inherit staleness — the gate it most needs to be behind.
+
+# v1.4 — the original work order *(the instrument keeps its edge)*
 
 > *The tutor writes every review receipt and every `error_class`, and nothing audits it.
 > The assessor's audit never expires — a model upgrade silently inherits a badge it never

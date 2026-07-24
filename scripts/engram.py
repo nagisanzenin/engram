@@ -32,7 +32,7 @@ SCHEMA = 1
 # The one place the engine knows its own version. Read by `export`, so a shared receipt states
 # which engine produced it — a corpus of receipts from unknown engine versions is not a corpus.
 # Pinned against .claude-plugin/plugin.json by a selftest, so it cannot drift.
-ENGRAM_VERSION = "1.3.0"
+ENGRAM_VERSION = "1.4.0"
 RETENTION_DEFAULT = 0.90
 INTERVAL_MAX = 365
 RETENTION_MIN, RETENTION_MAX = 0.70, 0.97   # sane desired-retention bounds
@@ -49,6 +49,10 @@ FACTOR = 19.0 / 81.0  # chosen so R(t=S) = 0.9
 
 RATINGS = {"again": 1, "hard": 2, "good": 3, "easy": 4}
 GRADES = ("recalled", "partial", "lapsed")
+# Ordinal positions for the four ratings — 0-based and contiguous, which is what a
+# weighted kappa needs (RATINGS above is 1-based and is a different thing: the FSRS
+# grade value). Two maps, two jobs, deliberately not merged.
+RATING_SCORE = {"again": 0, "hard": 1, "good": 2, "easy": 3}
 # Receipt kinds. Every v0.6 metric keys off the exact literal "review", so an
 # invented kind would be permanently invisible — and receipts are append-only, so
 # it could never be corrected. Validated at ingest; a bad batch dies before any write.
@@ -1372,6 +1376,39 @@ def apply_item(item, kind):
                    ("%.1fd" % s) if s is not None else "none",
                    rr, "" if rr == 1 else "s",
                    int(TRANSFER_MATURE_S), TRANSFER_MATURE_REPS))
+    # ⚠ AN AUDIT RECEIPT INFORMS; IT NEVER RESCHEDULES (v1.4, docs/15 §2.3).
+    #
+    # `/review` has spawned the blind assessor to spot-audit the tutor's own grades since
+    # v0.2 — and the result was narrated once and then evaporated. `KINDS` has carried an
+    # `audit` slot the whole time with nothing writing it. That is the transfer_probe defect
+    # on the ONE grader `/coach audit` can never measure: the tutor writes every `/review`
+    # receipt and every `error_class` behind `procedure_slip_share`, in-context, with the
+    # dialogue in front of it, and nothing has ever checked it.
+    #
+    # So the verdict is now evidence on disk — and it touches NOTHING. No FSRS state, no node
+    # state, no schedule, no `reps`. `/review`'s rule has always been "audits inform, they
+    # don't reschedule" (re-rating an already-committed item would let a second opinion
+    # silently rewrite a schedule the learner already acted on); this makes that structural
+    # rather than a sentence in a skill file.
+    if kind == "audit":
+        extra = {"audited_rating": item.get("audited_rating"),
+                 "agree": (bool(item["agree"]) if isinstance(item.get("agree"), bool)
+                           else None),
+                 "node_kind": node_kind_of(node)}
+        receipt = make_receipt(item, extra, kind)
+        append_jsonl(p("receipts", "%s.jsonl" % item["topic"]), receipt)
+        _cache_receipt(item["topic"], receipt)
+        if isinstance(sid, str) and sid:
+            drop_stash_sid(item["topic"], sid)
+        else:
+            drop_stash(item["topic"], item["node"])
+        return {"node": item["node"], "topic": item["topic"], "kind": "audit",
+                "applied": True, "scheduled": False,
+                "audited_rating": receipt.get("audited_rating"),
+                "assessor_rating": receipt.get("rating"),
+                "agree": receipt.get("agree"),
+                "note": ("audit recorded — the schedule is untouched. It measures the TUTOR "
+                         "against the blind assessor; see stats.self_grading.")}
     rating = item["rating"]
     model = load_model()
     node.setdefault("fsrs", _fresh_fsrs())
@@ -1491,6 +1528,13 @@ def cmd_rate(args):
             "confidence": args.confidence, "production": production,
             "grade": args.grade, "probe": args.probe, "source": args.source,
             "error_class": getattr(args, "error_class", None)}
+    ar = getattr(args, "audited_rating", None)
+    if ar is not None:
+        if args.kind != "audit":
+            die("--audited-rating is only meaningful on `--kind audit` (it records what the "
+                "TUTOR graded, so the blind assessor's verdict can be compared to it). A "
+                "rating-bearing audit of the wrong kind would reschedule the node.")
+        item["audited_rating"] = ar
     emit(apply_item(item, args.kind))
 
 def cmd_receipt(args):
@@ -2291,6 +2335,81 @@ BY_KIND_CAVEAT = ("kinds are different material by construction — a procedure 
                   "and pre-v1.1 receipts carry no kind stamp — they count as concept, which "
                   "is what every pre-v1.1 grading event actually was.")
 
+SELF_GRADING_MIN_N = 20   # below this: counts, never a rate (the house floor rule)
+
+def compute_self_grading(receipts):
+    """Does the TUTOR agree with the blind assessor? (v1.4 — the grader nothing measured.)
+
+    `/coach audit` measures the assessor. It has never measured the tutor, and the tutor
+    writes **every `/review` receipt** and every `error_class` behind `procedure_slip_share`
+    — in-context, with the dialogue it just ran in front of it, which is the exact condition
+    the separation of powers exists to distrust.
+
+    ⚠ WHAT THIS IS NOT. It is not validity. The tutor cannot be spawned blind — dialogue
+    context is a permanent confound — so no blindness property is ever claimed for it. This
+    is educational measurement's *read-behind*: agreement with a second rater whose OWN
+    validity is what the gold-set audit measures. Tutor validity is bounded by that chain and
+    can never exceed it, and the `read` says so in those words rather than in a footnote.
+
+    `signed_bias` > 0 means the tutor rates ABOVE the blind grader — the flattering
+    direction, and the only one that can stop a learner reviewing. Reported with direction
+    counts beside it, because a mean near zero is also what "inflates half, deflates half"
+    looks like (§4.8 Q6, rule 3).
+
+    Banded on `partial`, deliberately: the 2026 short-answer literature finds LLM graders
+    near-human at the extremes and materially off in the mid-range, which is exactly where
+    a tutor's sympathy for a learner it just taught would land."""
+    audits = [r for r in receipts if r.get("kind") == "audit"
+              and r.get("rating") in RATINGS and r.get("audited_rating") in RATINGS]
+    n = len(audits)
+    out = {"n": n, "min_n": SELF_GRADING_MIN_N,
+           "definition": ("of the tutor's own /review grades that the blind assessor "
+                          "re-graded, how often the two agree — and in which direction they "
+                          "differ. Agreement with the assessor, NOT validity.")}
+    if not n:
+        out.update(qwk_vs_assessor=None, signed_bias=None, agree=0, tutor_higher=0,
+                   tutor_lower=0, by_band={}, insufficient_data=True,
+                   read=("no /review grade has ever been spot-audited. The tutor writes every "
+                         "review receipt and nothing has ever checked it — /review escalates "
+                         "to the assessor on a large, disputed, or partial-heavy session."))
+        return out
+    pairs = [(r["audited_rating"], r["rating"]) for r in audits]   # (tutor, assessor)
+    higher = sum(1 for t, a in pairs if RATING_SCORE[t] > RATING_SCORE[a])
+    lower = sum(1 for t, a in pairs if RATING_SCORE[t] < RATING_SCORE[a])
+    agree = sum(1 for t, a in pairs if t == a)
+    bias = sum(RATING_SCORE[t] - RATING_SCORE[a] for t, a in pairs) / float(n)
+    band = {}
+    for r, (t, a) in zip(audits, pairs):
+        # Band by what the ASSESSOR said — the closest thing to ground truth on the item.
+        key = {"again": "lapsed", "hard": "partial"}.get(a, "recalled")
+        s = band.setdefault(key, {"n": 0, "agree": 0, "bias_sum": 0.0})
+        s["n"] += 1
+        s["agree"] += 1 if t == a else 0
+        s["bias_sum"] += RATING_SCORE[t] - RATING_SCORE[a]
+    by_band = {k: {"n": v["n"], "agreement": round(v["agree"] / float(v["n"]), 3),
+                   "signed_bias": round(v["bias_sum"] / float(v["n"]), 3)}
+               for k, v in sorted(band.items())}
+    enough = n >= SELF_GRADING_MIN_N
+    q = _qwk([(a, t) for t, a in pairs], scores=RATING_SCORE) if enough else None
+    out.update(qwk_vs_assessor=(round(q, 3) if q is not None else None),
+               signed_bias=(round(bias, 3) if enough else None),
+               agree=agree, tutor_higher=higher, tutor_lower=lower,
+               by_band=by_band, insufficient_data=not enough)
+    limit = ("Agreement with the blind assessor, whose own validity is what `/coach audit` "
+             "measures — tutor validity is bounded by that chain, never better.")
+    if not enough:
+        out["read"] = ("%d spot-audit%s so far: the tutor agreed %d time%s, graded HIGHER %d, "
+                       "lower %d. Counts only — %d audits before any rate. %s"
+                       % (n, "" if n == 1 else "s", agree, "" if agree == 1 else "s",
+                          higher, lower, SELF_GRADING_MIN_N, limit))
+    else:
+        out["read"] = ("tutor vs blind assessor over %d spot-audits: QWK %s, signed bias %s "
+                       "(+ = the tutor grades higher, the flattering direction); it graded "
+                       "UP %d and down %d. %s"
+                       % (n, _fmt(out["qwk_vs_assessor"]),
+                          _fmt(out["signed_bias"], sign=True), higher, lower, limit))
+    return out
+
 def compute_by_kind(receipts):
     """Retention telemetry split by knowledge kind (v1.1, docs/11 P17; the compute_modality
     mold, deliberately: same population (_review_receipts), same one-datum-per-node
@@ -2392,6 +2511,13 @@ def _by_node(receipts):
         # a hand-edited receipt can carry any JSON type here; a dict/list would be an
         # unhashable key and take the whole command down with it
         if not isinstance(topic, str) or not isinstance(node, str) or not topic or not node:
+            continue
+        # An AUDIT receipt is a measurement OF A GRADER, not a retrieval by the learner
+        # (v1.4). It may never become a node's `first` — that slot defines day 0 for every
+        # retention bucket and `days_since_encode` — and it counts toward no population here.
+        # A bare CLI `rate --kind audit` on a never-encoded node is therefore invisible to the
+        # learner's metrics, which is exactly right: nobody retrieved anything.
+        if r.get("kind") == "audit":
             continue
         key = (topic, node)
         first = key not in out
@@ -2571,6 +2697,22 @@ TRANSFER_STATES = ("untested", "probed", "applied")
 TRANSFER_MIN_N = 5
 
 GOLD_SCORE = {"lapsed": 0, "partial": 1, "recalled": 2}   # ordinal; QWK needs the order
+
+# ── THE CANARY (v1.4) ────────────────────────────────────────────────────────────────────
+# A badge is only valid for the grader that earned it. When the model changes underneath a
+# learner (a platform upgrade), the honest options are "re-run the whole 86x3 ceremony" or
+# "carry a badge nobody re-earned" — and the second is how a stale pass gets believed. The
+# canary is the cheap third option: a fixed, seed-stable subset that can only ever RE-LICENSE
+# the prior verdict or DEMAND a full re-audit. It can never mint a `pass` (invariant 12).
+#
+# Composition is deliberate, not random: the mid-band (`partial`) is where the 2026 measured
+# literature puts LLM-grader divergence, and these case types are where THIS grader's real
+# inflations were caught (v1.1.0's audit) or where it still disagrees with the gold on purpose.
+CANARY_N = 15
+CANARY_CASE_TYPES = ("right-answer-wrong-reason", "right-answer-wrong-method",
+                     "partial-credit-boundary", "procedure-partial-boundary",
+                     "slip-vs-conceptual", "fluent-but-empty")
+AUDIT_STALE_DAYS = 90     # when the grader context is unknowable, time is the only signal
 QWK_FLOOR = 0.60        # below this the grader is not trustworthy at all -> teeth
 QWK_TARGET = 0.70       # the conventional threshold for automated scoring -> pass
 BIAS_MAX = 0.15         # signed leniency ceiling: mean(grader - gold), + = inflating
@@ -2716,6 +2858,35 @@ def load_gold(override=None):
         "modified": modified,          # ← the flag that must reach the narrator
     }
 
+def canary_items(items):
+    """The re-licensing subset: ~15 items, chosen the same way every time (v1.4).
+
+    Seed-stable by sha256 of the sid — NOT by `random`, which the engine may not use at all
+    (a shuffled canary is a different instrument each run, and two runs that disagree would
+    be indistinguishable from a grader that changed). Weak/contested case types come first
+    and the `partial` band is oversampled, because that is where the measured literature puts
+    LLM-grader divergence and where this grader's own real inflations were caught."""
+    if not items:
+        return []
+    # STRATIFIED BY BAND, not just sorted by difficulty. The first cut ranked weak-case-type
+    # and mid-band first and drew 15 — and every one came back `partial`, so the canary was
+    # structurally blind to a grader that had started failing the CLEAR cases. A tripwire that
+    # can only see one band is not a tripwire; it is a narrower badge. Quotas oversample the
+    # middle (where the measured divergence lives) while keeping real anchors at both ends.
+    quotas = {"partial": 7, "lapsed": 4, "recalled": 4}
+    def rank(it):
+        return (0 if (it.get("case_type") or "") in CANARY_CASE_TYPES else 1,
+                hashlib.sha256((it.get("sid") or "").encode("utf-8")).hexdigest())
+    picked = []
+    for band, want in sorted(quotas.items()):
+        pool = sorted((i for i in items if i.get("gold_grade") == band), key=rank)
+        picked.extend(pool[:want])
+    if len(picked) < CANARY_N:      # a thin gold set: top up deterministically, never pad
+        seen = {i.get("sid") for i in picked}
+        rest = sorted((i for i in items if i.get("sid") not in seen), key=rank)
+        picked.extend(rest[:CANARY_N - len(picked)])
+    return sorted(picked, key=rank)[:CANARY_N]
+
 def cmd_gold(_args):
     """Emit the gold set SHAPED EXACTLY LIKE `stash list` — a bare array, answer stripped.
 
@@ -2729,6 +2900,8 @@ def cmd_gold(_args):
     count goes to STDERR (a human sees it; the JSON pipe stays clean) and is re-reported in
     the audit's own coverage block, so it never goes unsaid."""
     items, meta = load_gold()
+    if getattr(_args, "canary", False):
+        items = canary_items(items)
     if meta["skipped"]:
         sys.stderr.write("engram: %d malformed gold item(s) skipped\n" % meta["skipped"])
     if meta["modified"]:
@@ -2740,21 +2913,27 @@ def cmd_gold(_args):
     emit([{k: it.get(k) for k in GOLD_ASSESSOR_KEYS
            if k != "node_kind" or it.get(k) is not None} for it in items])
 
-def _qwk(pairs):
+def _qwk(pairs, scores=None):
     """Quadratic weighted kappa over (gold, grader) grade pairs. None if undefined.
+
+    `scores` is the ORDINAL MAP — which categories exist and in what order. It defaults to
+    the three grades; v1.4 passes the four ratings so the tutor-vs-assessor agreement is
+    computed by this same function rather than a second implementation that could drift
+    (the v0.6.4 lesson: one predicate, or three of the four call sites are wrong).
 
     THE headline. Raw agreement overstates chance-corrected agreement by 34-41 points in
     the measured literature, so it is reported but never quoted alone. Returns None when
     the expected-disagreement mass is zero (both raters degenerate onto one category) —
     None, not 1.0: an undefined agreement must never read as a perfect one, because that
     is a wrong number in the flattering direction, which is bug class #1 in this repo."""
-    k = len(GRADES)
+    scores = GOLD_SCORE if scores is None else scores
+    k = len(scores)
     n = len(pairs)
     if not n:
         return None
     obs = [[0] * k for _ in range(k)]
     for gold, grader in pairs:
-        obs[GOLD_SCORE[gold]][GOLD_SCORE[grader]] += 1
+        obs[scores[gold]][scores[grader]] += 1
     row = [sum(obs[i]) for i in range(k)]
     col = [sum(obs[i][j] for i in range(k)) for j in range(k)]
     num = den = 0.0
@@ -2847,6 +3026,23 @@ def cmd_assessor_audit(args):
                     % "/".join(k for k in GOLD_ANSWER_KEYS if k in it))
 
     gold, gold_meta = load_gold(getattr(args, "gold", None))
+    # THE SCOPE (v1.4). A canary run grades a ~15-item subset, so it is measured against that
+    # subset and — critically — can never mint a `pass` (invariant 12). Detected from the
+    # payload rather than trusted from a flag: the sids the grader actually returned are the
+    # only honest evidence of which set it was given.
+    canary = canary_items(gold)
+    canary_sids = {g["sid"] for g in canary}
+    scope = "full"
+    graded_sids_probe = {sid for r in runs for it in r
+                         if isinstance(it, dict) and isinstance(it.get("sid"), str)
+                         for sid in [it["sid"]]}
+    if (getattr(args, "canary", False)
+            or (graded_sids_probe and graded_sids_probe <= canary_sids
+                and len(graded_sids_probe) < len(gold))):
+        scope, gold = "canary", canary
+    grader_context = getattr(args, "grader_context", None)
+    grader_context = (grader_context[:120] if isinstance(grader_context, str) and grader_context
+                      else "unknown")
     skipped = gold_meta["skipped"]
     by_sid = {g["sid"]: g for g in gold}
     parsed = [_run_grades(r) for r in runs]
@@ -2867,7 +3063,7 @@ def cmd_assessor_audit(args):
     # so the ambiguity is what gets published.)
     identical_runs = len(graded) > 1 and all(g == graded[0] for g in graded[1:])
 
-    per_run, confusion, by_case = [], {}, {}
+    per_run, confusion, by_case, by_gold_band = [], {}, {}, {}
     up = down = exact_n = 0            # THE DIRECTION OF ERROR — see `direction` below
     for g in graded:
         pairs = [(by_sid[sid]["gold_grade"], g[sid]) for sid in matched]
@@ -2889,6 +3085,13 @@ def cmd_assessor_audit(args):
                 down += 1              # graded DOWN = harsh. Costly, but never flattering.
             else:
                 exact_n += 1
+            bd = by_gold_band.setdefault(a, {"items": set(), "judgments": 0, "agree": 0,
+                                              "bias_sum": 0.0, "up": 0})
+            bd["items"].add(sid)
+            bd["judgments"] += 1
+            bd["agree"] += 1 if a == b else 0
+            bd["bias_sum"] += GOLD_SCORE[b] - GOLD_SCORE[a]
+            bd["up"] += 1 if GOLD_SCORE[b] > GOLD_SCORE[a] else 0
             ct = by_sid[sid].get("case_type") or "unclassified"
             slot = by_case.setdefault(ct, {"items": set(), "judgments": 0, "agree": 0,
                                            "bias_sum": 0.0})
@@ -2917,6 +3120,16 @@ def cmd_assessor_audit(args):
     # (10 items x 3 runs), and nothing said so. That is the v0.6.4 unlabelled-denominator bug
     # reproduced inside the release built to catch unlabelled denominators (§4.8 Q3). Name it,
     # count it, publish it beside the rate.
+    # THE MID-BAND IS WHERE GRADERS ACTUALLY FAIL (v1.4). The 2026 short-answer literature
+    # finds rubric-anchored LLM graders near-human at the extremes and materially off in the
+    # middle — while the headline QWK, pooled across bands, looks fine. `partial` is Engram's
+    # middle, so the audit now reports each band's own agreement, signed bias and inflation
+    # count. A number that is right in aggregate and wrong where it matters is bug class #7.
+    band_report = {b: {"items": len(s["items"]), "judgments": s["judgments"],
+                       "agreement": round(s["agree"] / float(s["judgments"]), 3),
+                       "leniency_bias": round(s["bias_sum"] / float(s["judgments"]), 3),
+                       "graded_up": s["up"]}
+                   for b, s in sorted(by_gold_band.items()) if s["judgments"]}
     by_case_type = {ct: {"items": len(s["items"]), "judgments": s["judgments"],
                          "agreement": round(s["agree"] / float(s["judgments"]), 3),
                          "leniency_bias": round(s["bias_sum"] / float(s["judgments"]), 3)}
@@ -2936,6 +3149,10 @@ def cmd_assessor_audit(args):
                           "it can also mean the grader inflates as often as it deflates.")}
 
     n = len(matched)
+    # A canary is 15 items BY DESIGN, so it cannot be held to the full audit's floor — that
+    # would make every canary read `insufficient-data` and the re-licensing path would be
+    # dead code shipped as a feature (bug class #3).
+    min_n = min(CANARY_N, len(gold)) if scope == "canary" else MIN_AUDIT_N
     # A run that graded the same sid twice did not cover the gold set — it covered part of it
     # and then had a second go. Same class as a dropped sid, so it lands in the same guard.
     coverage_complete = bool(gold) and not ungraded and not unknown and not dupes
@@ -2995,10 +3212,10 @@ def cmd_assessor_audit(args):
 
     teeth = (qwk is None or qwk < QWK_FLOOR
              or (leniency_bias is not None and leniency_bias > BIAS_MAX) or paradox)
-    if n < MIN_AUDIT_N:
+    if n < min_n:
         verdict = "insufficient-data"
         reasons.insert(0, "n=%d < %d — not enough adjudicated items to say anything about "
-                          "this grader" % (n, MIN_AUDIT_N))
+                          "this grader" % (n, min_n))
     elif not coverage_complete:
         verdict = "incomplete"          # the QWK is over a subset the GRADER chose. Untrustworthy.
     elif teeth:
@@ -3014,6 +3231,22 @@ def cmd_assessor_audit(args):
                        "target for automated scoring" % (qwk, QWK_FLOOR, QWK_TARGET))
     else:
         verdict = "pass"
+    # ⚠ A CANARY MAY NEVER MINT A PASS (invariant 12). It grades ~15 items chosen for
+    # difficulty, so it is a TRIPWIRE, not a certification: it can re-license the verdict a
+    # full audit already earned, or demand a fresh full audit. Anything else and the cheap
+    # path would quietly replace the expensive one, which is how a 15-item badge ends up
+    # standing in for an 86-item claim.
+    if scope == "canary" and verdict not in ("insufficient-data",):
+        clean = (up == 0 and not teeth)
+        verdict = "canary-pass" if clean else "canary-fail"
+        reasons.append(
+            "CANARY SCOPE: %d of %d gold items, chosen for difficulty (mid-band and the case "
+            "types this grader has historically failed). A canary can RE-LICENSE the last "
+            "full audit or demand a new one — it can never certify a grader on its own."
+            % (n, len(canary)))
+        if not clean:
+            reasons.append("the canary caught %d inflation%s — the badge is void until a FULL "
+                           "audit is re-run" % (up, "" if up == 1 else "s"))
 
     if verdict == "pass":
         # `pass` structurally implies runs >= MIN_AUDIT_RUNS and matched non-empty, so retest
@@ -3071,6 +3304,13 @@ def cmd_assessor_audit(args):
         "direction": direction,            # ← the safety argument, in three integers
         "confusion": confusion,            # counts are JUDGMENTS (items x runs), not items
         "by_case_type": by_case_type,
+        "by_gold_band": band_report,       # v1.4: where in the range the grader actually fails
+        "scope": scope,                    # "full" | "canary" — a canary never certifies
+        # WHICH GRADER earned this verdict (v1.4). Supplied by the skill from what its
+        # platform actually knows; the engine stores it verbatim and NEVER invents one — a
+        # model naming its own weights is fabricated data. "unknown" is honest and falls back
+        # to time-based staleness.
+        "grader_context": grader_context,
         "by_run": per_run,
         # WHICH ground truth produced this verdict (§4.8 Q5) — reported HONESTLY, which the
         # first cut did not: it hard-coded "bundled" even when gold/local-gold.jsonl had
@@ -3139,14 +3379,46 @@ def _latest_audit():
         return None
     if not names:
         return None
-    latest = names[-1]
-    a = read_json(os.path.join(d, latest), quarantine=False)
-    if not isinstance(a, dict) or a.get("verdict") not in (
-            "pass", "warn", "fail", "incomplete", "insufficient-runs", "insufficient-data"):
-        return {"__unreadable__": latest}
-    return a
+    # ⚠ THE LATEST *FULL* AUDIT — a canary is not a candidate (v1.4). A canary can only
+    # re-license or revoke; if it were allowed to BE the latest audit, running one would
+    # replace an 86-item verdict with a 15-item one, and `canary-pass` (not a valid full
+    # verdict) would read as `unreadable` and silently void a badge that was fine. The cheap
+    # path must never overwrite the expensive one — it may only vouch for it.
+    for latest in reversed(names):
+        a = read_json(os.path.join(d, latest), quarantine=False)
+        if isinstance(a, dict) and a.get("scope") == "canary":
+            continue
+        if not isinstance(a, dict) or a.get("verdict") not in (
+                "pass", "warn", "fail", "incomplete", "insufficient-runs", "insufficient-data"):
+            return {"__unreadable__": latest}
+        return a
+    return None
 
-def compute_grader_health():
+def _latest_canary_relicense(full_audit):
+    """Has a CLEAN canary been run since this full audit? (v1.4)
+
+    Scans the audit directory for canary-scoped results newer than the full audit's own
+    timestamp. A `canary-pass` re-licenses a badge whose grader context changed; a
+    `canary-fail` never does (and its own teeth are already engaged through the verdict)."""
+    d = p("audits")
+    if not os.path.isdir(d):
+        return None
+    base = safe_date(full_audit.get("ts") if isinstance(full_audit, dict) else None)
+    best = None
+    for name in sorted(os.listdir(d)):
+        if not name.endswith(".json"):
+            continue
+        rec = read_json(os.path.join(d, name), default=None, quarantine=False)
+        if not isinstance(rec, dict) or rec.get("scope") != "canary":
+            continue
+        if rec.get("verdict") != "canary-pass":
+            continue
+        ts = safe_date(rec.get("ts"))
+        if ts and (base is None or ts >= base):
+            best = rec
+    return best
+
+def compute_grader_health(current_grader_context=None):
     """The teeth. An unaudited oracle makes every number downstream unearned.
 
     `grader_unvalidated` is TRUE until an audit says otherwise — including when no audit
@@ -3182,6 +3454,60 @@ def compute_grader_health():
     # handed it. The verdict is the validated field; the flag is a FUNCTION of it, not an input.
     unval = a.get("verdict") not in ("pass", "warn")
     qwk = _num("qwk")
+
+    # ── STALENESS (v1.4): A BADGE BELONGS TO THE GRADER THAT EARNED IT ──────────────────
+    #
+    # A silent model swap under a learner runs UNIFORMLY MORE LENIENT in the one published
+    # measurement of it (2026: injected judge-version drift, detected 60/60, lenient in
+    # direction) — which is precisely Engram's dangerous direction. A platform upgrade would
+    # otherwise inherit an audit it never sat, and the export gate would keep opening.
+    #
+    # Two triggers, in order of evidence: a CONTEXT MISMATCH (both known and different) is
+    # decisive; when either side is unknown, TIME is the only signal left and is used
+    # conservatively. Naive rolling drift detectors are deliberately NOT used — the measured
+    # false-alarm rate on drift-free streams is 75%, and a gate that cries wolf is a gate
+    # nobody reads.
+    stale = None
+    audited_ctx = _str("grader_context")
+    current_ctx = current_grader_context if isinstance(current_grader_context, str) else None
+    if not unval:
+        if (audited_ctx and current_ctx and audited_ctx not in ("unknown",)
+                and current_ctx not in ("unknown",) and audited_ctx != current_ctx):
+            stale = ("stale-model", "the model that earned this badge (%s) is not the one "
+                                    "grading you now (%s)" % (audited_ctx, current_ctx))
+        else:
+            ts = safe_date(_str("ts"))
+            age = (today() - ts).days if ts else None
+            if age is not None and age > AUDIT_STALE_DAYS:
+                stale = ("stale-age", "the last full audit is %d days old and the grader it "
+                                      "measured cannot be identified (%s)"
+                                      % (age, audited_ctx or "no context recorded"))
+    if stale:
+        # A canary can lift this without a full re-run — that is what it is for — and the
+        # relicensing is recorded rather than assumed.
+        relicensed = _latest_canary_relicense(a)
+        if relicensed:
+            stale = None
+    if stale:
+        code, why = stale
+        return {"audited": True, "ts": _str("ts"), "grader": _str("grader"),
+                "n": _num("n"), "runs": _num("runs"), "qwk": qwk,
+                "exact_agreement": _num("exact_agreement"),
+                "leniency_bias": _num("leniency_bias"), "test_retest": _num("test_retest"),
+                "direction": (a.get("direction") if isinstance(a.get("direction"), dict) else None),
+                "by_case_type": (a["by_case_type"] if isinstance(a.get("by_case_type"), dict) else {}),
+                "by_gold_band": (a["by_gold_band"] if isinstance(a.get("by_gold_band"), dict) else {}),
+                "grader_context": audited_ctx, "current_grader_context": current_ctx,
+                "gold_source": _str("gold_source"),
+                "gold_adjudication": _str("gold_adjudication") or GOLD_ADJUDICATION,
+                "gold_modified": bool(a.get("gold_modified")),
+                "identical_runs": bool(a.get("identical_runs")),
+                "reasons": [why], "verdict": code, "grader_unvalidated": True,
+                "stamp": "GRADER BADGE EXPIRED (%s) — %s" % (code, why),
+                "read": ("%s. The QWK below was real when it was measured and it is not a "
+                         "claim about today's grader. `/coach audit` re-runs the canary "
+                         "(~15 items) first; a clean canary re-licenses the badge, a dirty "
+                         "one demands the full set." % why.capitalize())}
     if unval:
         stamp = "GRADER UNVALIDATED (%s) — these grades are not trustworthy" % a.get("verdict")
     elif a.get("gold_modified"):
@@ -3213,8 +3539,157 @@ def compute_grader_health():
             "verdict": a.get("verdict"), "grader_unvalidated": unval,
             "stamp": stamp, "read": _str("read") or "audit present but unreadable"}
 
-def cmd_grader_health(_args):
-    emit(compute_grader_health())
+ADJ_ANCHOR_PASS = 0.80        # calibration gate before an external rater may adjudicate
+ADJ_ALPHA_GOOD, ADJ_ALPHA_TENTATIVE = 0.80, 0.667   # Krippendorff's canonical thresholds
+
+def _krippendorff_ordinal(pairs):
+    """Krippendorff's alpha for TWO raters on an ordinal 3-point scale. None if undefined.
+
+    Computed here rather than approximated by a kappa because the adjudication kit's whole
+    point is a statistic an outside reader recognises, with its own disagreement model:
+    alpha = 1 - Do/De, where the ordinal metric weights a lapsed-vs-recalled disagreement
+    more than an adjacent one. With two raters and no missing data this reduces to the
+    standard coincidence-matrix form."""
+    n = len(pairs)
+    if n < 2:
+        return None
+    k = len(GOLD_SCORE)
+    # values, by ordinal rank
+    counts = [0] * k
+    for a, b in pairs:
+        counts[GOLD_SCORE[a]] += 1
+        counts[GOLD_SCORE[b]] += 1
+    total = 2 * n
+    # ordinal difference metric (Krippendorff): squared sum of interval masses
+    def delta(i, j):
+        if i == j:
+            return 0.0
+        lo, hi = (i, j) if i < j else (j, i)
+        s = sum(counts[g] for g in range(lo, hi + 1)) - (counts[lo] + counts[hi]) / 2.0
+        return s * s
+    do = sum(delta(GOLD_SCORE[a], GOLD_SCORE[b]) for a, b in pairs) / float(n)
+    de = 0.0
+    for i in range(k):
+        for j in range(k):
+            if i != j:
+                de += counts[i] * counts[j] * delta(i, j)
+    de = de / float(total * (total - 1)) if total > 1 else 0.0
+    if de == 0:
+        return None            # no disagreement possible: undefined, never a flattering 1.0
+    return 1.0 - do / de
+
+def _bootstrap_alpha_ci(pairs, seed=20260724, iters=1000):
+    """Percentile CI for alpha. n=86 gives a WIDE interval — publish it anyway; a point
+    estimate from 86 items quoted without its spread is the label lying about its own
+    precision (§4.8 Q6)."""
+    if len(pairs) < 4:
+        return None
+    rng = random.Random(seed)
+    vals = []
+    for _ in range(iters):
+        s = [pairs[rng.randrange(len(pairs))] for _ in range(len(pairs))]
+        a = _krippendorff_ordinal(s)
+        if a is not None:
+            vals.append(a)
+    if len(vals) < iters // 2:
+        return None
+    vals.sort()
+    return [round(vals[int(0.025 * len(vals))], 3), round(vals[int(0.975 * len(vals)) - 1], 3)]
+
+def cmd_adjudication_stats(args):
+    """Score an EXTERNAL human's adjudication of the gold set (v1.4, docs/ADJUDICATION.md).
+
+    The repo has asked for one non-author human since v0.7 — *"the highest-value contribution
+    anyone could make to this repository"* — and never shipped the procedure that would make
+    their work countable. This is that procedure, in code: the calibration gate, the
+    chance-corrected statistics an outside reader expects, and thresholds fixed BEFORE any
+    file is read so the bar cannot move to fit the result.
+
+    Read-only. It never edits the gold set: an adjudication that silently rewrote the ground
+    truth would be the circularity this whole apparatus exists to disclose."""
+    rows = load_payload(args)
+    if isinstance(rows, dict):
+        rows = rows.get("items") or rows.get("rows") or []
+    if not isinstance(rows, list) or not rows:
+        die("adjudication file must be a JSON array (or {items:[…]}) of "
+            '{"sid": …, "grade": recalled|partial|lapsed, "anchor": true|false}')
+    gold, gold_meta = load_gold(getattr(args, "gold", None))
+    by_sid = {g["sid"]: g for g in gold}
+    clean, bad = {}, []
+    for r in rows:
+        # `isinstance(..., str)` BEFORE the membership test: a hand-written adjudication file
+        # can hold any JSON type, and `{"a": 1} in GOLD_SCORE` raises `unhashable type` rather
+        # than returning False. Found by the fuzz — 35 crashes in 300 states, in a read path
+        # whose entire job is to survive a human's hand-authored file.
+        if not isinstance(r, dict) or not isinstance(r.get("sid"), str) \
+                or not isinstance(r.get("grade"), str) or r["grade"] not in GOLD_SCORE:
+            bad.append(r if isinstance(r, (str, int)) else "malformed")
+            continue
+        if r["sid"] not in by_sid:
+            bad.append(r["sid"])
+            continue
+        clean[r["sid"]] = (r["grade"], bool(r.get("anchor")))
+    anchors = {s: v for s, v in clean.items() if v[1]}
+    scored = {s: v for s, v in clean.items() if not v[1]}
+    # THE CALIBRATION GATE, FIRST. An untrained rater's disagreement is noise, and noise
+    # published as "the gold set is contested" would be worse than no adjudication at all.
+    a_pairs = [(by_sid[s]["gold_grade"], g) for s, (g, _) in anchors.items()]
+    a_exact = (sum(1 for x, y in a_pairs if x == y) / float(len(a_pairs))) if a_pairs else None
+    gate = {"n": len(a_pairs), "exact": (round(a_exact, 3) if a_exact is not None else None),
+            "required": ADJ_ANCHOR_PASS,
+            "passed": bool(a_pairs) and a_exact is not None and a_exact >= ADJ_ANCHOR_PASS}
+    pairs = [(by_sid[s]["gold_grade"], g) for s, (g, _) in sorted(scored.items())]
+    n = len(pairs)
+    exact = (round(sum(1 for x, y in pairs if x == y) / float(n), 3)) if n else None
+    qwk = _qwk(pairs) if n else None
+    alpha = _krippendorff_ordinal(pairs) if n else None
+    ci = _bootstrap_alpha_ci(pairs) if n else None
+    stricter = sum(1 for x, y in pairs if GOLD_SCORE[y] < GOLD_SCORE[x])
+    lenient = sum(1 for x, y in pairs if GOLD_SCORE[y] > GOLD_SCORE[x])
+    confusion = {}
+    for x, y in pairs:
+        confusion["%s->%s" % (x, y)] = confusion.get("%s->%s" % (x, y), 0) + 1
+    if not gate["passed"]:
+        verdict, note = "calibration-failed", (
+            "the rater did not clear the anchor gate (%s of %d anchors exact; %.0f%% required), "
+            "so their adjudication is not scored. Retrain on the anchors, do not lower the bar."
+            % (("%.0f%%" % (100 * a_exact)) if a_exact is not None else "no",
+               len(a_pairs), 100 * ADJ_ANCHOR_PASS))
+    elif alpha is None or n < MIN_AUDIT_N:
+        verdict, note = "insufficient-data", (
+            "n=%d scored items — too few to say anything about the gold set" % n)
+    elif alpha >= ADJ_ALPHA_GOOD:
+        verdict, note = "corroborated", (
+            "alpha %.3f clears %.2f: an outside rater independently agrees with the authored "
+            "gold. ONE external rater CORROBORATES; it does not replace the author — that "
+            "would take two independent externals agreeing with each other." % (alpha, ADJ_ALPHA_GOOD))
+    elif alpha >= ADJ_ALPHA_TENTATIVE:
+        verdict, note = "tentatively-corroborated", (
+            "alpha %.3f is in the tentative band [%.3f, %.2f) — usable for drawing tentative "
+            "conclusions only, and every disagreement should be adjudicated before any badge "
+            "language changes" % (alpha, ADJ_ALPHA_TENTATIVE, ADJ_ALPHA_GOOD))
+    else:
+        verdict, note = "contested", (
+            "alpha %.3f is below %.3f: the external rater and the author do not agree, so the "
+            "gold set is CONTESTED and the circularity caveat stays at full strength. That is "
+            "a real finding about the instrument, not a failure of the rater." % (alpha, ADJ_ALPHA_TENTATIVE))
+    emit({"rater": (getattr(args, "rater", None) or "external"),
+          "gold_source": gold_meta["source"], "gold_n": len(gold),
+          "anchor_gate": gate,
+          "n": n, "exact": exact, "qwk": (round(qwk, 3) if qwk is not None else None),
+          "alpha": (round(alpha, 3) if alpha is not None else None), "alpha_ci": ci,
+          "direction": {"rater_stricter": stricter, "rater_more_lenient": lenient,
+                        "agree": n - stricter - lenient},
+          "confusion": confusion,
+          "unknown_or_malformed": len(bad),
+          "verdict": verdict,
+          "read": ("%s · exact %s, QWK %s, alpha %s %s over %d items (pre-adjudication — the "
+                   "only numbers that count as independent). %s"
+                   % (verdict.upper(), _fmt(exact), _fmt(qwk), _fmt(alpha),
+                      ("CI %s" % ci) if ci else "", n, note))})
+
+def cmd_grader_health(args):
+    emit(compute_grader_health(getattr(args, "grader_context", None)))
 
 def has_transfer_question(node):
     """Is there a harder question to ask of this node at all?
@@ -3858,6 +4333,10 @@ def compute_stats():
         # v1.1: retention split by knowledge kind (concept/procedure/fact), the instrument
         # for docs/11 §7.3. Same predicates as modality; caveat ships inside the payload.
         "by_kind": compute_by_kind(receipts),
+        # v1.4: the OTHER grader. `grader_health` measures the blind assessor against the
+        # gold set; this measures the tutor — which writes every /review receipt — against
+        # the blind assessor. Agreement, never validity, and the read says so.
+        "self_grading": compute_self_grading(receipts),
         "due_now": len(due_items()),
         "pending_verify": len(read_jsonl(p(STASH_FILE))),
         "topics": topics,
@@ -4349,7 +4828,10 @@ def _hash12(s):
 
 def cmd_export(args):
     """Write a text-stripped receipt bundle to a file. NO NETWORK. The agent posts, on consent."""
-    gh = compute_grader_health()
+    # The staleness teeth reach the export gate too (v1.4): a badge earned by a grader that is
+    # no longer the one grading you is not a badge, and a corpus assembled behind one would
+    # carry a QWK nobody re-earned. Contributing is exactly where that matters most.
+    gh = compute_grader_health(getattr(args, "grader_context", None))
     if gh["grader_unvalidated"] and not getattr(args, "allow_unvalidated", False):
         die("REFUSING TO EXPORT: the grader behind every one of these grades is %s (%s).\n"
             "  A finding aggregated from unaudited oracles is not a finding — it is noise with a\n"
@@ -4683,6 +5165,19 @@ def cmd_report(args):
     # and the user session had all walked straight past it, because every one of them reads JSON.
     if gh.get("stamp"):
         parts.append("<p class='note' style='color:var(--bad)'><b>%s</b></p>" % escape(gh["stamp"]))
+    # THE OTHER GRADER (v1.4). `grader_health` above is the blind assessor, measured against
+    # the gold set. The TUTOR writes every /review receipt and, until now, nothing measured it
+    # — so its number reaches the page too, or it is a guard nobody reads (§4.8 Q4). Rendered
+    # in the neutral register: it is agreement with the assessor, never validity, and the
+    # direction is what matters, because a mean bias of zero is also what "inflates half,
+    # deflates half" looks like.
+    sg = stats.get("self_grading") or {}
+    if sg.get("n"):
+        parts.append("<p class='note'><b>tutor vs blind assessor:</b> %s</p>" % escape(sg["read"]))
+        if sg.get("tutor_higher"):
+            parts.append("<p class='note' style='color:var(--bad)'>the tutor graded ABOVE the "
+                         "blind assessor %d time%s — the only direction that can flatter.</p>"
+                         % (sg["tutor_higher"], "" if sg["tutor_higher"] == 1 else "s"))
     if any(b["n"] for b in ret["buckets"].values()):
         for key, label in (("early", "0–3d (still encoding)"), ("7d", "4–14d"),
                            ("30d", "15–59d"), ("90d", "60–179d"), ("180d+", "180d+")):
@@ -8782,6 +9277,177 @@ def cmd_selftest(_args):
     check("commit stamps renewals and emits age_days (the renewal offer's cadence)",
           fresh(_commit_age))
 
+    # ══ v1.4 · THE AUDITED TUTOR ═══════════════════════════════════════════════════════
+    #
+    def _gold_runs(n_runs=3, mutate=None, subset=None):
+        """Build an audit payload from the real gold set. `mutate(i, item)` may change a grade."""
+        gold, _ = load_gold()
+        if subset is not None:
+            gold = subset
+        runs = []
+        for r in range(n_runs):
+            run = []
+            for i, g in enumerate(gold):
+                grade = g["gold_grade"]
+                if mutate:
+                    grade = mutate(i, g, r) or grade
+                run.append({"sid": g["sid"], "grade": grade, "rating": "good"})
+            runs.append(run)
+        return {"grader": "engram-assessor", "runs": runs}
+
+    # -- an AUDIT receipt records the verdict and touches NOTHING --
+    def _audit_never_reschedules(h):
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-16"
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good"))
+        before = json.dumps(load_graph("t")["nodes"]["a"], sort_keys=True)
+        out = _capture_json(cmd_rate, _ns(topic="t", node="a", rating="hard", kind="audit",
+                                          audited_rating="good", grade="partial"))
+        after = json.dumps(load_graph("t")["nodes"]["a"], sort_keys=True)
+        _RECEIPTS_CACHE.clear()
+        sg = _capture_json(cmd_stats, _ns())["self_grading"]
+        ad = _capture_json(cmd_adherence, _ns())
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (before == after and out["scheduled"] is False and out["applied"] is True
+                and sg["n"] == 1 and sg["tutor_higher"] == 1 and sg["agree"] == 0
+                # below the floor: counts, never a rate (the house rule)
+                and sg["insufficient_data"] is True and sg["qwk_vs_assessor"] is None
+                # …and it pollutes no learner population
+                and ad["loop_closure"]["first_review_done"] == 1
+                and _capture_json(cmd_stats, _ns())["reviews"] == 1
+                # ⚠ AND THE CASE THE GUARD ACTUALLY EXISTS FOR: an audit that is a node's
+                # FIRST receipt. `_by_node` treats a first receipt as the ENCODING EVENT —
+                # day 0 for every retention bucket — so a bare CLI `rate --kind audit` on a
+                # never-encoded node would invent an encoding that never happened. (The
+                # §4.5 mutation of the guard left every other assertion green: the fixture
+                # above always has the audit arrive last, so it never reached the line.)
+                and _audit_first_is_invisible())
+    def _audit_first_is_invisible():
+        _capture(cmd_rate, _ns(topic="t", node="b", rating="hard", kind="audit",
+                               audited_rating="good"))
+        _RECEIPTS_CACHE.clear()
+        ad = _capture_json(cmd_adherence, _ns())
+        ret = _capture_json(cmd_retention, _ns())
+        return (ad["funnel"]["nodes_encoded"] == 1          # `b` was never encoded by anyone
+                and ret["coverage"]["reviews_total"] == 1)
+    check("an audit receipt is recorded and reschedules NOTHING (audits inform)",
+          fresh(_audit_never_reschedules))
+
+    # -- self_grading's direction: the flattering direction is named, not averaged away --
+    def _self_grading_direction(h):
+        _add_ab()
+        for nid in ("a", "b"):
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-16"
+        for nid in ("a", "b"):
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good"))
+        # a tutor that inflates one and deflates one: MEAN BIAS ZERO, and that is the trap
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="hard", kind="audit",
+                               audited_rating="easy"))
+        _capture(cmd_rate, _ns(topic="t", node="b", rating="easy", kind="audit",
+                               audited_rating="hard"))
+        _RECEIPTS_CACHE.clear()
+        sg = _capture_json(cmd_stats, _ns())["self_grading"]
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (sg["n"] == 2 and sg["tutor_higher"] == 1 and sg["tutor_lower"] == 1
+                and "graded HIGHER 1" in sg["read"]
+                and "bounded by that chain" in sg["read"])   # the limit reaches the narrator
+    check("self_grading reports DIRECTION, so a zero mean bias cannot hide inflation",
+          fresh(_self_grading_direction))
+
+    # -- the canary: deterministic, band-stratified, and it can NEVER mint a pass --
+    def _canary_properties(h):
+        gold, _ = load_gold()
+        c1, c2 = canary_items(gold), canary_items(gold)
+        bands = {}
+        for it in c1:
+            bands[it["gold_grade"]] = bands.get(it["gold_grade"], 0) + 1
+        perfect = _capture_json(cmd_assessor_audit,
+                                _ns(json=json.dumps(_gold_runs(subset=c1)), canary=True))
+        inflate = _capture_json(cmd_assessor_audit, _ns(canary=True, json=json.dumps(
+            _gold_runs(subset=c1,
+                       mutate=lambda i, g, r: "recalled" if i == 0 and g["gold_grade"] != "recalled" else None))))
+        return ([i["sid"] for i in c1] == [i["sid"] for i in c2]         # deterministic
+                and len(c1) == CANARY_N
+                and len(bands) == 3 and bands["partial"] > bands["lapsed"]  # mid-band weighted,
+                                                                            # never mid-band ONLY
+                and perfect["scope"] == "canary"
+                and perfect["verdict"] == "canary-pass"      # ← never "pass": invariant 12
+                and inflate["verdict"] == "canary-fail"
+                and "can never certify a grader on its own" in " ".join(perfect["reasons"]))
+    check("the canary is stable, spans all three bands, and can never mint a `pass`",
+          fresh(_canary_properties))
+
+    # -- the badge expires when the grader changes, and a canary re-licenses it --
+    def _staleness(h):
+        _capture(cmd_assessor_audit, _ns(json=json.dumps(_gold_runs()),
+                                         grader_context="platform/model-A"))
+        same = _capture_json(cmd_grader_health, _ns(grader_context="platform/model-A"))
+        swapped = _capture_json(cmd_grader_health, _ns(grader_context="platform/model-B"))
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="encode"))
+        refused = False
+        try:
+            _capture(cmd_export, _ns(contributor="@x", grader_context="platform/model-B"))
+        except SystemExit:
+            refused = True
+        gold, _ = load_gold()
+        _capture(cmd_assessor_audit, _ns(canary=True, grader_context="platform/model-B",
+                                         json=json.dumps(_gold_runs(subset=canary_items(gold)))))
+        relicensed = _capture_json(cmd_grader_health, _ns(grader_context="platform/model-B"))
+        return (same["verdict"] == "pass" and same["grader_unvalidated"] is False
+                and swapped["verdict"] == "stale-model"
+                and swapped["grader_unvalidated"] is True
+                and "not the one grading you now" in swapped["stamp"]
+                and refused                                   # the export gate inherits it
+                # a canary must not BECOME the latest audit, or canary-pass would read as
+                # unreadable and void a badge that was fine
+                and relicensed["verdict"] == "pass")
+    check("a grader swap expires the badge (export refuses); a clean canary re-licenses it",
+          fresh(_staleness))
+
+    # -- band-stratified audit: the mid-band gets its own row --
+    def _by_band(h):
+        a = _capture_json(cmd_assessor_audit, _ns(json=json.dumps(_gold_runs()),
+                                                  grader_context="p/m"))
+        b = a["by_gold_band"]
+        return (set(b) == {"recalled", "partial", "lapsed"}
+                and all(v["judgments"] == v["items"] * 3 for v in b.values())
+                and b["partial"]["graded_up"] == 0)
+    check("the audit reports agreement per gold BAND (where graders actually fail)",
+          fresh(_by_band))
+
+    # -- the adjudication kit: monotone, and the gate comes first --
+    def _adjudication(h):
+        gold, _ = load_gold()
+        mk = lambda fn: json.dumps([{"sid": g["sid"], "grade": fn(i, g), "anchor": i < 10}
+                                    for i, g in enumerate(gold)])
+        rng = random.Random(3)
+        perfect = _capture_json(cmd_adjudication_stats,
+                                _ns(json=mk(lambda i, g: g["gold_grade"])))
+        coin = _capture_json(cmd_adjudication_stats, _ns(json=mk(
+            lambda i, g: g["gold_grade"] if i < 10 else rng.choice(list(GOLD_SCORE)))))
+        uncal = _capture_json(cmd_adjudication_stats, _ns(json=mk(
+            lambda i, g: rng.choice(list(GOLD_SCORE)))))
+        return (perfect["verdict"] == "corroborated" and perfect["alpha"] == 1.0
+                and perfect["alpha_ci"] is not None
+                # §5.5 monotonicity: a worse rater must SCORE worse
+                and coin["alpha"] < perfect["alpha"] and coin["verdict"] == "contested"
+                # the calibration gate fires BEFORE any agreement number is trusted
+                and uncal["verdict"] == "calibration-failed"
+                and uncal["anchor_gate"]["passed"] is False
+                # one external rater corroborates; it never REPLACES the author
+                and "does not replace the author" in perfect["read"]
+                # a hand-authored file holds any JSON type; an unhashable grade must not
+                # brick the reader (the fuzz found this: 35 crashes in 300 states)
+                and _capture_json(cmd_adjudication_stats, _ns(json=json.dumps(
+                    [{"sid": gold[0]["sid"], "grade": {"a": 1}},
+                     {"sid": gold[1]["sid"], "grade": ["x"]},
+                     {"sid": "nope", "grade": "partial"}])))["unknown_or_malformed"] == 3)
+    check("adjudication-stats gates on calibration and ranks a worse rater worse",
+          fresh(_adjudication))
+
     print("\n%d/%d checks passed" % (total[0] - len(failures), total[0]))
     sys.exit(1 if failures else 0)
 
@@ -8797,7 +9463,9 @@ def _ns(**kw):
                     out=None, allow_outside=False, mode=None, minutes=None,
                     items=None, notes=None, path=None,
                     cap=None, order=None, restore=False, clear=False,   # v1.3
-                    cue=None, horizon=None)
+                    cue=None, horizon=None,
+                    canary=False, grader_context=None, audited_rating=None,  # v1.4
+                    rater=None, gold=None, contributor=None, allow_unvalidated=False)
     defaults.update(kw)
     for k, v in defaults.items():
         setattr(ns, k, v)
@@ -8820,17 +9488,39 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     for name in ("init", "path", "session-start", "topics", "selftest", "stats", "doctor",
-                 "adherence", "retention", "gold", "grader-health"):
+                 "adherence", "retention"):
         sub.add_parser(name)
+
+    sp = sub.add_parser("gold")
+    sp.add_argument("--canary", action="store_true",
+                    help="the ~15-item canary subset (mid-band and historically weak cases)")
+
+    sp = sub.add_parser("adjudication-stats")
+    sp.add_argument("--file"); sp.add_argument("--json")
+    sp.add_argument("--rater", help="who adjudicated (recorded, never used in the maths)")
+    sp.add_argument("--gold", help=argparse.SUPPRESS)
+
+    sp = sub.add_parser("grader-health")
+    sp.add_argument("--grader-context",
+                    help="the label of the grader running TODAY — a mismatch with the audited "
+                         "one expires the badge (a model swap runs measurably more lenient)")
 
     sp = sub.add_parser("assessor-audit")
     sp.add_argument("--file"); sp.add_argument("--json")
     sp.add_argument("--gold", help="override the gold set (testing; default = bundled)")
+    sp.add_argument("--grader-context",
+                    help="platform/model label the runs were graded under, verbatim from what "
+                         "your platform knows. The engine never guesses it; 'unknown' is honest.")
+    sp.add_argument("--canary", action="store_true",
+                    help="grade the ~15-item re-licensing subset (never certifies on its own)")
 
     sp = sub.add_parser("transfer")
     sp.add_argument("--topic"); sp.add_argument("--limit", type=int)
 
     sp = sub.add_parser("export")
+    sp.add_argument("--grader-context",
+                    help="the grader running today — a mismatch with the audited one expires "
+                         "the badge, and an expired badge refuses to export (v1.4)")
     sp.add_argument("--topic", help="export ONE topic (default: all)")
     sp.add_argument("--contributor", help="the handle this will be posted under. Typed by you; "
                                           "the engine never guesses your identity.")
@@ -8883,6 +9573,10 @@ def main():
     # v1.1: slip vs conceptual on a graded production. choices= so a typo dies in argparse,
     # before validate_item even runs — receipts are append-only (§4.8 Q5).
     sp.add_argument("--error-class", dest="error_class", choices=ERROR_CLASSES)
+
+    sp.add_argument("--audited-rating", choices=sorted(RATINGS),
+                    help="audit kind only: the rating the TUTOR committed, which the blind "
+                         "assessor is now re-grading (feeds stats.self_grading)")
 
     sp = sub.add_parser("receipt")
     sp.add_argument("--json"); sp.add_argument("--file")
@@ -8948,6 +9642,7 @@ def main():
         "grader-health": cmd_grader_health,
         "transfer": cmd_transfer, "capstone": cmd_capstone,
         "export": cmd_export, "retire": cmd_retire,
+        "adjudication-stats": cmd_adjudication_stats,
     }
     # Serialize state mutators: the skills run engine processes concurrently by
     # design (background artifact-smith registering while the tutor rates), and

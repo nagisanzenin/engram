@@ -214,9 +214,20 @@ flip `grader_unvalidated: true` and the export refusal. `canary-pass` clears sta
 **back to the prior full verdict** (recorded as `relicensed_by: <canary file>`); it
 never upgrades a `fail`.
 
-`gold --canary`: emits ~15 items, seed-stable (`sha256(sid)` ordering — no RNG),
-oversampling partial-band gold, always including the historical-inflation sids; output
-shape identical to `gold` (a drop-in for the same skill flow) plus `"scope": "canary"`.
+`gold --canary`: emits 15 items, seed-stable (`sha256(sid)` ordering — no RNG), **quota-
+stratified across all three bands** (`partial` 7 · `lapsed` 4 · `recalled` 4), preferring
+the historically-weak case types within each band; output shape identical to `gold` (a
+drop-in for the same skill flow).
+
+**Amended at build time (v1.4), all three forced by gates:**
+1. **Quotas, not a difficulty sort.** "Oversample partial" as specified selected 15/15
+   `partial` — a canary that cannot see a grader failing the clear cases is a narrower
+   badge, not a tripwire.
+2. **`_latest_audit` skips canary-scoped files.** Otherwise a canary becomes "the latest
+   audit", replacing an 86-item verdict with a 15-item one, and `canary-pass` — correctly
+   not a valid *full* verdict — reads as `unreadable` and voids a healthy badge.
+3. **The canary needs its own `min_n`.** Held to the full audit's floor it would always
+   read `insufficient-data`, i.e. dead code shipped as a feature (bug class #3).
 
 ### 2.5 New files **[BINDING at v1.8 shape level; RE-ANCHOR details]**
 

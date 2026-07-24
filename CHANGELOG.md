@@ -1,5 +1,102 @@
 # Changelog
 
+## 1.4.0 — 2026-07-24 · The audited tutor
+
+v0.7 built the audit that measures the blind assessor and shipped it as the project's
+central safety claim. It has never measured **the other grader** — and the tutor writes
+*every* `/review` receipt and every `error_class` behind `procedure_slip_share`,
+in-context, with the dialogue it just ran sitting in front of it. That is the exact
+condition the separation of powers exists to distrust, and it was the one grader nothing
+checked. Meanwhile the assessor's badge, once earned, was **permanent**.
+
+**Audit receipts persist, and reschedule nothing.** `/review` has spawned the assessor to
+spot-audit the tutor's grades since v0.2; the verdict was narrated once and evaporated.
+`KINDS` has carried an `audit` slot the whole time with nothing writing it. Now
+`rate --kind audit --audited-rating <what the tutor said>` records the comparison as
+evidence on disk that touches **no** FSRS state, no node state, no due date, no `reps` —
+"audits inform, they don't reschedule" is structural rather than a sentence in a skill
+file. `/review` also escalates on **any** `partial` now, not just partial-heavy sessions,
+because the mid-band is where graders measurably diverge.
+
+**`stats.self_grading` — the tutor's number, with its limits attached.** Agreement (QWK)
+and **signed direction** between the tutor and the blind assessor, banded, with the honest
+label in the `read`: *agreement with the blind assessor, whose own validity is what
+`/coach audit` measures — tutor validity is bounded by that chain, never better.* No
+blindness property is claimed for the tutor and none can be: dialogue context is a
+permanent confound. Direction is published because a mean bias of zero is also what
+"inflates half, deflates half" looks like.
+
+**The badge expires (v1.4's teeth).** `assessor-audit --grader-context` records *which*
+grader earned a verdict; `grader-health --grader-context` compares it to the grader
+running today. A mismatch → `stale-model`, `grader_unvalidated: true`, and **`export`
+refuses** — because the one published measurement of a silent judge-model swap found it
+uniformly **more lenient**, which is this project's single dangerous direction. When the
+context is unknowable, age is the fallback (90 days). Naive rolling drift detectors are
+deliberately not used: their measured false-alarm rate on drift-free streams is 75%, and a
+gate that cries wolf is a gate nobody reads.
+
+**And the cheap way back: the canary.** `gold --canary` emits 15 items chosen the same way
+every time — hash-stable, **stratified across all three bands** with the mid-band and this
+grader's historically-weak case types oversampled. A clean run re-licenses the badge; a
+dirty one demands the full 86×3. **A canary can never mint a `pass`** — its verdict domain
+is `canary-pass`/`canary-fail`, enforced in the engine, because otherwise the cheap path
+would quietly replace the expensive one.
+
+**Band-stratified audits.** `by_gold_band` reports agreement, signed bias and inflation
+count per gold band. The 2026 short-answer literature finds rubric-anchored LLM graders
+near-human at the extremes and materially off in the middle — so a healthy pooled QWK can
+sit on top of a soft `partial` band, which is exactly where a learner's borderline answers
+live.
+
+**The adjudication kit, at last.** Since v0.7 the engine has printed, on every audit, that
+its gold set is authored rather than independently adjudicated and that one outside human
+would be the highest-value contribution to this repository. [`docs/ADJUDICATION.md`](docs/ADJUDICATION.md)
+is the procedure and `adjudication-stats --file` is the procedure in code: a 10-anchor
+calibration gate (≥80% exact) that runs **before** any agreement number is trusted, then
+exact / QWK / **ordinal Krippendorff's α with a bootstrap CI** / direction counts /
+confusion, against thresholds fixed in advance (α ≥ 0.80 corroborated · 0.667–0.80
+tentative · below contested). One external rater **corroborates**; replacing the author
+would take two independent externals agreeing with each other, and the engine keeps saying
+so.
+
+### The defects this release's own gates found
+
+- **The canary was 100% mid-band on the first cut** — structurally blind to a grader that
+  had started failing the *clear* cases. A tripwire that can only see one band is not a
+  tripwire; it is a narrower badge. Now quota-stratified across all three.
+- **A canary audit hijacked "the latest audit."** `_latest_audit` took the newest file, so
+  running a canary replaced an 86-item verdict with a 15-item one — and `canary-pass`,
+  not being a valid *full* verdict, then read as `unreadable` and **voided a badge that
+  was fine**. The cheap path may vouch for the expensive one; it may never overwrite it.
+- **`export` did not inherit staleness** until it was given its own `--grader-context`.
+  Contributing to a shared corpus is precisely where a badge nobody re-earned matters most.
+- **The fuzz found a brick in the adjudication reader**: `{"a":1} in GOLD_SCORE` raises
+  `unhashable type` rather than returning False — 35 crashes in 300 states, in a read path
+  whose entire job is surviving a human's hand-authored file.
+- **One new check came back FAKE** (§4.5): the guard keeping audit receipts out of
+  `_by_node` was mutation-tested green, because the fixture always had the audit arrive
+  *last* and never reached the line. The case the guard exists for — an audit as a node's
+  **first** receipt, which would invent an encoding event that never happened — is now
+  asserted directly.
+
+### Numbers audit (§4.8)
+
+`self_grading` fails **pessimistically by construction** (a missed audit shows as a
+smaller `n`, never as agreement) and its denominators are named: `n` is spot-audits, the
+band rows carry their own. Below 20 audits it publishes **counts only** — never a rate.
+`by_gold_band`'s counts are *judgments* (items × runs) and say so, keeping `items` and
+`judgments` in separate keys (bug class #7). `grader_context` is **stored verbatim, never
+inferred** — a model naming its own weights is fabricated data, and `"unknown"` is honest.
+The staleness flag is *derived* from the verdict and the context, never read from a file.
+
+### Tests
+
+243 → **249** checks; every new check mutation-tested (one came back fake and was
+rewritten — see above). Fuzz: **0 crashes / 600 states** on the standard read paths, plus
+a new 300-state sweep over garbage audit files and hand-authored adjudication input
+(35 → 0 after the fix).
+
+
 ## 1.3.0 — 2026-07-24 · The kept word
 
 The first release on the road to 2.0 (`docs/14`), and it is the return release: the

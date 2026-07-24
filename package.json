@@ -1,6 +1,6 @@
 {
   "name": "opencode-engram-learning",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Evidence-based learning engine for OpenCode — learn anything, verify by free recall, schedule with FSRS, adapt from your own data.",
   "type": "module",
   "license": "MIT",
