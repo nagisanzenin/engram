@@ -1,5 +1,66 @@
 # Changelog
 
+## 1.8.0 — 2026-07-24 · The steering mirror
+
+Engram computes a great deal about a learner and steers on almost none of it. This is the
+release where the measurements start steering — and the whole design problem is that **a
+system that adapts to you is one hallucinated correlation away from a horoscope.**
+
+**Article 12 joins the constitution:** *every adaptation is proposed by the engine's
+numbers, consented by the learner, logged with its evidence, and reversible.* The engine
+never infers a trait, and never applies a change itself.
+
+**`propose`** emits at most three adaptations it can justify from this learner's own
+receipts, each carrying its `evidence` string and its `grade` (`evidence-backed` /
+`model-derived` / `heuristic`). It is **read-only** — verified by a check that hashes the
+learner model before and after.
+
+**The families are closed, and that is the entire safety argument.** Adaptivity's evidence
+base is mostly a graveyard: learning styles (dead, including "inferred from telemetry" —
+the same corpse in ML clothing), the general aptitude-treatment program (dead; prior
+knowledge × guidance is the one replicated survivor), chronotype scheduling (>80% of adult
+studies find no main effect and no intervention study exists), learner control over method
+(measurably *worse* than non-personalized). What Engram is allowed to steer on:
+
+1. **session shape**, from completion telemetry;
+2. **assistance level**, from demonstrated prior knowledge — the surviving ATI (expertise
+   reversal: assistance helps novices d = +0.505 and *harms* the knowledgeable d = −0.428),
+   and only ever proposed upward on clean evidence, because the meta-analysts' own
+   asymmetry says assist when unsure;
+3. **the workload curve** — and here the engine proposes **no number at all**, only that
+   they look at it;
+4. **one metacognitive prompt**, specific and fading, because generic prompting at scale is
+   a documented null.
+
+**`adaptations`** is the append-only ledger: field, from, to, the evidence, the grade, who
+asked, reversible. `/coach` explains current settings *from the ledger* rather than from
+memory — *"Sprint has been your default since 30 July, because five of six sessions ended
+early. Revert any time."* A change the learner makes themselves is recorded too, marked
+`learner`; a no-op writes nothing.
+
+**`rhythms` is retired.** It was defined in the schema, written by nothing, and "read" by
+`/coach` for four releases — a promised adaptation surface that could never fire. What
+replaces it is **description, not scheduling**: `stats.sessions` reports the learner's own
+session pattern with the note that Engram does not schedule by time of day. An existing
+model that already carries the key keeps it; new ones never gain it.
+
+### The fuzz earned its place again
+
+Adding `propose` to the `stats` path introduced **472 crashes in 600 fuzzed states** — an
+unhashable `topic` in a hand-edited receipt poisoning a dict key, which is the exact shape
+`_by_node` was hardened against in v0.6 and which **every new receipt-walking function
+re-earns from scratch**. `stats`, the dashboard and therefore `/coach` all went down with
+it. Fixed at the gate, and pinned by a check that feeds `propose` an unhashable topic, a
+bare integer session, and a dict timestamp.
+
+### Tests
+
+261 → **267** checks; every new check mutation-tested. Two came back fake on the first
+pass — a cap that could not bind because only three of four families fired, and a floor
+whose fixture qualified either way — both rewritten with fixtures that actually reach the
+guard. Fuzz: 472 → **0 crashes / 600 states**.
+
+
 ## 1.7.0 — 2026-07-24 · The open frontier
 
 The founding question asks for a system where a learner can learn **anything, at any level

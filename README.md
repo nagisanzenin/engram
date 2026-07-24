@@ -3,10 +3,10 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.7.0-6D4AA8.svg" alt="Version 1.7.0">
+  <img src="https://img.shields.io/badge/version-1.8.0-6D4AA8.svg" alt="Version 1.8.0">
   <a href="https://www.npmjs.com/package/opencode-engram-learning"><img src="https://img.shields.io/npm/v/opencode-engram-learning?label=npm&color=6D4AA8" alt="npm package"></a>
   <img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="MIT License">
-  <img src="https://img.shields.io/badge/selftest-261%2F261-3E7D5A.svg" alt="261/261 checks">
+  <img src="https://img.shields.io/badge/selftest-267%2F267-3E7D5A.svg" alt="267/267 checks">
   <a href="gold/assessor-gold.jsonl"><img src="https://img.shields.io/badge/grader%20inflations-0%2F258-3E7D5A.svg" alt="0 of 258 blind judgments graded up, on the shipping spec"></a>
   <img src="https://img.shields.io/badge/scheduler-FSRS--4.5-6D4AA8.svg" alt="FSRS-4.5">
   <a href="CONTRIBUTING-DATA.md"><img src="https://img.shields.io/badge/data-100%25%20local-3E7D5A.svg" alt="100% local — the engine has no network code, proven by a permanent selftest"></a>
@@ -346,6 +346,7 @@ The model never does calendar math; this does:
 | `rate` / `receipt --file F` | apply one rating · apply assessor receipt batch |
 | `stash add\|list\|count\|clear` | crash-safe queue of answers awaiting grading |
 | `model` / `misconception` | open learner model · error catalog |
+| **`propose` / `adaptations`** | at most 3 engine-justified adaptations, each with its evidence and grade (read-only) · the append-only ledger of every change, why, and that it is reversible (Article 12) |
 | **`experiment start\|assign\|status\|settle`** | n-of-1 trials done properly: **randomized** (seeded, reproducible) · **stratified** (kills the material-vs-medium confound) · **pre-registered** · **powered** (15/arm) · and **the engine computes the verdict** — `--verdict` is refused |
 | `focus on\|off\|status` | toggle the ADHD Focus profile (Sprint default, growth every review, always-on amnesty) |
 | `visuals eager\|threshold\|off\|status` | the explorables dial: every high-affordance concept · portal concepts only (default) · none |
@@ -359,7 +360,7 @@ The model never does calendar math; this does:
 | **`refit`** | fit the schedule to your measured memory: the interval multiplier (≥50 reviews), then **your own FSRS parameters** — S0 at 64 usable reviews, the full vector at 400, and **a fit that does not beat your current one is refused** |
 | **`export [--topic T]`** | a **text-stripped**, **attributed** receipt bundle written **to a file**. Whitelist-constructed — there is no code path by which a production could leave. **Refuses** if your grader is unaudited |
 | `session-start` / `log-session` | ambient nudge (hook) · session telemetry |
-| `selftest` | 261 checks| 258 checks| 253 checks| 249 checks| 243 checks| 234 checks| 230 checks| 217 checks| 214 checks| 213 checks| 213 checks| 207 checks| 201 checks| 200 checks| 192 checks| 191 checks over the FSRS math, state machine, adherence/retention arithmetic, the grader-audit statistics, and every hardened boundary |
+| `selftest` | 267 checks| 261 checks| 258 checks| 253 checks| 249 checks| 243 checks| 234 checks| 230 checks| 217 checks| 214 checks| 213 checks| 213 checks| 207 checks| 201 checks| 200 checks| 192 checks| 191 checks over the FSRS math, state machine, adherence/retention arithmetic, the grader-audit statistics, and every hardened boundary |
 
 </details>
 
