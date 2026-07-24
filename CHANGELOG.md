@@ -1,5 +1,80 @@
 # Changelog
 
+## 1.5.0 — 2026-07-24 · The relearning loop
+
+`docs/07` flagged successive relearning in v0.6 as *"the most promising unexploited item in
+the retention literature for this codebase"* and ordered it specified against primary
+sources before anyone built it. `docs/13` §2.5 is that specification; this is the build.
+
+**The session no longer ends on a failed retrieval.** When a concept or fact comes back
+`lapsed`, the tutor re-derives it, puts another item in between (**never** an immediate
+re-ask — every protocol that worked used a delay or an intervening item), and asks again,
+up to three passes, stopping at **one** correct recall. One, not three: the "relearning
+override" is the clearest result in this literature — with spaced relearning to follow, a
+higher initial criterion buys almost nothing and costs ~2 minutes a concept.
+
+**The dose is guaranteed rather than hoped for.** The quantity the evidence is actually
+about is *spaced sessions in the first weeks*, and FSRS left alone can starve a lucky first
+recall of them by booking a long second interval. So the first two post-encode intervals
+are capped at **3 and 9 days** (inside the Cepeda ridgeline), which puts ≥3 spaced sessions
+inside the 30-day north-star window — then the node **graduates** and FSRS runs untouched.
+Verified end to end: 4d → 3d → 9d → 128d.
+
+The numbers, quoted at their honest size: 3 vs 1 relearning sessions is **+60% relative
+recall at one month**; one correct recall in each of three spaced sessions beats three
+massed into one **68% vs 26%** at a week; and the only *exposure-controlled* study puts the
+pure effect at **d ≈ 0.7**, not the d ≈ 4 of confounded designs. Transfer under exposure
+control is **≈ 0.15** — this buys durability of the practiced item and we do not claim more.
+
+**What it deliberately does not do:**
+- **Procedures are excluded, and the engine refuses the flag on them.** The one direct test
+  of this protocol on problem-solving material found "only meager benefits". They keep the
+  problem grammar's lapse path.
+- **New material only.** A pre-v1.5 node is never retroactively shortened; the caps ride an
+  `fsrs.dose` stamp written at first encode. `settings.relearning: "off"` disables the whole
+  layer, and an untouched v1.4 state behaves exactly as before.
+- **No claim that this is settled.** No published study combines successive relearning with
+  an adaptive scheduler; the cap is a labeled **policy layer over FSRS**, not a scheduler
+  change, and the payload says so.
+
+### G11 — the live defect this release had to fix first
+
+A same-day re-attempt is a review at `elapsed == 0`, where `retrievability` is **1.0 by
+construction**. Left alone, the very behaviour this release asks for would have: strengthened
+stability off a 100%-recall prediction, counted as a retention review it is not, and inflated
+**both** `predicted` and `observed` in `refit`'s sample — biasing the schedule fit toward
+*"your memory is better than the model thinks"*. Upstream FSRS trains on `(i > 1 AND
+delta_t > 0)` for exactly this reason.
+
+So `relearn` rows are recorded append-only (receipts-or-it-didn't-happen applies to the
+criterion claim too) and excluded from state transitions, from every retention-family
+population, and from the fit — by **one line in the shared predicate**, so every reader
+inherits it (the v0.6.4 lesson). Legacy same-day rows written before the stamp existed are
+caught by an elapsed guard.
+
+**`stats.relearning`** reports loops, criterion-met, and the literature's own efficiency
+signature — retries per loop falling as material comes back — **derived at read time** from
+each (node, day) group, because the day's first receipt is already on disk when a retry
+happens and receipts are never retro-stamped.
+
+### The defects the gates found
+
+- **A fixture's premise died** the moment the dose shipped: a check that needed a "far-out"
+  node got a capped one instead. Rewritten to graduate *through* the dose window, which now
+  also pins that the caps release a node rather than trapping it.
+- **Two new checks came back FAKE** (§4.5, and this is the fourth release running):
+  the dose-scoping fixture used a node whose dose window had already passed, so the
+  `was_new` guard was never reached; and the `refit` elapsed-guard was untestable because
+  the relearn filter had already removed every row the fixture produced. Both rewritten —
+  one with a node *inside* the window, one with a hand-written legacy row carrying
+  `retrievability: 1.0` and no stamp.
+
+### Tests
+
+249 → **253** checks; all six new checks mutation-tested (two fake, both rewritten).
+Fuzz: **0 crashes / 600 states**.
+
+
 ## 1.4.0 — 2026-07-24 · The audited tutor
 
 v0.7 built the audit that measures the blind assessor and shipped it as the project's

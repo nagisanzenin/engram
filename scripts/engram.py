@@ -32,7 +32,7 @@ SCHEMA = 1
 # The one place the engine knows its own version. Read by `export`, so a shared receipt states
 # which engine produced it — a corpus of receipts from unknown engine versions is not a corpus.
 # Pinned against .claude-plugin/plugin.json by a selftest, so it cannot drift.
-ENGRAM_VERSION = "1.4.0"
+ENGRAM_VERSION = "1.5.0"
 RETENTION_DEFAULT = 0.90
 INTERVAL_MAX = 365
 RETENTION_MIN, RETENTION_MAX = 0.70, 0.97   # sane desired-retention bounds
@@ -210,8 +210,13 @@ def next_stability_forget(d, s, r):
     sf = W[11] * (d ** -W[12]) * (((s + 1.0) ** W[13]) - 1.0) * math.exp(W[14] * (1.0 - r))
     return clamp(min(sf, s), 0.1, 36500.0)  # a lapse never increases stability
 
-def apply_rating(fsrs, rating_name, on_date):
-    """Pure transition: fsrs dict + rating -> new fsrs dict (+ receipt fields)."""
+def apply_rating(fsrs, rating_name, on_date, cap_days=None):
+    """Pure transition: fsrs dict + rating -> new fsrs dict (+ receipt fields).
+
+    `cap_days` shortens the booked interval WITHOUT touching stability or difficulty — the
+    v1.5 relearning dose. The memory model is unchanged and still updates from true elapsed
+    time; the learner is simply asked back sooner. Passed only by `apply_item`; projections
+    (`decay`) deliberately do not cap, because they ask what a review is worth, not when."""
     g = RATINGS[rating_name]
     s0, d0 = as_number(fsrs.get("s")), as_number(fsrs.get("d"))
     if s0 is not None:
@@ -229,6 +234,9 @@ def apply_rating(fsrs, rating_name, on_date):
         s = next_stability_forget(d0, s0, r) if g == 1 else next_stability_recall(d0, s0, r, g)
     ivl = interval_for(s, as_number(fsrs.get("retention"), RETENTION_DEFAULT),
                        as_number(fsrs.get("im"), 1.0))
+    capped = False
+    if cap_days is not None and ivl > cap_days:
+        ivl, capped = cap_days, True
     out = dict(fsrs)
     # `reps` and `lapses` were the last two raw arithmetic leaves in the scheduler: every
     # other one (s, d, retention, im) already went through as_number, and these two did
@@ -245,7 +253,8 @@ def apply_rating(fsrs, rating_name, on_date):
         "lapses": max(0, int(lapses)) + (1 if (g == 1 and s0 is not None) else 0),
     })
     return out, {"s_before": s0, "s_after": out["s"], "interval_days": ivl,
-                 "retrievability": (round(r, 4) if r is not None else None)}
+                 "retrievability": (round(r, 4) if r is not None else None),
+                 "dose_capped": capped}
 
 # ---------------------------------------------------------------- state io
 
@@ -396,7 +405,8 @@ DEFAULT_MODEL = {
     # INFORMATION, never pressure (docs/05 P13), and it is off-switchable like `momentum`.
     "settings": {"default_mode": "standard", "artifacts": "threshold-only", "ambient": "quiet",
                  "momentum": "on", "profile": None,
-                 "commitment": None, "decay_notice": "on"},
+                 "commitment": None, "decay_notice": "on",
+                 "relearning": "on"},
     "rhythms": {},
     "accessibility": [],
 }
@@ -886,6 +896,26 @@ def node_kind_of(node):
 
 # Review-session caps, mirroring skills/review §1 — the engine needs them to size the ambient
 # offer, and two copies of a number is how they drift.
+# ── THE RELEARNING DOSE (v1.5, docs/13 §2.5) ─────────────────────────────────────────
+# The dose-response on SPACED RELEARNING SESSIONS is the largest effect in the whole
+# evidence audit: 3 vs 1 relearning sessions is +60% relative recall at one month, and one
+# correct recall in each of three spaced sessions beats three correct recalls massed into
+# one by 68% vs 26% at a week. The quantity that matters is *sessions in the first weeks*,
+# not intervals — and FSRS, left alone, can starve a lucky first recall of them by booking
+# a long second interval.
+#
+# So the first two post-encode intervals are CAPPED, which guarantees >=3 spaced sessions
+# inside the 30-day north-star window for material the learner keeps answering. The values
+# sit inside the Cepeda ridgeline (optimal gap ~10-30% of the retention interval).
+#
+# ⚠ THIS IS A POLICY LAYER OVER FSRS, NOT A SCHEDULER CHANGE, and the payload says so: no
+# published study combines successive relearning with an adaptive scheduler. FSRS state
+# still updates from true elapsed time; only the DATE moves. Newly encoded nodes only
+# (`fsrs.dose`), and `settings.relearning = "off"` disables it entirely.
+DOSE_CAPS = (3, 9)        # days: the cap on the 1st and 2nd post-encode intervals
+DOSE_REPS = len(DOSE_CAPS)
+RELEARN_MAX_ATTEMPTS = 3  # skill-side cap on retries-to-criterion; the engine records honestly
+
 RETURN_ABSENCE_DAYS = 7   # what counts as "coming back" — ONE constant, shared by
                           # the hook's amnesty, the decay line, and the skills
 QUICK_CAP = 5             # `/review quick`, and the Sprint/Focus default
@@ -1376,6 +1406,43 @@ def apply_item(item, kind):
                    ("%.1fd" % s) if s is not None else "none",
                    rr, "" if rr == 1 else "s",
                    int(TRANSFER_MATURE_S), TRANSFER_MATURE_REPS))
+    # ⚠ A SAME-DAY RE-ATTEMPT IS NOT A SECOND REVIEW (v1.5 — G11, and it was a live defect).
+    #
+    # Retrieval-to-criterion means a failed retrieval gets re-attempted within the session,
+    # which under FSRS-4.5 semantics is a review at `elapsed == 0` — where `retrievability`
+    # is 1.0 by construction. Left alone, a successful retry would: strengthen stability off
+    # a 100%-recall prediction, count as a retention review it is not, and inflate BOTH
+    # `predicted` and `observed` in `refit`'s sample, biasing the multiplier the moment a
+    # learner does the very thing this release asks of them.
+    #
+    # So the day's FIRST graded retrieval is the review; every re-attempt after it is a
+    # `relearn` row — recorded append-only (receipts-or-it-didn't-happen applies to the
+    # criterion claim too) and excluded from state transitions and every retention-family
+    # population. Upstream FSRS trains on `(i > 1 AND delta_t > 0)`; the exclusion from
+    # state transitions is Engram's own conservative extension, because FSRS-4.5 has no
+    # same-day model at all (v1.6's FSRS-6 formula is where they would live if a validation
+    # ever earned them a place).
+    if item.get("relearn") is True and kind != "audit":
+        if node_kind_of(node) == "procedure":
+            die("refusing a `relearn` row on a PROCEDURE node (%s/%s). Retrieval-to-criterion "
+                "is a concept/fact protocol — the one direct test on problem-solving material "
+                "found 'only meager benefits' (docs/13 §2.5). Procedure lapses take the "
+                "problem-grammar path (erroneous example on a repeat lapse), not a retry loop."
+                % (item["topic"], item["node"]))
+        extra = {"relearn": True,
+                 "attempt": max(2, int(as_number(item.get("attempt"), 2) or 2)),
+                 "node_kind": node_kind_of(node)}
+        receipt = make_receipt(item, extra, kind)
+        append_jsonl(p("receipts", "%s.jsonl" % item["topic"]), receipt)
+        _cache_receipt(item["topic"], receipt)
+        if isinstance(sid, str) and sid:
+            drop_stash_sid(item["topic"], sid)
+        return {"node": item["node"], "topic": item["topic"], "kind": kind,
+                "applied": True, "scheduled": False, "relearn": True,
+                "attempt": receipt["attempt"],
+                "note": ("same-day re-attempt recorded — the schedule is untouched. The day's "
+                         "FIRST retrieval is the graded review; this is the criterion loop.")}
+
     # ⚠ AN AUDIT RECEIPT INFORMS; IT NEVER RESCHEDULES (v1.4, docs/15 §2.3).
     #
     # `/review` has spawned the blind assessor to spot-audit the tutor's own grades since
@@ -1450,7 +1517,19 @@ def apply_item(item, kind):
         f.pop("retention", None)
         f.pop("im", None)
     else:
-        node["fsrs"], extra = apply_rating(node["fsrs"], rating, today())
+        # THE RELEARNING DOSE (v1.5). Stamped at first encode so the policy applies to NEW
+        # material only — an existing learner's schedule is never retroactively shortened,
+        # which is the compatibility doctrine's promise and also the honest scope: the
+        # evidence is about the first weeks after encoding, not about mature memories.
+        dose_on = load_model()["settings"].get("relearning", "on") != "off"
+        if was_new and kind in ("encode", "pretest") and dose_on:
+            node["fsrs"]["dose"] = True
+        cap = None
+        if node["fsrs"].get("dose") is True and dose_on and kind == "review":
+            done = max(0, int(as_number(node["fsrs"].get("reps"), 0) or 0)) - 1
+            if 0 <= done < DOSE_REPS:
+                cap = DOSE_CAPS[done]
+        node["fsrs"], extra = apply_rating(node["fsrs"], rating, today(), cap_days=cap)
         node["fsrs"].pop("retention", None)
         node["fsrs"].pop("im", None)
     if transfer_lapse:
@@ -1528,6 +1607,9 @@ def cmd_rate(args):
             "confidence": args.confidence, "production": production,
             "grade": args.grade, "probe": args.probe, "source": args.source,
             "error_class": getattr(args, "error_class", None)}
+    if getattr(args, "relearn", False):
+        item["relearn"] = True
+        item["attempt"] = getattr(args, "attempt", None)
     ar = getattr(args, "audited_rating", None)
     if ar is not None:
         if args.kind != "audit":
@@ -2335,6 +2417,78 @@ BY_KIND_CAVEAT = ("kinds are different material by construction — a procedure 
                   "and pre-v1.1 receipts carry no kind stamp — they count as concept, which "
                   "is what every pre-v1.1 grading event actually was.")
 
+RELEARN_MIN_NODES = 5     # below this: counts, never a rate (the house floor rule)
+
+def compute_relearning(receipts):
+    """Did the session end at criterion — and is relearning getting cheap? (v1.5)
+
+    The literature's own efficiency signature is that relearning collapses in cost across
+    spaced sessions (first-pass recall .24 -> .68 -> .82; trials-to-criterion 1.95 -> 1.37 ->
+    1.20 in the one exposure-controlled study). That is the honest encouraging fact this
+    protocol hands a learner, and it is computed from their own rows rather than asserted.
+
+    DERIVED, never stamped: `relearn` rows live on the retries themselves, and the day's
+    first graded receipt is already on disk when a retry happens — receipts are append-only,
+    so retro-stamping a `retries_to_criterion` onto it is forbidden. The aggregate is
+    reconstructed per (node, day) group at read time (docs/15 §2.3)."""
+    groups = {}
+    for r in receipts:
+        if r.get("kind") not in ("review", "encode") or not r.get("rating"):
+            continue
+        t_, n_, ts = r.get("topic"), r.get("node"), r.get("ts")
+        if not isinstance(t_, str) or not isinstance(n_, str) or not isinstance(ts, str):
+            continue
+        g = groups.setdefault((t_, n_, ts), {"first": None, "retries": []})
+        if r.get("relearn") is True:
+            g["retries"].append(r)
+        elif g["first"] is None:
+            g["first"] = r
+    loops = {k: v for k, v in groups.items() if v["retries"] and v["first"] is not None}
+    nodes = sorted({(k[0], k[1]) for k in loops})
+    out = {"loops": len(loops), "n_nodes": len(nodes), "min_nodes": RELEARN_MIN_NODES,
+           "definition": ("a relearning LOOP is a graded retrieval that failed and was "
+                          "re-attempted within the same day until it came back. `retries` "
+                          "counts the re-attempts; the day's first attempt is the review.")}
+    if not loops:
+        out.update(criterion_met_rate=None, mean_retries=None, first_vs_latest=None,
+                   insufficient_data=True,
+                   read=("no relearning loop yet — a session that ends on a failed retrieval "
+                         "is the one-and-done pattern the spacing literature beats"))
+        return out
+    met = sum(1 for v in loops.values()
+              if GRADE_OF_RATING.get(v["retries"][-1].get("rating")) != "lapsed")
+    retries = [len(v["retries"]) for v in loops.values()]
+    by_node = {}
+    for (t_, n_, ts), v in sorted(loops.items()):
+        by_node.setdefault((t_, n_), []).append(len(v["retries"]))
+    firsts = [v[0] for v in by_node.values() if v]
+    latests = [v[-1] for v in by_node.values() if len(v) > 1]
+    enough = len(nodes) >= RELEARN_MIN_NODES
+    out.update(
+        criterion_met_rate=(round(met / float(len(loops)), 3) if enough else None),
+        criterion_met=met,
+        mean_retries=(round(sum(retries) / float(len(retries)), 2) if enough else None),
+        first_vs_latest=({"first": round(sum(firsts) / float(len(firsts)), 2),
+                          "latest": round(sum(latests) / float(len(latests)), 2)}
+                         if enough and latests else None),
+        insufficient_data=not enough)
+    if not enough:
+        out["read"] = ("%d relearning loop%s across %d node%s — counts only until %d nodes "
+                       "(criterion reached %d time%s)"
+                       % (len(loops), "" if len(loops) == 1 else "s", len(nodes),
+                          "" if len(nodes) == 1 else "s", RELEARN_MIN_NODES, met,
+                          "" if met == 1 else "s"))
+    else:
+        fv = out["first_vs_latest"]
+        trend = ("" if not fv else
+                 " · retries per loop went %.2f -> %.2f as the material came back"
+                 % (fv["first"], fv["latest"]))
+        out["read"] = ("%d relearning loops across %d nodes; the criterion was reached in "
+                       "%d%% of them%s"
+                       % (len(loops), len(nodes),
+                          round(100 * out["criterion_met_rate"]), trend))
+    return out
+
 SELF_GRADING_MIN_N = 20   # below this: counts, never a rate (the house floor rule)
 
 def compute_self_grading(receipts):
@@ -2518,6 +2672,11 @@ def _by_node(receipts):
         # A bare CLI `rate --kind audit` on a never-encoded node is therefore invisible to the
         # learner's metrics, which is exactly right: nobody retrieved anything.
         if r.get("kind") == "audit":
+            continue
+        # A same-day re-attempt is the criterion loop, not a retrieval event (v1.5, inv. 13).
+        # Excluded HERE, in the shared entry point, so every downstream population inherits
+        # it from one line — the v0.6.4 lesson (one rule, four implementations, three wrong).
+        if r.get("relearn") is True:
             continue
         key = (topic, node)
         first = key not in out
@@ -4337,6 +4496,8 @@ def compute_stats():
         # gold set; this measures the tutor — which writes every /review receipt — against
         # the blind assessor. Agreement, never validity, and the read says so.
         "self_grading": compute_self_grading(receipts),
+        # v1.5: did sessions end at criterion, and is relearning getting cheap?
+        "relearning": compute_relearning(receipts),
         "due_now": len(due_items()),
         "pending_verify": len(read_jsonl(p(STASH_FILE))),
         "topics": topics,
@@ -4728,9 +4889,16 @@ def cmd_refit(args):
     If observed recall differs from predicted, rescale intervals along the
     FSRS power forgetting curve so predictions match behavior. Full FSRS
     parameter optimization is out of scope for v1 (documented in README)."""
+    # ⚠ G11: a same-day row carries `retrievability == 1.0` by construction (elapsed 0 on the
+    # power curve), so it inflates BOTH `predicted` and `observed` and biases the multiplier
+    # toward "your memory is better than the model thinks". Upstream FSRS's own training
+    # filter is `(i > 1 AND delta_t > 0)` for exactly this reason. `relearn` rows are the
+    # v1.5 source of them; the `< 1.0` guard catches any that predate the stamp.
     receipts = [r for r in collect_receipts()
                 if r.get("kind") == "review" and r.get("rating")
-                and r.get("retrievability") is not None]
+                and r.get("relearn") is not True
+                and r.get("retrievability") is not None
+                and as_number(r.get("retrievability"), 1.0) < 1.0]
     n = len(receipts)
     if n == 0:
         emit({"ok": False, "reason": "no review receipts with predictions yet",
@@ -7535,9 +7703,13 @@ def cmd_selftest(_args):
         for nid in ("a", "b", "c"):
             _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", grade="recalled",
                                    kind="encode", production="x"))
-        os.environ["ENGRAM_TODAY"] = "2026-07-13"
-        _capture(cmd_rate, _ns(topic="t", node="a", rating="easy", grade="recalled",
-                               kind="review", production="x"))      # `a` becomes healthy/far-out
+        # `a` is reviewed THROUGH the v1.5 dose window (capped 3d, then 9d) and then once
+        # more uncapped, so it ends up genuinely far-out. This also pins that the caps
+        # GRADUATE a node rather than trapping it in a short-interval loop forever.
+        for day in ("2026-07-13", "2026-07-16", "2026-07-25"):
+            os.environ["ENGRAM_TODAY"] = day
+            _capture(cmd_rate, _ns(topic="t", node="a", rating="easy", grade="recalled",
+                                   kind="review", production="x"))
         os.environ["ENGRAM_TODAY"] = "2026-08-20"                   # b, c now rotting
         d = _capture_json(cmd_decay, _ns(topic="t", horizon=30))
         r = _capture_json(cmd_retention, _ns())
@@ -9448,6 +9620,109 @@ def cmd_selftest(_args):
     check("adjudication-stats gates on calibration and ranks a worse rater worse",
           fresh(_adjudication))
 
+    # ══ v1.5 · THE RELEARNING LOOP ═════════════════════════════════════════════════════
+    #
+    # -- the dose: >=3 spaced sessions inside the 30-day window, then it GRADUATES --
+    def _dose_caps(h):
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="encode"))
+        ivls, days = [], ["2026-07-10", "2026-07-13", "2026-07-22"]
+        for d in days:
+            os.environ["ENGRAM_TODAY"] = d
+            ivls.append(_capture_json(cmd_rate, _ns(topic="t", node="a", rating="easy"))
+                        ["interval_days"])
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (ivls[0] == DOSE_CAPS[0] and ivls[1] == DOSE_CAPS[1]
+                and ivls[2] > DOSE_CAPS[1] * 2)      # graduates: never a short-interval trap
+    check("the relearning dose caps the first two intervals, then lets the node graduate",
+          fresh(_dose_caps))
+
+    # -- and it is NEW MATERIAL ONLY: a pre-v1.5 node is never retroactively shortened --
+    def _dose_scoped(h):
+        _add_ab()
+        g = load_graph("t")                       # a node that predates the `dose` stamp
+        # reps=1 puts it INSIDE the dose window, so a wrongly-stamped node WOULD be capped.
+        # With reps=3 the window has already passed and the scoping is never exercised —
+        # §4.5's "the fixture never reaches the code under test", caught by the mutation.
+        g["nodes"]["a"].update(state="review", fsrs={"s": 40.0, "d": 5.0, "last": "2026-07-01",
+                                                     "due": "2026-07-06", "reps": 1, "lapses": 0})
+        save_graph(g)
+        old_node = _capture_json(cmd_rate, _ns(topic="t", node="a", rating="easy"))
+        _capture(cmd_model, _ns(set=["settings.relearning=off"]))
+        _capture(cmd_rate, _ns(topic="t", node="b", rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-10"
+        off = _capture_json(cmd_rate, _ns(topic="t", node="b", rating="easy"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (old_node["interval_days"] > DOSE_CAPS[0]      # pre-v1.5 node: untouched
+                and old_node.get("dose_capped") is False
+                and off["interval_days"] > DOSE_CAPS[0]       # off-switch: untouched
+                and load_graph("t")["nodes"]["b"]["fsrs"].get("dose") is not True)
+    check("the dose applies to NEW nodes only, and `relearning: off` disables it",
+          fresh(_dose_scoped))
+
+    # -- G11: a same-day re-attempt must not move the schedule OR bias the fit --
+    def _relearn_guard(h):
+        _add_ab()
+        for nid in ("a", "b"):
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-20"
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="again", grade="lapsed"))
+        before = json.dumps(load_graph("t")["nodes"]["a"], sort_keys=True)
+        _RECEIPTS_CACHE.clear()
+        fit_before = _capture_json(cmd_refit, _ns(force=True))
+        out = _capture_json(cmd_rate, _ns(topic="t", node="a", rating="good",
+                                          grade="recalled", relearn=True, attempt=2))
+        after = json.dumps(load_graph("t")["nodes"]["a"], sort_keys=True)
+        _RECEIPTS_CACHE.clear()
+        fit_after = _capture_json(cmd_refit, _ns(force=True))
+        st = _capture_json(cmd_stats, _ns())
+        ad = _capture_json(cmd_adherence, _ns())
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (before == after and out["scheduled"] is False and out["attempt"] == 2
+                # ⚠ THE ACTUAL G11 DEFECT: a same-day row carries retrievability 1.0, so it
+                # inflated BOTH sides of the fit. The multiplier must not move at all.
+                and fit_before.get("n_reviews") == fit_after.get("n_reviews")
+                and fit_before.get("observed_recall") == fit_after.get("observed_recall")
+                # …and a LEGACY same-day row — written before the `relearn` stamp existed,
+                # carrying retrievability 1.0 — is dropped by the elapsed guard too. Without
+                # this the `< 1.0` clause is untested, because the relearn filter already
+                # removed every row the fixture produced.
+                and _legacy_sameday_row_is_dropped(fit_after)
+                # …and it is not a retention review, an encoding, or a returned loop
+                and st["reviews"] == 1
+                and ad["loop_closure"]["first_review_done"] == 1
+                and st["relearning"]["loops"] == 1
+                and st["relearning"]["criterion_met"] == 1)
+    def _legacy_sameday_row_is_dropped(before_fit):
+        append_jsonl(p("receipts", "t.jsonl"),
+                     {"id": "r_legacy", "ts": today().isoformat(), "topic": "t", "node": "b",
+                      "kind": "review", "rating": "good", "grade": "recalled",
+                      "retrievability": 1.0})     # elapsed 0 => 1.0 by construction
+        _RECEIPTS_CACHE.clear()
+        after = _capture_json(cmd_refit, _ns(force=True))
+        return after.get("n_reviews") == before_fit.get("n_reviews")
+
+    check("a same-day re-attempt moves no schedule and biases no fit (G11)",
+          fresh(_relearn_guard))
+
+    # -- the measured boundary: procedures do NOT get the retry loop --
+    def _relearn_not_for_procedures(h):
+        g = {"topic": "t", "title": "T", "order": ["p"], "nodes": {
+            "p": {"claim": "P", "probe": "pp", "kind": "procedure",
+                  "practice": {"problem_frame": "vary the numbers"}}}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        _capture(cmd_rate, _ns(topic="t", node="p", rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-20"
+        refused = False
+        try:
+            _capture(cmd_rate, _ns(topic="t", node="p", rating="good", relearn=True))
+        except SystemExit:
+            refused = True
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return refused
+    check("retrieval-to-criterion is refused on PROCEDURE nodes (the measured boundary)",
+          fresh(_relearn_not_for_procedures))
+
     print("\n%d/%d checks passed" % (total[0] - len(failures), total[0]))
     sys.exit(1 if failures else 0)
 
@@ -9465,7 +9740,8 @@ def _ns(**kw):
                     cap=None, order=None, restore=False, clear=False,   # v1.3
                     cue=None, horizon=None,
                     canary=False, grader_context=None, audited_rating=None,  # v1.4
-                    rater=None, gold=None, contributor=None, allow_unvalidated=False)
+                    rater=None, gold=None, contributor=None, allow_unvalidated=False,
+                    relearn=False, attempt=None)   # v1.5
     defaults.update(kw)
     for k, v in defaults.items():
         setattr(ns, k, v)
@@ -9574,6 +9850,11 @@ def main():
     # before validate_item even runs — receipts are append-only (§4.8 Q5).
     sp.add_argument("--error-class", dest="error_class", choices=ERROR_CLASSES)
 
+    sp.add_argument("--relearn", action="store_true",
+                    help="a same-day RE-ATTEMPT after this node's first graded retrieval "
+                         "today: recorded, never scheduled, excluded from every retention "
+                         "population and from refit's sample")
+    sp.add_argument("--attempt", type=int, help="the retry ordinal (2, 3, …)")
     sp.add_argument("--audited-rating", choices=sorted(RATINGS),
                     help="audit kind only: the rating the TUTOR committed, which the blind "
                          "assessor is now re-grading (feeds stats.self_grading)")

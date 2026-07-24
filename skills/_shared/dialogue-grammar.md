@@ -81,6 +81,45 @@ This converts a grading problem into a teaching move without inflating the recor
 - **Menus for navigation, never for knowledge.** Session logistics (mode, topic choice, continue/stop) = arrow-key options. Anything testing knowledge = open production. Never turn a probe into multiple choice.
 - **Respect the mode budget.** Sprint ≈ 1 node, Standard ≈ 2–3, Deep ≈ 4–5 or a capstone. Stop on time; an unfinished node just stays frontier.
 
+## ⚠ The session does not end on a failed retrieval (v1.5 — retrieval to criterion)
+
+**Concept and fact nodes only.** When a VERIFY or a `/review` retrieval comes back `lapsed`
+— or `partial` with the node's *central claim* absent — the session's job is not finished:
+
+1. **Grade it honestly first.** The lapse is real, it is recorded, and it drives the schedule.
+   Nothing here softens the first attempt.
+2. **Re-derive, then interpose.** Teach the gap, then put *something else between* — the next
+   queue item, the connect beat, another node's probe. **Never re-ask the same question
+   immediately**: every protocol that worked used a delay or an intervening item, and an
+   instant re-ask measures echo, not memory.
+3. **Re-attempt, up to 3 passes total.** Stop the moment they produce it correctly once —
+   **one** correct recall is the criterion, not three. Rate the re-attempt with `--relearn`:
+
+```bash
+python3 "$ENGRAM" rate --topic <t> --node <n> --rating <r> --grade <g> \
+  --production-file <tmp.txt> --relearn --attempt <2|3>
+```
+
+   That records the loop and **touches nothing** — no stability, no due date, no `reps`, and
+   it is excluded from every retention figure and from the schedule fit. The day's first
+   attempt is the review; these are the criterion loop.
+4. **The budget outranks the criterion, always.** In Sprint mode the re-derivation *is* the
+   intervening activity. An unreached criterion is simply recorded — never chased past the
+   cap, never turned into homework.
+
+**Why bother:** spaced relearning is the largest effect in Engram's evidence base — one
+correct recall in each of three spaced sessions beats three massed into one by **68% vs 26%**
+at a week. The honest size for the exposure-controlled comparison is **d ≈ 0.7**, and it buys
+durability of *the practiced item*, not transfer — don't oversell it.
+
+**Register at the retry:** absolve, never pity (the oath). *"That one didn't come back — so
+let's rebuild it and try again in a minute. That's the whole point of the session, not a
+detour."* Never *"you should have remembered this."*
+
+**Procedure nodes are excluded**, and the engine refuses the flag on them: the one direct
+test of this protocol on problem-solving material found only meager benefits. They keep the
+problem grammar's lapse path (a find-explain-fix erroneous example on a repeat lapse).
+
 ## Park-and-resume (the learner owns the session)
 
 If the learner changes subject mid-session ("hang on, back to X") — park instantly and gracefully: one line stating what's parked and that nothing is lost (*"pausing there — `ffn-conventions` stays untouched on the frontier"*), then give them your full attention. Un-graded productions are already in the stash, so nothing depends on the conversation surviving. When they return, re-anchor from disk (`topics`, `due`, `stash count`), never from memory.

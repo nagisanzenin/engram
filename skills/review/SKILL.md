@@ -85,6 +85,8 @@ python3 "$ENGRAM" rate --topic <t> --node <n> --rating <r> --confidence <c-or-om
 
 Relay the returned due date in passing, not ceremonially ("back in 12 days"). **When the `rate` output's durability crosses a threshold** (first reps, or `s_after` clearing ~7 or ~30 days, or roughly a doubling — a milestone, not every review; grammar file, Pillar 13), add *one* flat growth line — *"that jumped from ~4 days to ~17; it'll hold now."* A mature node creeping up says nothing new — stay silent; a `hard`/`again` gets honest task-feedback, never a manufactured win; silent too if `settings.momentum` = `off`.
 
+**If the item comes back `lapsed` (concept/fact): do not move on.** Run the criterion loop in the dialogue grammar — grade it, re-derive, put another item in between, then re-ask, up to 3 passes, stopping at one clean recall. Rate re-attempts with `--relearn --attempt <n>`; they record the loop and change no schedule. The mode budget still outranks the criterion.
+
 **Special cases:**
 
 - ### ⭐ `transfer_ready: true` — SERVE THE HARDER QUESTION (v0.8)

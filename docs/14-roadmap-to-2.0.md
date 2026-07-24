@@ -369,7 +369,20 @@ whatever it says.
 
 ---
 
-# v1.5 — **The Relearning Loop** *(retrieval to criterion)*
+# v1.5 — **The Relearning Loop** — ✅ SHIPPED 2026-07-24
+
+> **RESULT.** Retrieval-to-criterion (one correct recall, ≤3 passes, never an immediate
+> re-ask) for concepts and facts; procedures refused at the engine, per the measured
+> boundary. The dose guarantee ships as a labeled policy layer: 3d/9d caps on the first two
+> post-encode intervals, new nodes only, off-switchable — measured 4d → 3d → 9d → 128d, so
+> it graduates rather than trapping. G11 closed: `relearn` rows touch no schedule, no
+> retention population, and no fit, excluded by one line in the shared predicate.
+>
+> **One work-order correction:** `retries_to_criterion` cannot be "stamped on the day's
+> first receipt" as §B originally said — that receipt is already on disk and receipts are
+> append-only. Retry data lives on the retry rows; the aggregate is derived at read time.
+
+# v1.5 — the original work order *(retrieval to criterion)*
 
 > *Engram grades one retrieval and books a date. The best-supported unexploited finding
 > in the retention literature says the session should not end at a failed retrieval.*
