@@ -816,7 +816,14 @@ it and re-run.
 
 ---
 
-# v1.9 — **The Sharper Question** *(the experiment engine grows real arms)*
+# v1.9 — **The Sharper Question** — ✅ SHIPPED 2026-07-24
+
+> **RESULT.** Four metrics, each on its own population, each with its own floor, all read
+> through the predicates `stats` already uses; absent evidence yields no datum rather than a
+> zero; and the two designs the evidence audit licensed-as-experiments ship as checked-in
+> pre-registrations naming their own threats to validity.
+
+# v1.9 — the original work order *(the experiment engine grows real arms)*
 
 > *The n-of-1 machinery is sound and can ask exactly one question. The audit found two
 > review-format candidates the evidence licenses only as experiments — and the engine

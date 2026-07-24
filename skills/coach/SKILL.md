@@ -202,7 +202,22 @@ python3 "$ENGRAM" experiment start --json '{
 - **`seed`** — recorded, so **every assignment is recomputable by anyone holding it.** An assignment nobody can reproduce is not an assignment; it is an anecdote.
 - **`stratify_by`** — **this is what kills the confound.** Explorables are routed to the hardest concepts *on purpose*, so an unstratified comparison measures the *material* as much as the medium. Randomize **within** an affordance class and the material stops riding along. (This is what finally makes `docs/06` open-Q2 answerable instead of merely disclosed.)
 - **`min_per_arm`** — defaults to **15** (~30 observations). The old 6 was underpowered by ~2.5× (`docs/07` §9). You may set it lower; the engine will record a `power_note` saying you did, and the settle will read `underpowered`, and it will be right.
-- **`metric`** — an unknown one **dies**. The engine will not guess which number you meant and then report it as fact.
+- **`metric`** — an unknown one **dies**. The engine will not guess which number you meant and then report it as fact. Four are supported (v1.9), each reading its **own** population from the same predicates `stats` uses: `first_review_recall` · `retention_7d` (the north star's own window) · `transfer_fired` (did the capability fire) · `slip_share` (of classified procedure errors, the slip fraction). **A node with no evidence for that metric contributes nothing — never a zero.** "Not measured" and "measured as a failure" are different facts, and pooling them is survivorship bias.
+- **The floor moves with the metric.** A rarer population needs the same number of data points, which takes longer to reach: `transfer_fired` floors at 8 per arm, `slip_share` at 10, the recall metrics at 15. The engine sets it; don't override it downward to reach a verdict sooner.
+
+### 1.5 · Two questions are pre-registered and shipped — prefer them (v1.9)
+
+```bash
+python3 "$ENGRAM" experiment start --preset probe-variation
+python3 "$ENGRAM" experiment start --preset topic-reconstruction
+```
+
+These are the two review-format changes the evidence audit licensed **as experiments and not as defaults** (`docs/13` §2.3). Each design file ships in `experiments/` — so *what was registered* is a checked-in artifact rather than a matter of memory — and each names its own **threat to validity** before any datum exists:
+
+- **probe-variation** — varied wording vs the stored probe. Direction well-evidenced (varied cues beat constant ones for the same target, and the benefit compounds with spacing); **never tested on rubric-graded conceptual recall**, which is all Engram serves. Threat: *difficulty drift* — vary the wording, never what is being asked. Both arms are graded by the **blind assessor**, so the metric's receipts come from one oracle.
+- **topic-reconstruction** — rebuild the topic's argument skeleton from memory vs the ordinary queue. Strong single-session science, **zero spaced-session studies**. Threat: *time-on-task* — cap both arms to the same minutes, or you measure time, not method.
+
+Say plainly which one they're running and why it is a question rather than a feature. If they ask "shouldn't Engram just do the better one?" — the honest answer is that nobody knows which is better *for this material*, and finding out on their own receipts is the point.
 
 ### 2 · Assign — the engine does it, seeded and stratified
 

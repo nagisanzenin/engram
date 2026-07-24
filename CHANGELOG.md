@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.9.0 — 2026-07-24 · The sharper question
+
+The n-of-1 machinery has been randomized, stratified, pre-registered and powered since
+v0.9 — and could ask **exactly one question**. The evidence audit then licensed two review-
+format changes *as experiments and explicitly not as defaults*, and the engine could not
+run either. This closes that gap.
+
+**The metric registry.** Four metrics, each reading its **own** population through the same
+shared predicates `stats` uses, so a settled experiment and the dashboard can never tell
+two different stories about one learner:
+
+| metric | population | floor/arm |
+|---|---|---|
+| `first_review_recall` | the node's first genuine review | 15 |
+| `retention_7d` | reviews 4–14 days after encoding — the north star's own window | 15 |
+| `transfer_fired` | did the capability fire in different clothes | 8 |
+| `slip_share` | of classified procedure errors, the slip fraction | 10 |
+
+**A node with no evidence for the chosen metric contributes nothing — never a zero.** "Not
+measured" and "measured as a failure" are different facts, and pooling them is the
+survivorship bug this repo keeps re-learning. Verified with one receipt log scored four
+ways: 6 data points under the recall metrics, **0** under `transfer_fired` (no probe was
+ever served) — identical receipts, honestly different answers. **The floor moves with the
+metric** too: a rarer population needs the same number of *data points*, which takes longer
+to reach, and the engine says so rather than letting a transfer trial settle on the recall
+metric's number and call itself powered.
+
+**Two pre-registered designs ship in the repo** (`experiments/*.json`), so *what was
+registered* is a checked-in artifact rather than a matter of memory:
+
+- **`probe-variation`** — varied wording vs the stored probe. The direction is well
+  evidenced (varied retrieval cues beat constant ones for the *same* target, and the
+  benefit compounds with spacing); it has **never** been tested on rubric-graded conceptual
+  recall, which is the only thing Engram serves. Both arms are graded by the **blind
+  assessor** so the metric's receipts come from one oracle.
+- **`topic-reconstruction`** — rebuild the topic's argument skeleton from memory vs the
+  ordinary queue. Strong single-session science; **zero** spaced-session studies.
+
+Each names its own **threat to validity** in the file, before any datum exists —
+difficulty drift and time-on-task respectively — and a `why_not_a_default` paragraph
+saying why it is a question rather than a feature.
+
+### One property got stronger, so a check moved with it
+
+An un-scoreable receipt used to enter an arm as a `None` that every downstream statistic
+had to survive. The registry drops it **at the source**: it yields no datum, exactly like
+"assigned but not yet reviewed". The v1.0.2-era degradation check was rewritten to pin the
+stronger invariant rather than the old one.
+
+### Tests
+
+267 → **269** checks; all four new mutations real after one rewrite — a floor check that
+compared two constants (§4.5's "asserts a constant, not a behavior") now starts two real
+experiments and reads the floors the engine actually assigned. Fuzz: **0 crashes / 600
+states**.
+
+
 ## 1.8.0 — 2026-07-24 · The steering mirror
 
 Engram computes a great deal about a learner and steers on almost none of it. This is the

@@ -32,7 +32,7 @@ SCHEMA = 1
 # The one place the engine knows its own version. Read by `export`, so a shared receipt states
 # which engine produced it — a corpus of receipts from unknown engine versions is not a corpus.
 # Pinned against .claude-plugin/plugin.json by a selftest, so it cannot drift.
-ENGRAM_VERSION = "1.8.0"
+ENGRAM_VERSION = "1.9.0"
 RETENTION_DEFAULT = 0.90
 INTERVAL_MAX = 365
 RETENTION_MIN, RETENTION_MAX = 0.70, 0.97   # sane desired-retention bounds
@@ -1988,7 +1988,27 @@ def cmd_misconception(args):
 EXPERIMENT_MIN_PER_ARM = 15      # ~30 total: SCED alternating-treatments power (docs/07 §9)
 EXPERIMENT_PERMUTATIONS = 10000  # exact randomization test — no scipy, no distributional prayer
 EXPERIMENT_BOOTSTRAP = 2000
-EXPERIMENT_METRICS = ("first_review_recall",)
+# ── THE METRIC REGISTRY (v1.9) ───────────────────────────────────────────────────────
+#
+# The n-of-1 machinery has been randomized, stratified, pre-registered and powered since
+# v0.9 — and could ask exactly ONE question. Every metric here is computed from the SAME
+# shared predicates `stats` uses, so an experiment and the dashboard can never disagree
+# about the same learner (§4.8 Q1), and each carries its own honest floor: a metric whose
+# population is rarer needs more assignments before a verdict means anything.
+EXPERIMENT_METRICS = ("first_review_recall", "retention_7d", "transfer_fired", "slip_share")
+# Per-metric minimum per arm. `first_review_recall` keeps the SCED alternating-treatments
+# figure; the rarer populations need the same number of DATA POINTS, which takes more
+# assignments to reach — the engine says so rather than pretending the floor is the same.
+EXPERIMENT_METRIC_MIN = {"first_review_recall": EXPERIMENT_MIN_PER_ARM,
+                         "retention_7d": EXPERIMENT_MIN_PER_ARM,
+                         "transfer_fired": 8,      # transfer probes are rare by construction
+                         "slip_share": 10}         # only procedure receipts carry error_class
+EXPERIMENT_METRIC_DOC = {
+    "first_review_recall": "the node's first genuine review, recalled=1 / partial=.5 / lapsed=0",
+    "retention_7d": "reviews attempted 4-14 days after encoding — the north star's own window",
+    "transfer_fired": "did the capability fire when the idea wore different clothes (1/0)",
+    "slip_share": "of classified procedure errors, the fraction that were slips not wrong method",
+}
 
 def _stratum_of(node, keys):
     """The stratum a node belongs to, from the pre-registered `stratify_by` keys.
@@ -2064,14 +2084,52 @@ def _experiment_outcomes(exp):
         if not isinstance(tp, str) or not isinstance(nid, str):
             continue
         slot = by.get((tp, nid))
-        if not slot or not slot["reviews"]:
-            continue                       # assigned, not yet reviewed: no datum, not a zero
-        r = slot["reviews"][0]
-        out[arm].append(_outcome(r))
+        if not slot:
+            continue                       # assigned, nothing graded yet: no datum, not a zero
+        metric = exp.get("metric") if isinstance(exp, dict) else None
+        val, when = _metric_value(metric, slot)
+        if val is None:
+            continue                       # the population this metric asks about is not there
+        out[arm].append(val)
         detail.append({"topic": tp, "node": nid, "arm": arm,
-                       "outcome": _outcome(r), "ts": r.get("ts"),
-                       "days_since_encode": r.get("days_since_encode")})
+                       "outcome": val, "ts": when,
+                       "metric": metric})
     return out, detail
+
+def _metric_value(metric, slot):
+    """One node's contribution to a pre-registered metric — or (None, None) if it has none.
+
+    Each branch reads the SAME populations `stats` reads (`_by_node`'s reviews/transfers,
+    `_outcome`, `RETENTION_BUCKETS`, `error_class`), so a settled experiment and the
+    dashboard can never tell two different stories about one learner (§4.8 Q1). A node that
+    has not produced this metric's evidence yields NOTHING — never a zero, because "not
+    measured" and "measured as a failure" are different facts and pooling them is the
+    survivorship bug this repo keeps re-learning."""
+    reviews = slot.get("reviews") or []
+    if metric in (None, "first_review_recall"):
+        if not reviews:
+            return None, None
+        return _outcome(reviews[0]), reviews[0].get("ts")
+    if metric == "retention_7d":
+        lo, hi = next((lo, hi) for name, lo, hi in RETENTION_BUCKETS if name == "7d")
+        for r in reviews:
+            d = days_between(slot["first"].get("ts"), r.get("ts"))
+            if d is not None and lo <= d <= hi:
+                return _outcome(r), r.get("ts")
+        return None, None
+    if metric == "transfer_fired":
+        transfers = [r for r in (slot.get("transfers") or []) if r.get("rating")]
+        if not transfers:
+            return None, None
+        last = transfers[-1]
+        return (1.0 if _grade_of(last) == "recalled" else 0.0), last.get("ts")
+    if metric == "slip_share":
+        classified = [r for r in reviews if r.get("error_class") in ERROR_CLASSES]
+        if not classified:
+            return None, None
+        r = classified[0]
+        return (1.0 if r.get("error_class") == "slip" else 0.0), r.get("ts")
+    return None, None
 
 def _spread(groups):
     """The test statistic: max(arm mean) - min(arm mean). Reduces to the plain difference for
@@ -2136,7 +2194,22 @@ def cmd_experiment(args):
     path = p("experiments.json")
     items = _as_list(read_json(path, []))
     if args.action == "start":
-        exp = load_payload(args)
+        preset = getattr(args, "preset", None)
+        if preset:
+            # A SHIPPED pre-registration (v1.9). The design file lives in the repo, so
+            # "what was registered" is a checked-in artifact rather than a matter of memory
+            # — which is the entire point of pre-registering anything. The learner's seed is
+            # the only thing added at start time.
+            if not slug_ok(preset):
+                die("bad preset name %r" % preset)
+            pf = os.path.join(_plugin_root(), "experiments", preset + ".json")
+            exp = read_json(pf, default=None, quarantine=False)
+            if not isinstance(exp, dict):
+                die("unknown preset %r — shipped designs live in experiments/*.json" % preset)
+            exp = dict(exp)
+            exp.setdefault("seed", today().isoformat().replace("-", ""))
+        else:
+            exp = load_payload(args)
         if not isinstance(exp, dict):
             die("experiment design must be an object")
         for key in ("question", "arms", "metric"):
@@ -2149,6 +2222,11 @@ def cmd_experiment(args):
         if exp["metric"] not in EXPERIMENT_METRICS:
             die("unknown metric %r — the engine will not silently compute a different one "
                 "(supported: %s)" % (exp["metric"], ", ".join(EXPERIMENT_METRICS)))
+        # A rarer population needs the same number of DATA POINTS, which takes longer to
+        # reach. Default the floor per metric rather than letting a transfer experiment
+        # settle on the recall metric's number and call it powered.
+        exp.setdefault("min_per_arm",
+                       EXPERIMENT_METRIC_MIN.get(exp["metric"], EXPERIMENT_MIN_PER_ARM))
         if any(e.get("status") == "active" for e in items if isinstance(e, dict)):
             die("an experiment is already active — settle it before starting another "
                 "(one active experiment at a time; see /coach)")
@@ -6874,15 +6952,22 @@ def cmd_selftest(_args):
             "id": "hand", "ts": "2026-08-07", "topic": "m", "node": ids[3],
             "kind": "review", "rating": "excellent", "grade": None})   # truthy non-rating, no grade
         _RECEIPTS_CACHE.clear()
-        # confirm the fixture actually produces the None outcome the fix must survive (or the
-        # check is theatre — §4.5). If a future change stops _outcome from returning None here,
-        # this fails loudly rather than passing vacuously.
-        groups, _ = _experiment_outcomes(next(e2 for e2 in
+        # v1.9 STRENGTHENED THIS PROPERTY, so the check moved with it. An un-scoreable
+        # receipt used to enter the arm as a `None` that every downstream statistic had to
+        # survive; the metric registry now drops it AT THE SOURCE — it yields no datum, the
+        # same as "assigned but not yet reviewed", because *not measured* and *measured as a
+        # failure* are different facts and pooling them is the survivorship bug this repo
+        # keeps re-learning. The fixture still has to reach the branch, or the check is
+        # theatre (§4.5): three nodes score, the fourth cannot.
+        groups, detail = _experiment_outcomes(next(e2 for e2 in
                      _as_list(read_json(p("experiments.json"), [])) if e2.get("id") == x["id"]))
-        exercised = any(v is None for vs in groups.values() for v in vs)
+        scored = sum(len(v) for v in groups.values())
+        exercised = (scored == 3                      # the un-scoreable node contributed none
+                     and not any(v is None for vs in groups.values() for v in vs)
+                     and all(d["outcome"] is not None for d in detail))
         v = _capture_json(cmd_experiment, _ns(action="settle", id=x["id"], verdict=None,
                                               json=None, file=None, topic=None, node=None))
-        return exercised and isinstance(v, dict) and "read" in v   # RETURNED, did not TypeError
+        return exercised and isinstance(v, dict) and "read" in v   # RETURNED, did not brick
     check("a settle DEGRADES on an un-scoreable hand-edited receipt (never a TypeError brick)",
           fresh(_settle_survives_a_garbage_outcome))
 
@@ -10666,6 +10751,86 @@ def cmd_selftest(_args):
     check("`rhythms` is retired for new models; description replaces it, scheduling does not",
           fresh(_rhythms_retired))
 
+    # ══ v1.9 · THE SHARPER QUESTION ════════════════════════════════════════════════════
+    #
+    # -- each metric reads its OWN population; identical receipts must NOT score alike --
+    def _metric_registry(h):
+        def run(metric, extra_min=None):
+            with tempfile.TemporaryDirectory() as hh:
+                os.environ["ENGRAM_HOME"] = hh
+                os.environ["ENGRAM_TODAY"] = "2026-01-01"
+                _capture(cmd_init, _ns())
+                design = {"question": "q", "arms": ["a", "b"], "metric": metric, "seed": "1"}
+                if extra_min:
+                    design["min_per_arm"] = extra_min
+                _capture(cmd_experiment, _ns(action="start", json=json.dumps(design)))
+                ids = ["n%02d" % i for i in range(6)]
+                _capture(cmd_add_topic, _ns(json=json.dumps(
+                    {"topic": "t", "title": "T", "order": ids,
+                     "nodes": {i: {"claim": "C", "probe": "p"} for i in ids}})))
+                for nid in ids:
+                    _capture(cmd_experiment, _ns(action="assign", topic="t", node=nid))
+                    _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", kind="encode",
+                                           grade="recalled"))
+                os.environ["ENGRAM_TODAY"] = "2026-01-08"       # inside the 7d window
+                for nid in ids:
+                    _capture(cmd_rate, _ns(topic="t", node=nid, rating="good",
+                                           grade="recalled"))
+                _RECEIPTS_CACHE.clear()
+                exp = _as_list(read_json(p("experiments.json"), []))[0]
+                groups, _d = _experiment_outcomes(exp)
+                return sum(len(v) for v in groups.values())
+        recall_n = run("first_review_recall")
+        ret_n = run("retention_7d")
+        transfer_n = run("transfer_fired")
+        slip_n = run("slip_share")
+        # THE POINT: one receipt log, four metrics, and they do NOT agree — because they
+        # ask different questions. A metric that scored the same population as every other
+        # would be a relabelling, not a new question.
+        # AND THE FLOOR MOVES WITH THE METRIC — asserted as BEHAVIOUR, not as a constant
+        # comparison, which proves nothing but that the source says what the source says.
+        def floor_for(metric):
+            with tempfile.TemporaryDirectory() as hh:
+                os.environ["ENGRAM_HOME"] = hh
+                os.environ["ENGRAM_TODAY"] = "2026-01-01"
+                _capture(cmd_init, _ns())
+                _capture(cmd_experiment, _ns(action="start", json=json.dumps(
+                    {"question": "q", "arms": ["a", "b"], "metric": metric, "seed": "1"})))
+                return _as_list(read_json(p("experiments.json"), []))[0]["min_per_arm"]
+        rare, common = floor_for("transfer_fired"), floor_for("first_review_recall")
+        os.environ["ENGRAM_HOME"] = h
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (recall_n == 6 and ret_n == 6
+                and transfer_n == 0        # no transfer probe was ever served: NO datum…
+                and slip_n == 0            # …and no error was ever classified: nor here
+                and rare != common and rare == EXPERIMENT_METRIC_MIN["transfer_fired"])
+    check("each experiment metric reads its own population — never a zero for absent evidence",
+          fresh(_metric_registry))
+
+    # -- the shipped presets are real pre-registrations, and load as designs --
+    def _presets(h):
+        loaded = []
+        for name in ("probe-variation", "topic-reconstruction"):
+            _capture(cmd_experiment, _ns(action="start", preset=name))
+            exp = _as_list(read_json(p("experiments.json"), []))[-1]
+            loaded.append(exp)
+            _capture(cmd_experiment, _ns(action="settle", id=exp["id"]))   # clear the slot
+        refused = False
+        try:
+            _capture(cmd_experiment, _ns(action="start", preset="does-not-exist"))
+        except SystemExit:
+            refused = True
+        return (all(e["metric"] in EXPERIMENT_METRICS for e in loaded)
+                and all(e.get("randomized") and e.get("seed") for e in loaded)
+                and all(len(e["arms"]) == 2 for e in loaded)
+                # a pre-registration that does not name its own threat to validity is a
+                # wish; both shipped designs do, in the file, before any datum exists
+                and all(e.get("threat_to_validity") for e in loaded)
+                and all(e.get("why_not_a_default") for e in loaded)
+                and refused)
+    check("the shipped experiment presets load as pre-registered designs with their threats",
+          fresh(_presets))
+
     print("\n%d/%d checks passed" % (total[0] - len(failures), total[0]))
     sys.exit(1 if failures else 0)
 
@@ -10686,7 +10851,7 @@ def _ns(**kw):
                     rater=None, gold=None, contributor=None, allow_unvalidated=False,
                     relearn=False, attempt=None,   # v1.5
                     extend=False, frontier_of=None, fix=False,   # v1.7
-                    because=None)   # v1.8  (`grade` already defaults above)
+                    because=None, preset=None)   # v1.8/v1.9
     defaults.update(kw)
     for k, v in defaults.items():
         setattr(ns, k, v)
@@ -10851,6 +11016,8 @@ def main():
     sp.add_argument("--description"); sp.add_argument("--id")
 
     sp = sub.add_parser("experiment")
+    sp.add_argument("--preset", help="a shipped, pre-registered design (see `experiments/`): "
+                                     "probe-variation | topic-reconstruction")
     sp.add_argument("action", choices=("start", "assign", "settle", "status", "list"))
     sp.add_argument("--json"); sp.add_argument("--file"); sp.add_argument("--id")
     # `--verdict` is KEPT so the engine can REFUSE it loudly rather than argparse-erroring on an
