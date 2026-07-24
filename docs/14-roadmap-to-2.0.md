@@ -15,7 +15,11 @@ Same discipline as docs/10: each release below is a **complete work order** — 
 evidence or verified defect that forces it) / What (the exact surface) / Done
 (oracle-checkable) / Selftests (must fail without the change) / Risk (what it could break,
 and the invariant that guards it). A model that has never seen this repository should be
-able to ship any one of them from its section alone, plus `RELEASE_PROTOCOL.md`.
+able to ship any one of them from its section alone, plus `RELEASE_PROTOCOL.md` — and
+**[`15-target-architecture-2.0.md`](15-target-architecture-2.0.md) is the schema
+authority**: every field, payload, and signature named below is specified there; where
+the two disagree, 15 wins (two such spots existed and are resolved there: receipt
+retry-stamping and retirement's representation).
 
 ---
 
@@ -152,10 +156,13 @@ never repeated. Declining costs nothing and is never mentioned again. (The found
 machine sits at 42 unaudited receipts — the friction is real and measured.)
 
 **F · `retire` — the missing autonomy verb.** Engine: `retire --topic T --node N`
-(and `--topic T` for a whole topic) sets engine-owned `state: "retired"` plus a
-`retired: {ts, restored: null}` block on the node — the decision's own auditable record
-(reversible: `retire --restore` stamps `restored`). **Why this is exempt from
-"state advances only through receipts" (docs/09 §2.4), said rather than assumed:**
+(and `--topic T` for a whole topic) writes an engine-owned `retired: {ts, restored:
+null}` block on the node — **`state` is untouched** (docs/15 §2.2: a new state-enum
+value would ripple through every state reader and block the capstone forever; a block +
+one shared `is_retired` predicate does the same job safely; retired prerequisites count
+as satisfied for `requires_met`, and the capstone requires every *non-retired* node).
+Reversible: `retire --restore` stamps `restored`, keeps the block. **Why this is exempt
+from "state advances only through receipts" (docs/09 §2.4), said rather than assumed:**
 receipts guard *mastery* claims; retirement advances nothing — it is an administrative
 learner decision, recorded on the node it governs, and once v1.8's ledger exists,
 `retire` writes there too. Retired nodes: excluded from `due`/`next`/decay projections;
@@ -385,10 +392,11 @@ budget and the two-minute floor outrank the criterion, always — in a Sprint wi
 node, the intervening activity is the re-derivation itself. **Procedure nodes are
 exempt** and keep the problem grammar's lapse path (erroneous-example re-encode on
 repeat lapses); the skill says why in one line (the boundary is measured, not cautious).
-Stash entries and `rate` gain the additive fields: `relearn: true` on retry rows;
-`retries_to_criterion` + `criterion_met` stamped by the engine on the day's first
-receipt when retries follow (engine-computed at settle from the relearn rows — never
-payload-supplied).
+Stash entries and `rate` gain the additive fields: `relearn: true` + `attempt: n` on
+retry rows (docs/15 §2.3 — the day's first receipt is already on disk when retries
+happen and receipts are append-only, so retry data lives ON the retry rows;
+`criterion_met` and `retries_to_criterion` are *derived at read time* from the day's
+row group, never stamped retroactively and never payload-supplied).
 
 **C · The dose guarantee — a labeled policy layer over FSRS.** New-node scheduling gains
 the deterministic cap: first post-encode interval = min(FSRS, **3d**), second =
