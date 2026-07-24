@@ -27,7 +27,7 @@ one property the receipt is claiming.
 sessions_spawn({
   context: "isolated",
   task: "Read <ENGRAM_ROOT>/agents/engram-assessor.md and follow it exactly as your
-         operating instructions. Grade the items in <ENGRAM_HOME>/stash-<n>.json.
+         operating instructions. Grade the items in <the file you wrote with `stash list > …`>.
          Return only the receipt JSON it specifies — no commentary."
 })
 ```

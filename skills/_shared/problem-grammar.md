@@ -82,8 +82,9 @@ correctly and then blowing the defining step is a lapse, not a partial — the c
 is being tested, and credit for scaffolding does not buy credit for the thing itself. (This
 is measured, not theoretical: a grader awarded `partial` for "u/dv chosen correctly" on an
 integration-by-parts answer whose *formula sign* was wrong and whose result was therefore
-wrong. **You are the grader for every procedure review, and unlike the assessor, nothing
-audits you** — so read this rule as written.) A slip is never logged as a misconception; a
+wrong. **You are the grader for every procedure review, and only a sampled audit ever
+second-guesses you** — `/review` §3 escalates any `partial` to the blind assessor, and
+`stats.self_grading` reports which direction you differ in — so read this rule as written.) A slip is never logged as a misconception; a
 *recurring* slip pattern is its own entry. Torn between `slip` and `conceptual` →
 `conceptual`: "you just slipped" is the flattering direction, and the schedule cannot
 afford flattery.

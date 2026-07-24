@@ -62,7 +62,7 @@ Sequencing note: the engine precedes the medium **deliberately** — beautiful a
 | **LLM grading leniency/variance** | Rubrics with anchor examples; spot audits; grade distribution monitoring in coach |
 | **Privacy** | Everything local files; nothing leaves the machine; stated in README |
 
-## The Constitution (ten articles)
+## The Constitution (twelve articles)
 
 1. **Retrieval is the interface.** Knowledge is claimed by producing, never by recognizing. "Makes sense" is zero evidence.
 2. **Nothing is learned until it is scheduled.** Every concept carries a future date or it doesn't exist.
@@ -74,3 +74,5 @@ Sequencing note: the engine precedes the medium **deliberately** — beautiful a
 8. **Meet the learner in their real work.** Examples from their world; transfer into their projects; presence where knowledge is used.
 9. **The learner sees their own model.** Open files, explained adaptations, taught science. No pedagogy behind the learner's back.
 10. **Receipts or it didn't happen.** Every mastery claim has a grade trail; every adaptation has its evidence; the oracle is never a vibe.
+11. **The system's success is measured by what the learner can do without it.** (Added in `docs/08` §7 — an AI tutor that makes you dependent has rented you a capability, not taught you one. The review is structurally a test of independence.)
+12. **Adaptation is proposed, consented, logged, and reversible.** (Added in v1.8.) Every change the *system* suggests to how it teaches is **computed by the engine from receipts**, **offered with its evidence quoted**, **applied only on an explicit yes**, **written to an append-only ledger with that evidence**, and **undoable**. The engine never infers a trait, never applies a change itself, and steers only on the handful of adaptivity families that survived their own literature — assistance level from demonstrated prior knowledge, scheduling from individually fitted forgetting, metacognitive prompts that are specific and fading, and small real choices. *A system that adapts to you is one hallucinated correlation away from a horoscope; the ledger is what keeps the difference visible.*

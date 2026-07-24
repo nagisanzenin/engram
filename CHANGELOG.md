@@ -1,5 +1,591 @@
 # Changelog
 
+## 1.9.1 — 2026-07-24 · What the merge gates found
+
+Before merging v1.3–v1.9 to `main`, the two gates that had been skipped across the whole
+series were finally run: **§4.6 the adversarial review** (four reviewers over the 5.7k-line
+diff) and **§5.5 the agent dogfood** (three, on the flows added since v1.3). Between them
+they found **nine HIGH defects**, and the pattern is the one this file keeps recording:
+every mechanical gate was green the entire time.
+
+**The badge could be re-licensed by a grader that never sat the exam.** One `canary-pass`,
+run under *any* model, permanently disabled both staleness triggers — `export` re-opened
+and the dashboard read "grader validated · QWK 1.00" with no failure word anywhere. A canary
+now re-licenses only its **own** grader context, only within the audit's own 90-day window,
+and an **incomplete** canary cannot pass at all. v1.4's central safety claim was
+unenforceable for a release.
+
+**`--extend` orphaned every registered explorable.** A shallow dict comprehension aliased the
+carried-forward nodes, so `node.pop("artifact")` deleted the value from the object the
+carry-forward then read — and the `.bak` was written *after* the mutation, so the backup
+could not recover it. The extend selftest was structurally blind: its fixture had no artifact.
+
+**`retired` was neither stripped nor carried.** A payload could **mint** a retirement
+(emptying the due queue and un-gating the capstone, since a retired prerequisite counts as
+satisfied), and `--replace` **destroyed** a real one — reverting the learner's own decision
+on the graph that is its only record.
+
+**`doctor --fix` renamed files into the live graph path without the lock** — a TOCTOU that
+POSIX `rename` turns into a silently clobbered topic.
+
+**`refit --force` rescaled every interval in the account off one receipt** (the floor guarded
+only the *reported* fit; the multiplier wrote underneath it) and narrated the 1.5× stretch as
+a finding.
+
+**The published npm package omitted `gold/` and `experiments/`** — so for every OpenCode
+user the audit chain was dead, `export` permanently refused, and both v1.9 presets missing.
+The engine's own selftest detected it (260/269 inside the package); nobody had run it there.
+
+**`stats.relearning.first_vs_latest` compared two different populations** and read as a
+paired trend: a fixture whose only twice-looped node got *worse* still printed an
+improvement.
+
+**Tier 2 fits four parameters and claims seventeen** — `_fit_loss` never calls the growth
+functions, so w[4..16] are invisible to it. **Not fixed here**; the fit is honest at tier 1
+and the claim is corrected in the docs. Making tier 2 real needs a replay loss, and is filed
+rather than rushed.
+
+**The assessor's documented audit output could not produce a usable audit receipt.** It was
+told to omit `rating` — which the engine requires — so `audited_rating`/`agree` never
+arrived and `stats.self_grading` sat at zero while audits were being run. `agents/*.md` and
+their Codex ports had not changed in seven releases; the parity gate only fires when an agent
+file changes, so it had never once run.
+
+Plus: `model --set` validated only the root key (a typo wrote a dead field **and** minted a
+`consented` ledger row for a change that never happened); `--kind audit` without
+`--audited-rating`, `--attempt` without `--relearn`, and a negative `--cap` were all accepted
+silently; the fit acceptance passed a 1.5e-8 "improvement"; the 10-anchor calibration gate had
+no minimum count; `--error-class` was accepted on concept and `recalled` items; `--preset`
+silently discarded a caller's own design.
+
+**And two things this release says out loud rather than fixing quietly.** The v1.3 entry
+claimed the savings curve's peak "independently reproduces" Lindsey's θ ≈ 0.33 — it does not;
+the peak sits at a `DUE_MINUTES_BY_R` boundary **this repo chose**, and calling a calibration
+coincidence a convergence is exactly the circularity the README warns about for its own gold
+set. And the **streak contradiction**: three files banned streak counts while two ordered the
+narrator to say one. The instructions to say it are gone.
+
+`scripts/fuzz.py` ships, because the CHANGELOG has been quoting its numbers as measurements
+while it lived only on one machine.
+
+### Tests
+
+274 → **279** checks; every fix mutation-tested, three fixtures rewritten after coming back
+fake. Fuzz 0/600 + 0/300 on the audit paths. vitest 165/165. **And the package now passes
+its own selftest** (279/279 staged from `files`), which is how the missing `gold/` was caught.
+
+
+## 1.9.0 — 2026-07-24 · The sharper question
+
+The n-of-1 machinery has been randomized, stratified, pre-registered and powered since
+v0.9 — and could ask **exactly one question**. The evidence audit then licensed two review-
+format changes *as experiments and explicitly not as defaults*, and the engine could not
+run either. This closes that gap.
+
+**The metric registry.** Four metrics, each reading its **own** population through the same
+shared predicates `stats` uses, so a settled experiment and the dashboard can never tell
+two different stories about one learner:
+
+| metric | population | floor/arm |
+|---|---|---|
+| `first_review_recall` | the node's first genuine review | 15 |
+| `retention_7d` | reviews 4–14 days after encoding — the north star's own window | 15 |
+| `transfer_fired` | did the capability fire in different clothes | 8 |
+| `slip_share` | of classified procedure errors, the slip fraction | 10 |
+
+**A node with no evidence for the chosen metric contributes nothing — never a zero.** "Not
+measured" and "measured as a failure" are different facts, and pooling them is the
+survivorship bug this repo keeps re-learning. Verified with one receipt log scored four
+ways: 6 data points under the recall metrics, **0** under `transfer_fired` (no probe was
+ever served) — identical receipts, honestly different answers. **The floor moves with the
+metric** too: a rarer population needs the same number of *data points*, which takes longer
+to reach, and the engine says so rather than letting a transfer trial settle on the recall
+metric's number and call itself powered.
+
+**Two pre-registered designs ship in the repo** (`experiments/*.json`), so *what was
+registered* is a checked-in artifact rather than a matter of memory:
+
+- **`probe-variation`** — varied wording vs the stored probe. The direction is well
+  evidenced (varied retrieval cues beat constant ones for the *same* target, and the
+  benefit compounds with spacing); it has **never** been tested on rubric-graded conceptual
+  recall, which is the only thing Engram serves. Both arms are graded by the **blind
+  assessor** so the metric's receipts come from one oracle.
+- **`topic-reconstruction`** — rebuild the topic's argument skeleton from memory vs the
+  ordinary queue. Strong single-session science; **zero** spaced-session studies.
+
+Each names its own **threat to validity** in the file, before any datum exists —
+difficulty drift and time-on-task respectively — and a `why_not_a_default` paragraph
+saying why it is a question rather than a feature.
+
+### One property got stronger, so a check moved with it
+
+An un-scoreable receipt used to enter an arm as a `None` that every downstream statistic
+had to survive. The registry drops it **at the source**: it yields no datum, exactly like
+"assigned but not yet reviewed". The v1.0.2-era degradation check was rewritten to pin the
+stronger invariant rather than the old one.
+
+### Tests
+
+267 → **269** checks; all four new mutations real after one rewrite — a floor check that
+compared two constants (§4.5's "asserts a constant, not a behavior") now starts two real
+experiments and reads the floors the engine actually assigned. Fuzz: **0 crashes / 600
+states**.
+
+
+## 1.8.0 — 2026-07-24 · The steering mirror
+
+Engram computes a great deal about a learner and steers on almost none of it. This is the
+release where the measurements start steering — and the whole design problem is that **a
+system that adapts to you is one hallucinated correlation away from a horoscope.**
+
+**Article 12 joins the constitution:** *every adaptation is proposed by the engine's
+numbers, consented by the learner, logged with its evidence, and reversible.* The engine
+never infers a trait, and never applies a change itself.
+
+**`propose`** emits at most three adaptations it can justify from this learner's own
+receipts, each carrying its `evidence` string and its `grade` (`evidence-backed` /
+`model-derived` / `heuristic`). It is **read-only** — verified by a check that hashes the
+learner model before and after.
+
+**The families are closed, and that is the entire safety argument.** Adaptivity's evidence
+base is mostly a graveyard: learning styles (dead, including "inferred from telemetry" —
+the same corpse in ML clothing), the general aptitude-treatment program (dead; prior
+knowledge × guidance is the one replicated survivor), chronotype scheduling (>80% of adult
+studies find no main effect and no intervention study exists), learner control over method
+(measurably *worse* than non-personalized). What Engram is allowed to steer on:
+
+1. **session shape**, from completion telemetry;
+2. **assistance level**, from demonstrated prior knowledge — the surviving ATI (expertise
+   reversal: assistance helps novices d = +0.505 and *harms* the knowledgeable d = −0.428),
+   and only ever proposed upward on clean evidence, because the meta-analysts' own
+   asymmetry says assist when unsure;
+3. **the workload curve** — and here the engine proposes **no number at all**, only that
+   they look at it;
+4. **one metacognitive prompt**, specific and fading, because generic prompting at scale is
+   a documented null.
+
+**`adaptations`** is the append-only ledger: field, from, to, the evidence, the grade, who
+asked, reversible. `/coach` explains current settings *from the ledger* rather than from
+memory — *"Sprint has been your default since 30 July, because five of six sessions ended
+early. Revert any time."* A change the learner makes themselves is recorded too, marked
+`learner`; a no-op writes nothing.
+
+**`rhythms` is retired.** It was defined in the schema, written by nothing, and "read" by
+`/coach` for four releases — a promised adaptation surface that could never fire. What
+replaces it is **description, not scheduling**: `stats.sessions` reports the learner's own
+session pattern with the note that Engram does not schedule by time of day. An existing
+model that already carries the key keeps it; new ones never gain it.
+
+### The fuzz earned its place again
+
+Adding `propose` to the `stats` path introduced **472 crashes in 600 fuzzed states** — an
+unhashable `topic` in a hand-edited receipt poisoning a dict key, which is the exact shape
+`_by_node` was hardened against in v0.6 and which **every new receipt-walking function
+re-earns from scratch**. `stats`, the dashboard and therefore `/coach` all went down with
+it. Fixed at the gate, and pinned by a check that feeds `propose` an unhashable topic, a
+bare integer session, and a dict timestamp.
+
+### Tests
+
+261 → **267** checks; every new check mutation-tested. Two came back fake on the first
+pass — a cap that could not bind because only three of four families fired, and a floor
+whose fixture qualified either way — both rewritten with fixtures that actually reach the
+guard. Fuzz: 472 → **0 crashes / 600 states**.
+
+
+## 1.7.0 — 2026-07-24 · The open frontier
+
+The founding question asks for a system where a learner can learn **anything, at any level
+of mastery**. "Anything" has been true since v1.1. "Any level" was false at both ends: an
+expert entering a 20-node topic got a novice's three-node pretest, and a *finished* topic
+dead-ended at its capstone with nowhere to go. (The founder's own graphs are hand-titled
+"Arc 1 of 2" precisely because the second half had no mechanism.)
+
+**`add-topic --extend` — a topic gains an arc instead of ending.** New nodes only; every
+existing node keeps its schedule, receipts and state **byte-for-byte**; new nodes are
+stamped with their `arc`; and the capstone re-mints over the union so the build still
+requires the whole topic. An id collision is **refused**, not silently merged — re-authoring
+a node the learner has receipts for is `--replace`'s job, and confusing the two is how a
+learner loses evidence. `/learn` offers it once when the capstone is done.
+
+**`next --frontier-of <node>` — the adaptive pretest, without inventing mastery.** A learner
+who says "I know the basics" gets asked a mid-arc probe; if they have it, the engine returns
+that node's unreceipted prerequisites, **deepest first**, with their probes. The walk decides
+what to **ask** — it credits nothing, advances nothing, and every node it surfaces still
+earns its own graded receipt. Skipping without evidence is the same unearned claim as
+advancing without evidence, and the constitution does not distinguish them. Bounded at 6
+probes per sitting, resumable, declinable.
+
+**`doctor --fix` — the diagnostic finally finishes the sentence.** `doctor` has always named
+the problem and stopped, so an unregistered explorable or a quarantined file sat there until
+a human happened to read a note. It now emits `fixes` with the exact commands, and `--fix`
+applies them **one at a time, validated first**: a quarantined graph is restored only once it
+actually parses and only if nothing live occupies its path. There is deliberately **no
+`--yes`** — a batch repair of state nobody looked at is how a diagnostic becomes a data-loss
+bug.
+
+**Two-phase authoring** (skills): where the platform can spawn background work, `/learn` asks
+the architect for a first arc of 4–6 nodes plus an outline, starts teaching immediately, and
+lands the rest mid-session with `--extend` — the ~7 minutes of silent terminal that the §5.6
+user session called the most likely first-session abandonment point. The capstone is minted
+only once the full arc is in, never on a half-map. Platforms without background spawning keep
+today's flow and its load-bearing warning line.
+
+### Tests
+
+258 → **261** checks; all six new checks mutation-tested and real on the first pass — the
+first release in this series where none came back fake. Fuzz: **0 crashes / 600 states**.
+
+
+## 1.6.0 — 2026-07-24 · The fitted learner
+
+"Fits your memory" has been **one coarse interval multiplier** since v0.2, and no real user
+has ever earned even that. This release makes the claim literal — and, after measuring what
+the alternative was worth, deliberately does **not** do the other half the roadmap planned.
+
+**The fitting ladder.** `refit` now fits the model, not just a rescale:
+
+| tier | gate | what it fits |
+|---|---|---|
+| 0 | ≥50 review receipts | the interval multiplier (unchanged since v0.2) |
+| 1 | **64 usable reviews** | the four initial-stability weights, one per first rating |
+| 2 | **400 usable reviews** | the whole 17-parameter vector, coordinate descent, hard-clamped |
+
+Every tier ends in **the acceptance check**: a fit ships only if it beats the learner's
+current parameters *on the learner's own reviews*. Otherwise `refit` says so and changes
+nothing — Anki's "parameters appear optimal" behaviour, and the only thing that makes a
+low-n fit safe. Re-running on unchanged evidence is therefore a no-op, by construction.
+
+Stdlib, no framework, and that is not a compromise: production `fsrs-rs` replaced its ML
+framework with hand-derived gradients, so a framework-free fit is the shipping norm. What
+it needs is the *scaffolding* — bounds, an L1 prior toward the shipped defaults, a
+monotonicity repair across ratings, and validation so a hand-edited `fsrs_params` is
+clamped rather than trusted into the scheduler.
+
+**`stats.workload` — the trade-off, drawn and never recommended.** Reviews/day and mean
+interval at 80/85/90/95% desired retention, computed from the learner's own stabilities,
+on the dashboard. **No auto-recommendation**: Anki — holding the largest review dataset in
+existence — *removed* its "compute minimum recommended retention" feature in 25.07, and
+every implementation needs per-review **duration** telemetry that Engram's receipts do not
+carry and could not honestly attribute (a review here is embedded in a tutoring dialogue).
+Drawing the curve is honest; naming a point on it would be theatre.
+
+### What this release deliberately does NOT ship, and why
+
+`docs/14` v1.6 planned an **FSRS-6 migration by replay**. It is not here, and the reasoning
+is the release's most useful output:
+
+- **The measured benefit for this user base is ~zero.** On the 10k-user benchmark, *fitted*
+  FSRS-4.5 (log loss 0.3624) matches or beats *default-parameter* FSRS-6 (0.3664) and
+  FSRS-7 (0.3629). Engram's users run near-defaults, so a version bump alone buys them
+  nothing anyone could honestly announce. **Fitting is worth about two version upgrades** —
+  so this release shipped the fitting.
+- **The cost is real.** Migration re-derives every stored `s`/`d` and moves every due date
+  on thousands of machines. Risk with no measured benefit is not a trade.
+- **The one genuine argument for it is currently moot.** FSRS-6's short-term formula is
+  where same-day dynamics *would* live — but v1.5 deliberately excludes relearn rows from
+  the model until a validation earns them a place.
+- **And the honest blocker:** the 21 default weights would have to be verified against the
+  primary source before being written into a scheduler that governs other people's
+  memories. Unverified constants are fabricated data, whatever the changelog says.
+
+Measured on the founder's own state while deciding: **13 usable rows** against a tier-1
+floor of 64. Nobody is close to fitting yet, which makes shipping the ladder now (and the
+migration never-on-a-hunch) the right order.
+
+### The defects this release's gates found — and one is the sharpest yet
+
+- **The S0 fitter was a NO-OP on real receipts**, and it looked like it worked: loss fell a
+  hair, output was monotone, and the synthetic instrument test passed. The loss used each
+  row's *recorded* `s_before` — computed under the **old** weights — so it never depended
+  on the parameters being fitted. Only first reviews can teach S0, and only if their
+  stability is recomputed from the candidate. **Found by mutating the tier floor**: removing
+  the gate changed nothing, because there was nothing to gate.
+- **The L1 prior was calibrated for a summed loss and applied to a mean**, so it outweighed
+  the data ~15:1 and the fitter silently never moved. Recovery of a known parameter went
+  from 3.79 to **20.25 against a true 20.0** once scaled. Caught by the §5.5 instrument test
+  — generate data from known parameters and demand recovery.
+- **Four checks came back FAKE across the run** (§4.5): a floor test that passed `--force`
+  and therefore bypassed the floor; an acceptance test blocked by the floor instead;
+  a fixture with no later reviews; and no check at all asserting the fitted vector
+  *reaches the scheduler*. All rewritten. One mutation was **correctly** fake — the
+  first-reviews filter is genuinely a no-op optimization, not a correctness guard, and the
+  comment now says so instead of overclaiming.
+
+### Tests
+
+253 → **258** checks; every new check mutation-tested. Fuzz: **0 crashes / 600 states**.
+
+
+## 1.5.0 — 2026-07-24 · The relearning loop
+
+`docs/07` flagged successive relearning in v0.6 as *"the most promising unexploited item in
+the retention literature for this codebase"* and ordered it specified against primary
+sources before anyone built it. `docs/13` §2.5 is that specification; this is the build.
+
+**The session no longer ends on a failed retrieval.** When a concept or fact comes back
+`lapsed`, the tutor re-derives it, puts another item in between (**never** an immediate
+re-ask — every protocol that worked used a delay or an intervening item), and asks again,
+up to three passes, stopping at **one** correct recall. One, not three: the "relearning
+override" is the clearest result in this literature — with spaced relearning to follow, a
+higher initial criterion buys almost nothing and costs ~2 minutes a concept.
+
+**The dose is guaranteed rather than hoped for.** The quantity the evidence is actually
+about is *spaced sessions in the first weeks*, and FSRS left alone can starve a lucky first
+recall of them by booking a long second interval. So the first two post-encode intervals
+are capped at **3 and 9 days** (inside the Cepeda ridgeline), which puts ≥3 spaced sessions
+inside the 30-day north-star window — then the node **graduates** and FSRS runs untouched.
+Verified end to end: 4d → 3d → 9d → 128d.
+
+The numbers, quoted at their honest size: 3 vs 1 relearning sessions is **+60% relative
+recall at one month**; one correct recall in each of three spaced sessions beats three
+massed into one **68% vs 26%** at a week; and the only *exposure-controlled* study puts the
+pure effect at **d ≈ 0.7**, not the d ≈ 4 of confounded designs. Transfer under exposure
+control is **≈ 0.15** — this buys durability of the practiced item and we do not claim more.
+
+**What it deliberately does not do:**
+- **Procedures are excluded, and the engine refuses the flag on them.** The one direct test
+  of this protocol on problem-solving material found "only meager benefits". They keep the
+  problem grammar's lapse path.
+- **New material only.** A pre-v1.5 node is never retroactively shortened; the caps ride an
+  `fsrs.dose` stamp written at first encode. `settings.relearning: "off"` disables the whole
+  layer, and an untouched v1.4 state behaves exactly as before.
+- **No claim that this is settled.** No published study combines successive relearning with
+  an adaptive scheduler; the cap is a labeled **policy layer over FSRS**, not a scheduler
+  change, and the payload says so.
+
+### G11 — the live defect this release had to fix first
+
+A same-day re-attempt is a review at `elapsed == 0`, where `retrievability` is **1.0 by
+construction**. Left alone, the very behaviour this release asks for would have: strengthened
+stability off a 100%-recall prediction, counted as a retention review it is not, and inflated
+**both** `predicted` and `observed` in `refit`'s sample — biasing the schedule fit toward
+*"your memory is better than the model thinks"*. Upstream FSRS trains on `(i > 1 AND
+delta_t > 0)` for exactly this reason.
+
+So `relearn` rows are recorded append-only (receipts-or-it-didn't-happen applies to the
+criterion claim too) and excluded from state transitions, from every retention-family
+population, and from the fit — by **one line in the shared predicate**, so every reader
+inherits it (the v0.6.4 lesson). Legacy same-day rows written before the stamp existed are
+caught by an elapsed guard.
+
+**`stats.relearning`** reports loops, criterion-met, and the literature's own efficiency
+signature — retries per loop falling as material comes back — **derived at read time** from
+each (node, day) group, because the day's first receipt is already on disk when a retry
+happens and receipts are never retro-stamped.
+
+### The defects the gates found
+
+- **A fixture's premise died** the moment the dose shipped: a check that needed a "far-out"
+  node got a capped one instead. Rewritten to graduate *through* the dose window, which now
+  also pins that the caps release a node rather than trapping it.
+- **Two new checks came back FAKE** (§4.5, and this is the fourth release running):
+  the dose-scoping fixture used a node whose dose window had already passed, so the
+  `was_new` guard was never reached; and the `refit` elapsed-guard was untestable because
+  the relearn filter had already removed every row the fixture produced. Both rewritten —
+  one with a node *inside* the window, one with a hand-written legacy row carrying
+  `retrievability: 1.0` and no stamp.
+
+### Tests
+
+249 → **253** checks; all six new checks mutation-tested (two fake, both rewritten).
+Fuzz: **0 crashes / 600 states**.
+
+
+## 1.4.0 — 2026-07-24 · The audited tutor
+
+v0.7 built the audit that measures the blind assessor and shipped it as the project's
+central safety claim. It has never measured **the other grader** — and the tutor writes
+*every* `/review` receipt and every `error_class` behind `procedure_slip_share`,
+in-context, with the dialogue it just ran sitting in front of it. That is the exact
+condition the separation of powers exists to distrust, and it was the one grader nothing
+checked. Meanwhile the assessor's badge, once earned, was **permanent**.
+
+**Audit receipts persist, and reschedule nothing.** `/review` has spawned the assessor to
+spot-audit the tutor's grades since v0.2; the verdict was narrated once and evaporated.
+`KINDS` has carried an `audit` slot the whole time with nothing writing it. Now
+`rate --kind audit --audited-rating <what the tutor said>` records the comparison as
+evidence on disk that touches **no** FSRS state, no node state, no due date, no `reps` —
+"audits inform, they don't reschedule" is structural rather than a sentence in a skill
+file. `/review` also escalates on **any** `partial` now, not just partial-heavy sessions,
+because the mid-band is where graders measurably diverge.
+
+**`stats.self_grading` — the tutor's number, with its limits attached.** Agreement (QWK)
+and **signed direction** between the tutor and the blind assessor, banded, with the honest
+label in the `read`: *agreement with the blind assessor, whose own validity is what
+`/coach audit` measures — tutor validity is bounded by that chain, never better.* No
+blindness property is claimed for the tutor and none can be: dialogue context is a
+permanent confound. Direction is published because a mean bias of zero is also what
+"inflates half, deflates half" looks like.
+
+**The badge expires (v1.4's teeth).** `assessor-audit --grader-context` records *which*
+grader earned a verdict; `grader-health --grader-context` compares it to the grader
+running today. A mismatch → `stale-model`, `grader_unvalidated: true`, and **`export`
+refuses** — because the one published measurement of a silent judge-model swap found it
+uniformly **more lenient**, which is this project's single dangerous direction. When the
+context is unknowable, age is the fallback (90 days). Naive rolling drift detectors are
+deliberately not used: their measured false-alarm rate on drift-free streams is 75%, and a
+gate that cries wolf is a gate nobody reads.
+
+**And the cheap way back: the canary.** `gold --canary` emits 15 items chosen the same way
+every time — hash-stable, **stratified across all three bands** with the mid-band and this
+grader's historically-weak case types oversampled. A clean run re-licenses the badge; a
+dirty one demands the full 86×3. **A canary can never mint a `pass`** — its verdict domain
+is `canary-pass`/`canary-fail`, enforced in the engine, because otherwise the cheap path
+would quietly replace the expensive one.
+
+**Band-stratified audits.** `by_gold_band` reports agreement, signed bias and inflation
+count per gold band. The 2026 short-answer literature finds rubric-anchored LLM graders
+near-human at the extremes and materially off in the middle — so a healthy pooled QWK can
+sit on top of a soft `partial` band, which is exactly where a learner's borderline answers
+live.
+
+**The adjudication kit, at last.** Since v0.7 the engine has printed, on every audit, that
+its gold set is authored rather than independently adjudicated and that one outside human
+would be the highest-value contribution to this repository. [`docs/ADJUDICATION.md`](docs/ADJUDICATION.md)
+is the procedure and `adjudication-stats --file` is the procedure in code: a 10-anchor
+calibration gate (≥80% exact) that runs **before** any agreement number is trusted, then
+exact / QWK / **ordinal Krippendorff's α with a bootstrap CI** / direction counts /
+confusion, against thresholds fixed in advance (α ≥ 0.80 corroborated · 0.667–0.80
+tentative · below contested). One external rater **corroborates**; replacing the author
+would take two independent externals agreeing with each other, and the engine keeps saying
+so.
+
+### The defects this release's own gates found
+
+- **The canary was 100% mid-band on the first cut** — structurally blind to a grader that
+  had started failing the *clear* cases. A tripwire that can only see one band is not a
+  tripwire; it is a narrower badge. Now quota-stratified across all three.
+- **A canary audit hijacked "the latest audit."** `_latest_audit` took the newest file, so
+  running a canary replaced an 86-item verdict with a 15-item one — and `canary-pass`,
+  not being a valid *full* verdict, then read as `unreadable` and **voided a badge that
+  was fine**. The cheap path may vouch for the expensive one; it may never overwrite it.
+- **`export` did not inherit staleness** until it was given its own `--grader-context`.
+  Contributing to a shared corpus is precisely where a badge nobody re-earned matters most.
+- **The fuzz found a brick in the adjudication reader**: `{"a":1} in GOLD_SCORE` raises
+  `unhashable type` rather than returning False — 35 crashes in 300 states, in a read path
+  whose entire job is surviving a human's hand-authored file.
+- **One new check came back FAKE** (§4.5): the guard keeping audit receipts out of
+  `_by_node` was mutation-tested green, because the fixture always had the audit arrive
+  *last* and never reached the line. The case the guard exists for — an audit as a node's
+  **first** receipt, which would invent an encoding event that never happened — is now
+  asserted directly.
+
+### Numbers audit (§4.8)
+
+`self_grading` fails **pessimistically by construction** (a missed audit shows as a
+smaller `n`, never as agreement) and its denominators are named: `n` is spot-audits, the
+band rows carry their own. Below 20 audits it publishes **counts only** — never a rate.
+`by_gold_band`'s counts are *judgments* (items × runs) and say so, keeping `items` and
+`judgments` in separate keys (bug class #7). `grader_context` is **stored verbatim, never
+inferred** — a model naming its own weights is fabricated data, and `"unknown"` is honest.
+The staleness flag is *derived* from the verdict and the context, never read from a file.
+
+### Tests
+
+243 → **249** checks; every new check mutation-tested (one came back fake and was
+rewritten — see above). Fuzz: **0 crashes / 600 states** on the standard read paths, plus
+a new 300-state sweep over garbage audit files and hand-authored adjudication input
+(35 → 0 after the fix).
+
+
+## 1.3.0 — 2026-07-24 · The kept word
+
+The first release on the road to 2.0 (`docs/14`), and it is the return release: the
+binding constraint has been adherence since `docs/08` was written, and three of the four
+things this ships were *already in the schema, computed by nothing*.
+
+**The commitment is finally shown back.** `commit` has written the learner's if-then plan
+since v0.6 and **no surface has ever displayed it** — the `transfer_probe` defect, repeated
+on the strongest licensed adherence lever in the repo. What the direct RCTs actually tested
+is the *read-back* (Messmer 2022; Prestwich 2010), not the storing. The session hook now
+prints it, and `/review`'s amnesty block shows it once on return, in the learner's own words
+— rationed by exactly the decay line's return-event rule (never-closed loop, or a real
+absence), because a sentence you wrote becomes nagging the moment it greets you daily.
+Their text is printed as an inert quoted literal: hook output is injected into an agent's
+context, so a commitment reading *"ignore previous instructions"* must arrive as text.
+`commit` also stamps renewals and emits `age_days`, which is what drives the keep/rephrase/
+drop offer at a seam (the ~28-day cadence is labeled inference, not evidence).
+
+**The capped session stops serving the worst-ranked order.** `due --cap N` ranks by
+expected 30-day retention saved per expected minute; `--limit` is untouched and still emits
+the bare list in the old most-overdue-first order, so an older skill file against a newer
+engine gets byte-identical behavior. Uncapped queues are unchanged.
+
+> **The roadmap's own formula did the opposite of what its prose claimed, and the fixture
+> built to make the two orders diverge is the only reason we know.** `docs/14` asserted that
+> savings-per-minute "deprioritizes the nearly-lost (little savable)". It does not: reviewing
+> a near-dead concept *resurrects* it, so the raw metric ranks it highest. Sweeping stability
+> shows the curve is an inverted U whose peak sits at the mid-band boundary of
+> `DUE_MINUTES_BY_R` — **a constant this repo chose**, not a derived optimum: move the
+> breakpoint and the peak moves with it. An earlier draft of this entry called that an
+> independent reproduction of Lindsey's θ ≈ 0.33 threshold, which is precisely the
+> circularity the README calls out for its own gold set. It is a coincidence of calibration
+> and it is written down as one. The peak is kept; the left tail is **parked**: items below R = 0.10 are flagged
+> `effectively_relearn` and sort last whatever their raw score, because a one-shot 30-day
+> knapsack cannot see that a resurrection buys several more reviews of future budget, and
+> every budgeted analysis in the record says do not serve the hopeless first. Docs 13/14/15
+> are corrected rather than quietly reconciled.
+
+**`retire` — the autonomy verb Engram never had.** Take something off your list: out of
+`due`, `next`, `decay`, transfer candidates and the frontier; **counted in every denominator
+it leaves** (`adherence.loop_closure.retired_excluded`, `retention.unmeasured.retired`,
+`funnel.nodes_retired`, and a line on the dashboard). It is deliberately *not* a `state`
+value — a fourth state would ripple through every state reader, and the capstone requires
+every node, so retirement would have blocked the build forever. Instead: an engine-owned
+block plus one shared `is_retired` predicate, and a **retired prerequisite counts as
+satisfied**, so retiring something opens the frontier rather than sealing the topic.
+**The engine never proposes retiring a specific node** — auto-retiring whatever a learner
+keeps failing is a flattering denominator wearing a helpful face.
+
+**The hook now opens with amnesty — and the reason it does is the most useful thing this
+release found.** The first cut of the plan line printed it *after* the decay cost, so the
+ambient surface read: **count → what it's costing you → your own unkept promise**, with no
+amnesty anywhere, fired automatically before `/review` is typed. Every engine gate was green.
+The §5.5 dogfood — an uncontaminated agent handed only the skill file and a seeded state —
+read that sequence cold and named it: *"cost-of-decay followed by their own unkept promise,
+with no amnesty before it, at the exact moment the protocol says the learner is most likely
+to churn. Read cold, that pair is a debt collector, and it ships enabled by default."*
+`/review`'s protocol has always guaranteed *nothing owed → what it costs → a path*, and the
+skill **cannot repair an ordering violation that happens before it runs**. So the guarantee
+now lives in the hook: amnesty first (dated when session history allows), then their plan,
+then the cost. The ordering is pinned by a selftest, because a check that merely asserts the
+lines exist cannot see the defect.
+
+**The hook stops presenting the wall.** Above `2 × the review cap` (or on the Focus
+profile), the ambient line leads with a path that fits and still states the full count:
+*"28 reviews due · /review quick clears the 5 most urgent (~3 min) · full queue ~17 min."*
+The amnesty protocol existed only inside `/review`; the line that reached the learner first
+was the wall it was written to prevent.
+
+Also: `/coach` offers the grader audit **once**, when there are ≥20 receipts and it would
+change something (the founder's own machine has 42 receipts and every number stamped
+unearned); `/learn` may suggest — once, declinably — anchoring a clock-time cue to an
+existing routine (event cues build habits, time cues measurably don't); `/review` carries
+one honest line about automaticity taking ~2 months with a huge range, and **no day count,
+ever** — the constant does not exist and a countdown is a streak with better manners.
+
+### Numbers audit (§4.8)
+
+`savings_per_min` fails **pessimistically** (a mis-ranked item is still a due item, and the
+cap is a floor not a target); its denominator is *expected minutes*, published per item
+beside it; `order_basis` ships inside the payload. `retired_excluded` is the one number here
+that could flatter — a learner who retires everything unreviewed drives `loop_closure` up —
+so the count travels with the rate, reaches the `read` string, and `/coach` is instructed to
+voice it. `retired` is reported **beside** `states`, never inside it: the three state counts
+still sum to the node total, because two populations may not share a container (bug class
+#7). Cross-consistency verified live on one state: `retention.unmeasured.projected_recall_now`,
+`decay.now.mean_recall_due` and every `due --cap` item's `r_now` agree to the digit (0.49).
+
+### Tests
+
+234 → **243** checks; every new check mutation-tested (each fails when, and only when, its
+own fix is reverted). **Two mutations came back FAKE and were rewritten** — one asserted the
+amnesty existed without ever reaching the branch that dates it, which is §4.5's "the fixture
+returns before execution reaches the code under test", exactly as the protocol predicts. Fuzz re-run after the last commit:
+**0 crashes / 600 states / 19,800 read calls** with `retired` randomized to every JSON type.
+
+
 ## 1.2.2 — 2026-07-22 · closing the review's MED/LOW tail, and one the fuzz found
 
 v1.2.1 fixed the two HIGH defects and left four smaller findings open. Three were real on

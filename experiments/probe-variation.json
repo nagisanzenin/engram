@@ -1,0 +1,18 @@
+{
+  "preset": "probe-variation",
+  "question": "Does varying the wording of a concept's probe across reviews hold it better than re-serving the stored probe verbatim?",
+  "arms": ["stored-probe", "varied-probe"],
+  "metric": "retention_7d",
+  "stratify_by": ["threshold", "viz.affordance", "kind"],
+  "min_per_arm": 15,
+  "analysis": "randomization-test",
+  "why": "Varied retrieval cues beat constant ones for the SAME target (PNAS 2024, 7 experiments: immediate d = 0.81 / 0.67), and the benefit COMPOUNDS with spacing (d = 0.87 varied vs 0.52 constant at longer lags). Learners' metacognition is inverted on this — they judge constant cues more effective (d = 0.73 postdiction).",
+  "why_not_a_default": "Every study in that literature used foreign-vocabulary pairs or short lecture items. NOBODY has tested probe variation for rubric-graded conceptual free recall, which is the only thing Engram serves. The direction is well-evidenced; the transfer to this material class is not, and shipping it as a default would be exactly the vibes-over-evidence move this project refuses.",
+  "threat_to_validity": "DIFFICULTY DRIFT. A paraphrase that is harder (or easier) than the stored probe measures the paraphrase, not the variation. The rubric is byte-identical across arms and the grading is blind; the tutor must vary the WORDING and the framing, never what is being asked for.",
+  "protocol": [
+    "stored-probe: serve node.probe verbatim, as today.",
+    "varied-probe: rephrase the same question — different opening, different framing, same rubric criteria, same thing being asked. Never add or remove a required element.",
+    "Both arms: the production is stashed and graded by the BLIND ASSESSOR, not self-graded in-dialogue, so the metric's receipts come from the same oracle in both arms.",
+    "Never vary the probe on a node in the stored-probe arm, in either direction, for the life of the experiment."
+  ]
+}

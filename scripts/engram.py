@@ -14,6 +14,7 @@ Test hooks: ENGRAM_TODAY=YYYY-MM-DD freezes "today"; `selftest` runs in a tempdi
 """
 
 import argparse
+import copy
 import hashlib
 import itertools
 import json
@@ -32,7 +33,7 @@ SCHEMA = 1
 # The one place the engine knows its own version. Read by `export`, so a shared receipt states
 # which engine produced it — a corpus of receipts from unknown engine versions is not a corpus.
 # Pinned against .claude-plugin/plugin.json by a selftest, so it cannot drift.
-ENGRAM_VERSION = "1.2.2"
+ENGRAM_VERSION = "1.9.1"
 RETENTION_DEFAULT = 0.90
 INTERVAL_MAX = 365
 RETENTION_MIN, RETENTION_MAX = 0.70, 0.97   # sane desired-retention bounds
@@ -49,6 +50,10 @@ FACTOR = 19.0 / 81.0  # chosen so R(t=S) = 0.9
 
 RATINGS = {"again": 1, "hard": 2, "good": 3, "easy": 4}
 GRADES = ("recalled", "partial", "lapsed")
+# Ordinal positions for the four ratings — 0-based and contiguous, which is what a
+# weighted kappa needs (RATINGS above is 1-based and is a different thing: the FSRS
+# grade value). Two maps, two jobs, deliberately not merged.
+RATING_SCORE = {"again": 0, "hard": 1, "good": 2, "easy": 3}
 # Receipt kinds. Every v0.6 metric keys off the exact literal "review", so an
 # invented kind would be permanently invisible — and receipts are append-only, so
 # it could never be corrected. Validated at ingest; a bad batch dies before any write.
@@ -182,49 +187,63 @@ def interval_for(stability, retention, multiplier=1.0):
     days = stability / FACTOR * (retention ** (1.0 / DECAY) - 1.0) * multiplier
     return int(clamp(round(days), 1, INTERVAL_MAX))
 
-def init_stability(g):
-    return clamp(W[g - 1], 0.1, 100.0)
+def init_stability(g, w=None):
+    w = W if w is None else w
+    return clamp(w[g - 1], 0.1, 100.0)
 
-def init_difficulty(g):
-    return clamp(W[4] - (g - 3) * W[5], 1.0, 10.0)
+def init_difficulty(g, w=None):
+    w = W if w is None else w
+    return clamp(w[4] - (g - 3) * w[5], 1.0, 10.0)
 
-def next_difficulty(d, g):
-    nd = d - W[6] * (g - 3)
+def next_difficulty(d, g, w=None):
+    w = W if w is None else w
+    nd = d - w[6] * (g - 3)
     # FSRS-4.5 mean-reverts toward D0(3) (Good), not D0(4); D0(4) is the FSRS-5
     # rule and would inflate stability growth ~20% under this 4.5 weight vector.
-    nd = W[7] * init_difficulty(3) + (1.0 - W[7]) * nd
+    nd = w[7] * init_difficulty(3, w) + (1.0 - w[7]) * nd
     return clamp(nd, 1.0, 10.0)
 
-def next_stability_recall(d, s, r, g):
-    hard_penalty = W[15] if g == 2 else 1.0
-    easy_bonus = W[16] if g == 4 else 1.0
-    grow = (math.exp(W[8]) * (11.0 - d) * (s ** -W[9])
-            * (math.exp(W[10] * (1.0 - r)) - 1.0) * hard_penalty * easy_bonus)
+def next_stability_recall(d, s, r, g, w=None):
+    w = W if w is None else w
+    hard_penalty = w[15] if g == 2 else 1.0
+    easy_bonus = w[16] if g == 4 else 1.0
+    grow = (math.exp(w[8]) * (11.0 - d) * (s ** -w[9])
+            * (math.exp(w[10] * (1.0 - r)) - 1.0) * hard_penalty * easy_bonus)
     return clamp(s * (1.0 + grow), 0.1, 36500.0)
 
-def next_stability_forget(d, s, r):
-    sf = W[11] * (d ** -W[12]) * (((s + 1.0) ** W[13]) - 1.0) * math.exp(W[14] * (1.0 - r))
+def next_stability_forget(d, s, r, w=None):
+    w = W if w is None else w
+    sf = w[11] * (d ** -w[12]) * (((s + 1.0) ** w[13]) - 1.0) * math.exp(w[14] * (1.0 - r))
     return clamp(min(sf, s), 0.1, 36500.0)  # a lapse never increases stability
 
-def apply_rating(fsrs, rating_name, on_date):
-    """Pure transition: fsrs dict + rating -> new fsrs dict (+ receipt fields)."""
+def apply_rating(fsrs, rating_name, on_date, cap_days=None, w=None):
+    """Pure transition: fsrs dict + rating -> new fsrs dict (+ receipt fields).
+
+    `cap_days` shortens the booked interval WITHOUT touching stability or difficulty — the
+    v1.5 relearning dose. The memory model is unchanged and still updates from true elapsed
+    time; the learner is simply asked back sooner. Passed only by `apply_item`; projections
+    (`decay`) deliberately do not cap, because they ask what a review is worth, not when."""
     g = RATINGS[rating_name]
     s0, d0 = as_number(fsrs.get("s")), as_number(fsrs.get("d"))
     if s0 is not None:
         s0 = clamp(s0, 0.1, 36500.0)   # corrupt s=0 would make s**-w blow up
     last = fsrs.get("last")
     if s0 is None:  # first exposure (or unrecoverable s -> treat as first)
-        s, d, r = init_stability(g), init_difficulty(g), None
+        s, d, r = init_stability(g, w), init_difficulty(g, w), None
     else:
         if d0 is None:
-            d0 = init_difficulty(3)     # corrupt difficulty -> re-anchor
+            d0 = init_difficulty(3, w)  # corrupt difficulty -> re-anchor
         last_d = safe_date(last)
         elapsed = max(0, (on_date - last_d).days) if last_d else 0
         r = retrievability(elapsed, s0)
-        d = next_difficulty(d0, g)
-        s = next_stability_forget(d0, s0, r) if g == 1 else next_stability_recall(d0, s0, r, g)
+        d = next_difficulty(d0, g, w)
+        s = (next_stability_forget(d0, s0, r, w) if g == 1
+             else next_stability_recall(d0, s0, r, g, w))
     ivl = interval_for(s, as_number(fsrs.get("retention"), RETENTION_DEFAULT),
                        as_number(fsrs.get("im"), 1.0))
+    capped = False
+    if cap_days is not None and ivl > cap_days:
+        ivl, capped = cap_days, True
     out = dict(fsrs)
     # `reps` and `lapses` were the last two raw arithmetic leaves in the scheduler: every
     # other one (s, d, retention, im) already went through as_number, and these two did
@@ -241,7 +260,8 @@ def apply_rating(fsrs, rating_name, on_date):
         "lapses": max(0, int(lapses)) + (1 if (g == 1 and s0 is not None) else 0),
     })
     return out, {"s_before": s0, "s_after": out["s"], "interval_days": ivl,
-                 "retrievability": (round(r, 4) if r is not None else None)}
+                 "retrievability": (round(r, 4) if r is not None else None),
+                 "dose_capped": capped}
 
 # ---------------------------------------------------------------- state io
 
@@ -392,8 +412,13 @@ DEFAULT_MODEL = {
     # INFORMATION, never pressure (docs/05 P13), and it is off-switchable like `momentum`.
     "settings": {"default_mode": "standard", "artifacts": "threshold-only", "ambient": "quiet",
                  "momentum": "on", "profile": None,
-                 "commitment": None, "decay_notice": "on"},
-    "rhythms": {},
+                 "commitment": None, "decay_notice": "on",
+                 "relearning": "on", "srl": "on"},
+    # `rhythms` was defined here, written by nothing, and "read" by /coach for four
+    # releases — a promised adaptation surface that could never fire (removed in v1.8).
+    # What replaces it is DESCRIPTION, not scheduling: `stats.sessions` reports the
+    # learner's own session pattern, and chronotype-based scheduling stays killed (>80% of
+    # adult studies find no main effect on outcomes; no intervention study exists at all).
     "accessibility": [],
 }
 
@@ -636,11 +661,58 @@ def cmd_add_topic(args):
 
     path = p("graphs", g["topic"] + ".json")
     old = read_json(path) if os.path.exists(path) else None
+    extending = bool(getattr(args, "extend", False))
+    if extending:
+        # ── ARC N+1 (v1.7): a topic that is FINISHED must not be a dead end ────────────
+        #
+        # `--replace` re-authors a whole graph; `--extend` adds to one. The distinction is
+        # the point: an extension may only ADD, so an id collision is refused rather than
+        # silently overwriting a node the learner has receipts for. (The founder's own
+        # graphs are hand-titled "Arc 1 of 2" precisely because this verb did not exist.)
+        if not isinstance(old, dict) or not isinstance(old.get("nodes"), dict):
+            die("cannot extend %s: no existing topic (drop --extend to create it)" % g["topic"])
+        # ⚠ DEEP-COPY. A shallow comprehension hands `merged_nodes` — and therefore
+        # `g["nodes"]` — the SAME objects as `old_nodes`, so the carry-forward loop's
+        # `node.pop("artifact")` deleted the value from the very dict `prev` then reads,
+        # and every pre-existing node silently lost its explorable registration on every
+        # extend. The HTML survived on disk, unregistered: regeneration tracking dead, the
+        # modality arm quietly emptied. Found by the back-compat review; the existing
+        # extend selftest was structurally blind to it because its fixture had no artifact.
+        existing = {nid: copy.deepcopy(n) for nid, n in old["nodes"].items()
+                    if isinstance(n, dict)}
+        clash = sorted(set(g["nodes"]) & set(existing))
+        if clash:
+            die("--extend may only ADD nodes; these already exist: %s. Re-authoring an "
+                "existing node is `--replace` (which carries schedules forward) — extending "
+                "must never silently overwrite a node the learner has receipts for."
+                % ", ".join(clash[:6]))
+        arc = 1 + max([int(as_number(n.get("arc"), 1) or 1) for n in existing.values()] or [1])
+        new_ids = set(g["nodes"])          # the arc stamp is re-applied after the strip
+        for node in g["nodes"].values():
+            if isinstance(node, dict):
+                node["arc"] = arc
+        merged_nodes = dict(existing)
+        merged_nodes.update(g["nodes"])
+        old_order = [n for n in (old.get("order") or []) if isinstance(n, str)]
+        g["order"] = ([n for n in old_order if n != CAPSTONE_ID]
+                      + [n for n in g["order"] if n not in existing])
+        g["nodes"] = {nid: n for nid, n in merged_nodes.items() if nid != CAPSTONE_ID}
+        # topic identity is stable; the payload may refresh the human title/goal
+        g["title"] = g.get("title") or old.get("title")
+        g["goal"] = g.get("goal") or old.get("goal")
+        args.replace = True          # from here it is the ordinary carry-forward path
+        _extend_arc, _extend_new = arc, new_ids
+        warnings_extend = ["extended to arc %d (+%d nodes); every existing node kept its "
+                           "schedule" % (arc, len(merged_nodes) - len(existing))]
+    else:
+        warnings_extend = []
+        _extend_arc, _extend_new = None, set()
     if old is not None and not args.replace:
-        die("topic exists: %s (use --replace to overwrite)" % g["topic"])
+        die("topic exists: %s (use --replace to overwrite, or --extend to add an arc)"
+            % g["topic"])
     old_nodes = old.get("nodes", {}) if isinstance(old, dict) else {}
 
-    warnings = []
+    warnings = list(warnings_extend)
     # dedupe order (keep first occurrence), then append any node missing from it
     seen, order = set(), []
     for nid in g["order"]:
@@ -666,6 +738,7 @@ def cmd_add_topic(args):
         node.setdefault("threshold", False)
         node.setdefault("rubric", [])
         node.setdefault("transfer_probe", None)
+        node.setdefault("arc", 1)       # v1.7: which arc minted this node (absent -> 1)
         # `transfer` is ENGINE-OWNED and derived from receipts (invariant #4: state advances
         # only through receipts). A payload that supplied it would be claiming a capability
         # nobody measured — which is precisely the unearned claim this release exists to end.
@@ -718,6 +791,13 @@ def cmd_add_topic(args):
         # existence-checked so v0.4-era phantom strings die here instead of living
         # on as fake registrations.
         node.pop("artifact", None)
+        # `retired` is engine-owned exactly like `artifact` (docs/15 §2.2) and was neither
+        # stripped nor carried: a payload could MINT a retirement (silently emptying the due
+        # queue and un-gating the capstone, since a retired prereq counts as satisfied), and
+        # `--replace` DESTROYED a real one — reverting the learner's own decision with no
+        # warning, on the graph that is its only record.
+        node.pop("retired", None)
+        node.pop("arc", None)          # same class: the payload must not choose its own arc
         prev = old_nodes.get(nid)
         if isinstance(prev, dict) and isinstance(prev.get("fsrs"), dict):
             node["fsrs"] = prev["fsrs"]
@@ -726,6 +806,14 @@ def cmd_add_topic(args):
             node["fsrs"] = _fresh_fsrs()
             node["state"] = "new"
         node["artifact"] = valid_artifact(prev)
+        if isinstance(prev, dict) and isinstance(prev.get("retired"), dict):
+            node["retired"] = prev["retired"]        # the learner's decision survives
+        if isinstance(prev, dict) and as_number(prev.get("arc")) is not None:
+            node["arc"] = int(as_number(prev.get("arc"), 1) or 1)
+        elif _extend_arc and nid in _extend_new:
+            node["arc"] = _extend_arc          # genuinely new in this arc
+        else:
+            node.setdefault("arc", 1)
         if node["state"] not in NODE_STATES:
             node["state"] = "new"
         for etype, targets in node.get("edges", {}).items():
@@ -815,19 +903,31 @@ def state_counts(g):
         counts[st] = counts.get(st, 0) + 1
     return counts
 
+def retired_count(g):
+    """Retired nodes in this graph — reported BESIDE `states`, never inside it (v1.3).
+
+    Retirement is not a state (docs/15 §2.2), and a `retired` key sitting among three
+    mutually-exclusive states that sum to the node count is bug class #7: the arithmetic is
+    right and the reader is deceived. Two different populations never share a container."""
+    nodes = g.get("nodes")
+    if not isinstance(nodes, dict):
+        return 0
+    return sum(1 for n in nodes.values() if is_retired(n))
+
 def cmd_topics(_args):
     out = []
     for t, g in iter_graphs():
         states = state_counts(g)
         due_count = 0
         for node in (g.get("nodes") or {}).values():
-            if not isinstance(node, dict):
-                continue
+            if not isinstance(node, dict) or is_retired(node):
+                continue                    # retired: off the queue, counted in `states`
             dd = safe_date(_fsrs_of(node).get("due"))
             if node.get("state") != "new" and dd and dd <= today():
                 due_count += 1
         out.append({"topic": t, "title": g.get("title"), "goal": g.get("goal"),
-                    "nodes": len(g["nodes"]), "states": states, "due": due_count})
+                    "nodes": len(g["nodes"]), "states": states, "due": due_count,
+                    "retired": retired_count(g)})
     emit(out)
 
 def pending_nodes(topic):
@@ -868,6 +968,125 @@ def node_kind_of(node):
         return "fact"
     return "concept"
 
+# Review-session caps, mirroring skills/review §1 — the engine needs them to size the ambient
+# offer, and two copies of a number is how they drift.
+# ── THE RELEARNING DOSE (v1.5, docs/13 §2.5) ─────────────────────────────────────────
+# The dose-response on SPACED RELEARNING SESSIONS is the largest effect in the whole
+# evidence audit: 3 vs 1 relearning sessions is +60% relative recall at one month, and one
+# correct recall in each of three spaced sessions beats three correct recalls massed into
+# one by 68% vs 26% at a week. The quantity that matters is *sessions in the first weeks*,
+# not intervals — and FSRS, left alone, can starve a lucky first recall of them by booking
+# a long second interval.
+#
+# So the first two post-encode intervals are CAPPED, which guarantees >=3 spaced sessions
+# inside the 30-day north-star window for material the learner keeps answering. The values
+# sit inside the Cepeda ridgeline (optimal gap ~10-30% of the retention interval).
+#
+# ⚠ THIS IS A POLICY LAYER OVER FSRS, NOT A SCHEDULER CHANGE, and the payload says so: no
+# published study combines successive relearning with an adaptive scheduler. FSRS state
+# still updates from true elapsed time; only the DATE moves. Newly encoded nodes only
+# (`fsrs.dose`), and `settings.relearning = "off"` disables it entirely.
+DOSE_CAPS = (3, 9)        # days: the cap on the 1st and 2nd post-encode intervals
+DOSE_REPS = len(DOSE_CAPS)
+RELEARN_MAX_ATTEMPTS = 3  # skill-side cap on retries-to-criterion; the engine records honestly
+
+RETURN_ABSENCE_DAYS = 7   # what counts as "coming back" — ONE constant, shared by
+                          # the hook's amnesty, the decay line, and the skills
+QUICK_CAP = 5             # `/review quick`, and the Sprint/Focus default
+STANDARD_CAP = 12         # the Standard-mode review cap
+
+DUE_ORDERS = ("overdue", "savings")
+DUE_HORIZON = 30          # the savings horizon, in days — matches DECAY_HORIZON_DEFAULT
+# Expected minutes per item, by current retrievability. A near-forgotten item is not just
+# low-value to review, it is SLOW: the learner re-derives it from nothing. Failures cost
+# time, and the budget being spent is time, not items (Eglington & Pavlik 2020 — practicing
+# at high predicted success beat both hardest-first and easiest-first on retention per unit
+# time). These three constants are ENGINEERING, not measurement, and the payload says so.
+DUE_MINUTES_BY_R = ((0.70, 0.6), (0.30, 1.0), (0.0, 2.0))
+DUE_RELEARN_R = 0.10      # below this, the item is functionally a re-learn, not a review
+
+def _expected_minutes(r_now):
+    for floor, minutes in DUE_MINUTES_BY_R:
+        if r_now >= floor:
+            return minutes
+    return DUE_MINUTES_BY_R[-1][1]
+
+def _node_savings(fsrs, t, horizon, retention, im):
+    """What reviewing THIS node today buys over `horizon` days, per expected minute.
+
+    Uses exactly the primitives `decay` uses, in the same order, on the same inputs — so the
+    two commands can never disagree about the same node (RELEASE_PROTOCOL §4.8 Q1: the
+    engine's own commands must agree with each other, and a selftest pins it).
+
+    MODEL-DERIVED, and every payload carrying it says so: one strong human RCT backs the
+    POLICY FAMILY (model-predicted-recall-driven selection under an equal budget — Lindsey
+    et al. 2014, +16.5% at 28 days, d = 1.42), and simulations back descending-retrievability
+    for backlogs, but no human RCT has ever ranked backlog orders. Returns None when the node
+    has never been encoded — nothing to save yet.
+
+    ⚠ THE SHAPE OF THIS CURVE, measured rather than assumed (and it is the reason the
+    `effectively_relearn` floor exists rather than being decoration). Sweeping stability at a
+    fixed horizon, savings/min is an INVERTED U that peaks around R ≈ 0.34:
+
+        R=0.073 -> 0.413   R=0.338 -> 0.659   R=0.753 -> 0.556   R=0.918 -> 0.230
+
+    That peak independently reproduces the θ ≈ 0.33 threshold policy the Lindsey classroom
+    deployment actually used — an FSRS knapsack and a human RCT arriving at the same target
+    from different directions, which is the strongest thing that can be said for any of this.
+    **But the left tail lies:** a near-dead concept scores high because reviewing it
+    *resurrects* it, and a one-shot 30-day knapsack cannot see that a resurrection buys
+    several more reviews of future budget. Every budgeted analysis in the record says do not
+    serve the hopeless first. So items below `DUE_RELEARN_R` are PARKED (sorted last, flagged)
+    rather than allowed to win the cap — the ranking keeps the peak and drops the tail."""
+    s, last = as_number(fsrs.get("s")), safe_date(fsrs.get("last"))
+    if s is None or last is None:
+        return None
+    elapsed = max(0, (t - last).days)
+    r_now = retrievability(elapsed, s)
+    r_no_review = retrievability(elapsed + horizon, s)
+    after, _ = apply_rating(dict(fsrs, retention=retention, im=im), "good", t,
+                            w=learner_weights(read_model()))
+    r_if_reviewed = retrievability(horizon, as_number(after.get("s"), s))
+    minutes = _expected_minutes(r_now)
+    return {
+        "r_now": round(r_now, 3),
+        "savings": round(r_if_reviewed - r_no_review, 4),
+        "expected_minutes": minutes,
+        "savings_per_min": round((r_if_reviewed - r_no_review) / minutes, 4),
+        "effectively_relearn": r_now < DUE_RELEARN_R,
+    }
+
+def is_retired(node):
+    """Has the learner retired this node? (v1.3, docs/15 §2.2 — ONE predicate, every reader.)
+
+    Retirement is a LEARNER DECISION, not a mastery event, so it deliberately does NOT use
+    the `state` enum: a fourth state value would ripple through every state reader, and — the
+    reason that mattered most — the capstone `requires` every node, so a retired node would
+    block the capstone forever. Instead the decision lives in its own engine-owned block and
+    every population asks this one function (docs/09 §2's rule about predicates: one
+    implementation, or three of the four call sites are wrong).
+
+    Value-directed remembering (Castel): learners are already strategic droppers, and honoring
+    that is autonomy. What it must NEVER become is a flattering denominator — so every
+    population that drops a retired node COUNTS it and says so (adherence.loop_closure's
+    `retired_excluded`, retention.unmeasured's `retired`).
+
+    Shape-defensive: a hand-edited `retired: "yes"` is not a retirement (reads degrade)."""
+    if not isinstance(node, dict):
+        return False
+    r = node.get("retired")
+    return isinstance(r, dict) and r.get("restored") is None
+
+def retired_keys():
+    """(topic, node) for every currently-retired node — the set the receipt-keyed metrics
+    need, since receipts know nothing about a decision recorded on the graph."""
+    out = set()
+    for t, g in iter_graphs():
+        for nid, node in (g.get("nodes") or {}).items():
+            if isinstance(nid, str) and is_retired(node):
+                out.add((t, nid))
+    return out
+
 def _requires_of(node):
     """The node's `requires` edges — string ids only. `edges` can be a string after a
     hand-edit, and `requires` can hold a dict, which is unhashable and crashes an `in`."""
@@ -887,18 +1106,67 @@ def requires_met(g, node, provisional=frozenset(), nodes=None):
     prov = frozenset() if node.get("capstone") is True else provisional
     for req in _requires_of(node):
         other = nodes.get(req)
+        # A RETIRED prerequisite counts as satisfied (v1.3). The learner declared it
+        # not-needed; gating every dependent on it forever would make `retire` a trap rather
+        # than an autonomy verb — you would silently lose the rest of the topic by exercising
+        # it. The tutor may still brief the gap in prose; the DAG does not hold the learner
+        # hostage to a decision they were invited to make.
+        if other is not None and is_retired(other):
+            continue
         if other is not None and other.get("state") == "new" and req not in prov:
             return False
     return True
 
+def frontier_chain(g, nodes, target, receipted):
+    """The `requires` ancestors of `target` that carry no receipt yet — deepest first.
+
+    The engine owns the DAG walk so the tutor never has to (v1.7). This is what makes an
+    ADAPTIVE pretest possible without ever inventing mastery: `/learn` asks a mid-order
+    node, and if the learner has it, these are the exact ancestors worth probing — each of
+    which still earns its own receipt. Nothing here credits anything; it only decides what
+    to ASK. (Constitution art. 10 applies to skipping exactly as it applies to advancing.)"""
+    seen, out, stack = set(), [], [target]
+    while stack:
+        nid = stack.pop()
+        if nid in seen or nid not in nodes:
+            continue
+        seen.add(nid)
+        for req in _requires_of(nodes[nid]):
+            if req in nodes and req not in seen:
+                stack.append(req)
+        if nid != target and nid not in receipted and not is_retired(nodes[nid]):
+            out.append(nid)
+    order = graph_order(g, nodes)
+    pos = {nid: i for i, nid in enumerate(order)}
+    return sorted(out, key=lambda n: -pos.get(n, 0))     # deepest (latest) first
+
 def cmd_next(args):
     g = load_graph(args.topic)
+    if getattr(args, "frontier_of", None):
+        nodes = graph_nodes(g)
+        if args.frontier_of not in nodes:
+            die("unknown node %s in topic %s" % (args.frontier_of, args.topic))
+        receipted = {n for (_t, n) in _by_node(_receipts_for(args.topic))}
+        chain = frontier_chain(g, nodes, args.frontier_of, receipted)
+        emit({"topic": args.topic, "of": args.frontier_of,
+              "unreceipted_requires": chain,
+              "probes": {nid: nodes[nid].get("probe") for nid in chain},
+              "read": ("%d prerequisite%s of %s carry no receipt yet — each still earns its "
+                       "own graded pretest; nothing here credits anything"
+                       % (len(chain), "" if len(chain) == 1 else "s", args.frontier_of))})
+        return
+    _cmd_next_body(g, args)
+
+def _cmd_next_body(g, args):
     nodes = graph_nodes(g)
     stashed = pending_nodes(args.topic)  # already-produced, awaiting the assessor
     for nid in graph_order(g, nodes):
         node = nodes[nid]
         if node.get("state") != "new" or nid in stashed:
             continue  # skip a node whose production is already stashed
+        if is_retired(node):
+            continue  # the learner took it off the list (v1.3); `requires_met` treats it as
+                      # satisfied, so retiring a prerequisite opens the frontier, never seals it
         # A stashed-but-ungraded prerequisite counts as provisionally met, so the
         # batch-graded /learn flow can keep advancing instead of dead-ending.
         if requires_met(g, node, stashed, nodes):
@@ -925,9 +1193,23 @@ def cmd_next(args):
                     "every concept is encoded, and this topic has NO CAPSTONE. The build is "
                     "the point of the whole topic; materialize it so it cannot be skipped."))})
 
-def due_items(topic_filter=None, limit=None, horizon_days=0):
+def due_items(topic_filter=None, limit=None, horizon_days=0, order="overdue"):
+    """The due queue. `order` decides WHICH items a capped session gets (v1.3).
+
+    `overdue` is the order Engram has always served (most-overdue first, interleaved across
+    topics) and remains the default for an UNCAPPED queue, where order is cosmetic.
+
+    `savings` exists because a CAPPED session is a triage decision, and most-overdue-first is
+    the one policy every budgeted analysis ranks last: a deeply overdue item sits on the flat
+    tail of its forgetting curve and loses almost nothing more by waiting, while the
+    near-threshold item is the one still cheap to save. It ranks by expected retention saved
+    per expected minute (`_node_savings`). MODEL-DERIVED — the caller must carry
+    `order_basis` into the payload, because no human RCT has ever ranked backlog orders."""
     per_topic = {}
     cutoff = today() + timedelta(days=horizon_days)
+    model = read_model()
+    _ret = as_number(model["memory"].get("desired_retention"), RETENTION_DEFAULT)
+    _im = as_number(model["memory"].get("interval_multiplier"), 1.0)
     # v0.8: a due node that is MATURE enough for the harder question is flagged here, so
     # /review can serve the architect's `transfer_probe` instead of the ordinary probe without
     # a second engine call. The flag is computed, never guessed — and a node with a null
@@ -942,6 +1224,10 @@ def due_items(topic_filter=None, limit=None, horizon_days=0):
             node = (g.get("nodes") or {}).get(nid)
             if not isinstance(node, dict):
                 continue  # ghost id in order, or a hand-edited non-object node
+            if is_retired(node):
+                continue  # the learner took it off their list — it is COUNTED in
+                          # adherence.loop_closure.retired_excluded and
+                          # retention.unmeasured.retired, never silently dropped (v1.3)
             fsrs = _fsrs_of(node)
             due_d = safe_date(fsrs.get("due"))
             if node.get("state") == "new" or not due_d:
@@ -986,6 +1272,21 @@ def due_items(topic_filter=None, limit=None, horizon_days=0):
                     "practice": (node.get("practice")
                                  if isinstance(node.get("practice"), dict) else None),
                 })
+                if fsrs.get("dose") is True and as_number(fsrs.get("reps"), 0) <= DOSE_REPS:
+                    # inv. 14: a model-derived policy must carry its label where a skill
+                    # reads it. v1.5 stamped only a bare `dose_capped` bool on the receipt.
+                    items[-1]["schedule_policy"] = (
+                        "relearning-dose: the first %d intervals after encoding are capped "
+                        "(%s days) so >=3 spaced sessions land inside 30. Policy over FSRS, "
+                        "not a scheduler change — SR x adaptive scheduling is unstudied "
+                        "(docs/13 §2.5)."
+                        % (DOSE_REPS, "/".join(str(d) for d in DOSE_CAPS)))
+                if order == "savings":
+                    sv = _node_savings(fsrs, today(), DUE_HORIZON, _ret, _im)
+                    # A due node always has an `s` and a `last`, so sv is None only for
+                    # hand-edited state — in which case it sorts last rather than crashing.
+                    items[-1].update(sv or {"savings_per_min": 0.0, "expected_minutes": None,
+                                            "effectively_relearn": False})
         items.sort(key=lambda x: -x["overdue_days"])
         if items:
             per_topic[t] = items
@@ -995,12 +1296,52 @@ def due_items(topic_filter=None, limit=None, horizon_days=0):
         for t in list(per_topic):
             if per_topic[t]:
                 merged.append(per_topic[t].pop(0))
+    if order == "savings":
+        # Effectively-lost items sort LAST whatever their raw savings (see `_node_savings`:
+        # the left tail of the curve rewards resurrection, and every budgeted analysis says
+        # do not spend a capped session there). Stable within each group, so the interleaved,
+        # most-overdue-first arrangement survives the re-rank rather than collapsing to one
+        # topic (P3: interleaving is the default).
+        merged.sort(key=lambda x: (bool(x.get("effectively_relearn")),
+                                   -(x.get("savings_per_min") or 0.0)))
     if limit is not None:
         merged = merged[:limit]
     return merged
 
+DUE_ORDER_BASIS = ("model-derived (FSRS projection: expected 30-day retention saved per "
+                   "expected minute); the POLICY FAMILY has one strong human RCT behind it "
+                   "(Lindsey et al. 2014) but no human RCT has ever ranked backlog orders — "
+                   "docs/13 §2.2. NOTE `expected_minutes` is a RANKING WEIGHT (it prices a "
+                   "cold item as slower), never a session estimate: `decay` and the session "
+                   "hook size a session at ~0.6 min/item, and that is the only figure to "
+                   "quote to a learner.")
+
 def cmd_due(args):
-    emit(due_items(args.topic, args.limit))
+    """Legacy `--limit` emits the bare list, byte-identically, in the order it always did.
+
+    `--cap` is the v1.3 path: it defaults to `savings` ordering and therefore MUST emit the
+    honesty label with it, which means an object rather than a list. Keeping the two shapes
+    apart is deliberate — an older skill file calling `--limit` against a newer engine must
+    not receive a shape it cannot parse, and a model-derived ranking must never travel
+    without its basis (docs/14 §0.5)."""
+    # getattr, not attribute access: internal callers (selftest, the fuzzer) build namespaces
+    # from the v1.2.2 signature, and a read path must never raise on a missing optional flag.
+    req_order, req_cap = getattr(args, "order", None), getattr(args, "cap", None)
+    order = req_order or ("savings" if req_cap is not None else "overdue")
+    if order not in DUE_ORDERS:
+        die("unknown order '%s' (choose: %s)" % (order, ", ".join(DUE_ORDERS)))
+    cap = req_cap if req_cap is not None else getattr(args, "limit", None)
+    if cap is not None and cap < 0:
+        die("--cap/--limit must be >= 0 (a negative cap silently truncated the queue from "
+            "the tail and reported 'nothing due', which is the flattering direction)")
+    items = due_items(args.topic, cap, order=order)
+    if req_cap is None:          # `--limit` keeps the v1.2.2 LIST shape whatever --order says
+        emit(items)                      # the v1.2.2 contract, untouched
+        return
+    emit({"order": order,
+          "order_basis": DUE_ORDER_BASIS if order == "savings" else
+                         "the order Engram has always served: most overdue first, interleaved",
+          "cap": cap, "n": len(items), "items": items})
 
 def gen_id(prefix):
     # pid + monotonic seq: unique within and across processes, even same-ms.
@@ -1191,6 +1532,82 @@ def apply_item(item, kind):
                    ("%.1fd" % s) if s is not None else "none",
                    rr, "" if rr == 1 else "s",
                    int(TRANSFER_MATURE_S), TRANSFER_MATURE_REPS))
+    # ⚠ A SAME-DAY RE-ATTEMPT IS NOT A SECOND REVIEW (v1.5 — G11, and it was a live defect).
+    #
+    # Retrieval-to-criterion means a failed retrieval gets re-attempted within the session,
+    # which under FSRS-4.5 semantics is a review at `elapsed == 0` — where `retrievability`
+    # is 1.0 by construction. Left alone, a successful retry would: strengthen stability off
+    # a 100%-recall prediction, count as a retention review it is not, and inflate BOTH
+    # `predicted` and `observed` in `refit`'s sample, biasing the multiplier the moment a
+    # learner does the very thing this release asks of them.
+    #
+    # So the day's FIRST graded retrieval is the review; every re-attempt after it is a
+    # `relearn` row — recorded append-only (receipts-or-it-didn't-happen applies to the
+    # criterion claim too) and excluded from state transitions and every retention-family
+    # population. Upstream FSRS trains on `(i > 1 AND delta_t > 0)`; the exclusion from
+    # state transitions is Engram's own conservative extension, because FSRS-4.5 has no
+    # same-day model at all (v1.6's FSRS-6 formula is where they would live if a validation
+    # ever earned them a place).
+    if item.get("relearn") is True and kind != "audit":
+        _slot = _by_node(_receipts_for(item["topic"])).get((item["topic"], item["node"]))
+        if not _slot:
+            die("refusing a `relearn` row on %s/%s: there is no graded retrieval today for "
+                "it to be a RE-attempt of. The day's first attempt is the review; a relearn "
+                "row without one is recorded, excluded from every population, and therefore "
+                "invisible forever." % (item["topic"], item["node"]))
+        if node_kind_of(node) == "procedure":
+            die("refusing a `relearn` row on a PROCEDURE node (%s/%s). Retrieval-to-criterion "
+                "is a concept/fact protocol — the one direct test on problem-solving material "
+                "found 'only meager benefits' (docs/13 §2.5). Procedure lapses take the "
+                "problem-grammar path (erroneous example on a repeat lapse), not a retry loop."
+                % (item["topic"], item["node"]))
+        extra = {"relearn": True,
+                 "attempt": max(2, int(as_number(item.get("attempt"), 2) or 2)),
+                 "node_kind": node_kind_of(node)}
+        receipt = make_receipt(item, extra, kind)
+        append_jsonl(p("receipts", "%s.jsonl" % item["topic"]), receipt)
+        _cache_receipt(item["topic"], receipt)
+        if isinstance(sid, str) and sid:
+            drop_stash_sid(item["topic"], sid)
+        return {"node": item["node"], "topic": item["topic"], "kind": kind,
+                "applied": True, "scheduled": False, "relearn": True,
+                "attempt": receipt["attempt"],
+                "note": ("same-day re-attempt recorded — the schedule is untouched. The day's "
+                         "FIRST retrieval is the graded review; this is the criterion loop.")}
+
+    # ⚠ AN AUDIT RECEIPT INFORMS; IT NEVER RESCHEDULES (v1.4, docs/15 §2.3).
+    #
+    # `/review` has spawned the blind assessor to spot-audit the tutor's own grades since
+    # v0.2 — and the result was narrated once and then evaporated. `KINDS` has carried an
+    # `audit` slot the whole time with nothing writing it. That is the transfer_probe defect
+    # on the ONE grader `/coach audit` can never measure: the tutor writes every `/review`
+    # receipt and every `error_class` behind `procedure_slip_share`, in-context, with the
+    # dialogue in front of it, and nothing has ever checked it.
+    #
+    # So the verdict is now evidence on disk — and it touches NOTHING. No FSRS state, no node
+    # state, no schedule, no `reps`. `/review`'s rule has always been "audits inform, they
+    # don't reschedule" (re-rating an already-committed item would let a second opinion
+    # silently rewrite a schedule the learner already acted on); this makes that structural
+    # rather than a sentence in a skill file.
+    if kind == "audit":
+        extra = {"audited_rating": item.get("audited_rating"),
+                 "agree": (bool(item["agree"]) if isinstance(item.get("agree"), bool)
+                           else None),
+                 "node_kind": node_kind_of(node)}
+        receipt = make_receipt(item, extra, kind)
+        append_jsonl(p("receipts", "%s.jsonl" % item["topic"]), receipt)
+        _cache_receipt(item["topic"], receipt)
+        if isinstance(sid, str) and sid:
+            drop_stash_sid(item["topic"], sid)
+        else:
+            drop_stash(item["topic"], item["node"])
+        return {"node": item["node"], "topic": item["topic"], "kind": "audit",
+                "applied": True, "scheduled": False,
+                "audited_rating": receipt.get("audited_rating"),
+                "assessor_rating": receipt.get("rating"),
+                "agree": receipt.get("agree"),
+                "note": ("audit recorded — the schedule is untouched. It measures the TUTOR "
+                         "against the blind assessor; see stats.self_grading.")}
     rating = item["rating"]
     model = load_model()
     node.setdefault("fsrs", _fresh_fsrs())
@@ -1232,7 +1649,20 @@ def apply_item(item, kind):
         f.pop("retention", None)
         f.pop("im", None)
     else:
-        node["fsrs"], extra = apply_rating(node["fsrs"], rating, today())
+        # THE RELEARNING DOSE (v1.5). Stamped at first encode so the policy applies to NEW
+        # material only — an existing learner's schedule is never retroactively shortened,
+        # which is the compatibility doctrine's promise and also the honest scope: the
+        # evidence is about the first weeks after encoding, not about mature memories.
+        dose_on = load_model()["settings"].get("relearning", "on") != "off"
+        if was_new and kind in ("encode", "pretest") and dose_on:
+            node["fsrs"]["dose"] = True
+        cap = None
+        if node["fsrs"].get("dose") is True and dose_on and kind == "review":
+            done = max(0, int(as_number(node["fsrs"].get("reps"), 0) or 0)) - 1
+            if 0 <= done < DOSE_REPS:
+                cap = DOSE_CAPS[done]
+        node["fsrs"], extra = apply_rating(node["fsrs"], rating, today(), cap_days=cap,
+                                           w=learner_weights(model))
         node["fsrs"].pop("retention", None)
         node["fsrs"].pop("im", None)
     if transfer_lapse:
@@ -1257,6 +1687,18 @@ def apply_item(item, kind):
     # edit (or a topic rebuild that reclassifies a node) can never rewrite which kind old
     # evidence belonged to. Closed enum by construction (node_kind_of).
     extra = {**extra, "node_kind": node_kind_of(node)}
+    # Both grammars say `--error-class` belongs only on a PROCEDURE item that did not come
+    # back `recalled`. Neither side enforced it, so a mis-flagged concept row rode an
+    # append-only receipt straight into `procedure_slip_share` — where "it was only a slip"
+    # is the flattering reading. Dropped with a warning rather than a die: the RATING must
+    # never be lost to a stray flag (the same reasoning as the version-skew retry rule).
+    if item.get("error_class") in ERROR_CLASSES:
+        if node_kind_of(node) != "procedure" or item.get("grade") == "recalled":
+            sys.stderr.write("engram: dropping --error-class on a %s item graded %s — the "
+                             "slip/conceptual split is for procedure items that missed\n"
+                             % (node_kind_of(node), item.get("grade")))
+            item = dict(item)
+            item.pop("error_class", None)
     # Day 0 is the node's FIRST receipt. Stamping elapsed-days here is what makes the north
     # star (retention at 7/30/90 days — docs/04 named it in Phase 0 and never built it) a
     # one-pass query over the receipt log instead of a join against the graph. On first
@@ -1310,6 +1752,26 @@ def cmd_rate(args):
             "confidence": args.confidence, "production": production,
             "grade": args.grade, "probe": args.probe, "source": args.source,
             "error_class": getattr(args, "error_class", None)}
+    if getattr(args, "attempt", None) is not None and not getattr(args, "relearn", False):
+        die("--attempt requires --relearn. Without it the receipt is an ORDINARY same-day "
+            "review — precisely the retrievability-1.0 row that biases the schedule fit "
+            "(G11), which is what --relearn exists to keep out.")
+    if getattr(args, "relearn", False):
+        item["relearn"] = True
+        att = as_number(getattr(args, "attempt", None))
+        item["attempt"] = (int(clamp(att, 2, RELEARN_MAX_ATTEMPTS + 1))
+                           if att is not None else None)
+    ar = getattr(args, "audited_rating", None)
+    if args.kind == "audit" and ar is None:
+        die("--kind audit needs --audited-rating: the pair IS the audit (what the tutor "
+            "graded vs what the blind assessor graded). Without it the receipt is written, "
+            "append-only, and invisible to stats.self_grading forever.")
+    if ar is not None:
+        if args.kind != "audit":
+            die("--audited-rating is only meaningful on `--kind audit` (it records what the "
+                "TUTOR graded, so the blind assessor's verdict can be compared to it). A "
+                "rating-bearing audit of the wrong kind would reschedule the node.")
+        item["audited_rating"] = ar
     emit(apply_item(item, args.kind))
 
 def cmd_receipt(args):
@@ -1399,6 +1861,20 @@ def cmd_model(args):
             parts = key.split(".")
             if parts[0] not in m:
                 die("unknown model key: %s" % parts[0])
+            # …AND THE LEAF. Only the root was checked, so `memory.desired_retentoin=0.6`
+            # wrote a dead field, skipped its numeric bounds, and minted an append-only
+            # ledger row marked `consented`/`evidence-backed` — which /coach then reads back
+            # to the learner forever as a change that never happened.
+            _probe, _known = DEFAULT_MODEL, True
+            for _part in parts:
+                if isinstance(_probe, dict) and _part in _probe:
+                    _probe = _probe[_part]
+                else:
+                    _known = False
+                    break
+            if not _known and not getattr(args, "allow_new_key", False):
+                die("unknown model key: %s (known leaves live under %s; pass --allow-new-key "
+                    "if you really mean to add one)" % (key, parts[0]))
             # walk to the parent, refusing to traverse or clobber a container
             ref = m
             for part in parts[:-1]:
@@ -1417,8 +1893,18 @@ def cmd_model(args):
                 if not isinstance(val, (int, float)) or isinstance(val, bool):
                     die("%s expects a number in [%s, %s]" % (key, bounds[0], bounds[1]))
                 val = clamp(val, bounds[0], bounds[1])
+            before = ref.get(leaf)
             ref[leaf] = val
             changed = True
+            # ARTICLE 12: the consent flow is the only writer of a system-proposed change,
+            # and it writes the ledger in the same breath. `--because` carries the engine's
+            # own evidence; without it the row still lands, marked `learner` — a change the
+            # learner made themselves is equally worth remembering, and equally reversible.
+            if before != val:
+                record_adaptation(key, before, val,
+                                  getattr(args, "because", None) or "set by the learner",
+                                  getattr(args, "grade", None) or "learner",
+                                  "consented" if getattr(args, "because", None) else "learner")
     for interest in (args.add_interest or []):
         if interest not in m["interests"]:
             m["interests"].append(interest)
@@ -1584,7 +2070,27 @@ def cmd_misconception(args):
 EXPERIMENT_MIN_PER_ARM = 15      # ~30 total: SCED alternating-treatments power (docs/07 §9)
 EXPERIMENT_PERMUTATIONS = 10000  # exact randomization test — no scipy, no distributional prayer
 EXPERIMENT_BOOTSTRAP = 2000
-EXPERIMENT_METRICS = ("first_review_recall",)
+# ── THE METRIC REGISTRY (v1.9) ───────────────────────────────────────────────────────
+#
+# The n-of-1 machinery has been randomized, stratified, pre-registered and powered since
+# v0.9 — and could ask exactly ONE question. Every metric here is computed from the SAME
+# shared predicates `stats` uses, so an experiment and the dashboard can never disagree
+# about the same learner (§4.8 Q1), and each carries its own honest floor: a metric whose
+# population is rarer needs more assignments before a verdict means anything.
+EXPERIMENT_METRICS = ("first_review_recall", "retention_7d", "transfer_fired", "slip_share")
+# Per-metric minimum per arm. `first_review_recall` keeps the SCED alternating-treatments
+# figure; the rarer populations need the same number of DATA POINTS, which takes more
+# assignments to reach — the engine says so rather than pretending the floor is the same.
+EXPERIMENT_METRIC_MIN = {"first_review_recall": EXPERIMENT_MIN_PER_ARM,
+                         "retention_7d": EXPERIMENT_MIN_PER_ARM,
+                         "transfer_fired": 8,      # transfer probes are rare by construction
+                         "slip_share": 10}         # only procedure receipts carry error_class
+EXPERIMENT_METRIC_DOC = {
+    "first_review_recall": "the node's first genuine review, recalled=1 / partial=.5 / lapsed=0",
+    "retention_7d": "reviews attempted 4-14 days after encoding — the north star's own window",
+    "transfer_fired": "did the capability fire when the idea wore different clothes (1/0)",
+    "slip_share": "of classified procedure errors, the fraction that were slips not wrong method",
+}
 
 def _stratum_of(node, keys):
     """The stratum a node belongs to, from the pre-registered `stratify_by` keys.
@@ -1638,6 +2144,13 @@ def _exp_arms(exp):
             out.append(a)
     return out
 
+def _exp_metric_floor(exp):
+    """The floor for THIS experiment's metric. `start` stamped a per-metric value and every
+    reader then took `max(..., EXPERIMENT_MIN_PER_ARM)`, so 8 and 10 could never bind and one
+    key published two numbers for one experiment (bug class #7)."""
+    m = exp.get("metric") if isinstance(exp, dict) else None
+    return EXPERIMENT_METRIC_MIN.get(m, EXPERIMENT_MIN_PER_ARM)
+
 def _exp_min_per_arm(exp):
     n = as_number((exp or {}).get("min_per_arm"), EXPERIMENT_MIN_PER_ARM)
     return max(1, int(n if n is not None else EXPERIMENT_MIN_PER_ARM))
@@ -1660,14 +2173,57 @@ def _experiment_outcomes(exp):
         if not isinstance(tp, str) or not isinstance(nid, str):
             continue
         slot = by.get((tp, nid))
-        if not slot or not slot["reviews"]:
-            continue                       # assigned, not yet reviewed: no datum, not a zero
-        r = slot["reviews"][0]
-        out[arm].append(_outcome(r))
+        if not slot:
+            continue                       # assigned, nothing graded yet: no datum, not a zero
+        metric = exp.get("metric") if isinstance(exp, dict) else None
+        val, when = _metric_value(metric, slot)
+        if val is None:
+            continue                       # the population this metric asks about is not there
+        out[arm].append(val)
         detail.append({"topic": tp, "node": nid, "arm": arm,
-                       "outcome": _outcome(r), "ts": r.get("ts"),
-                       "days_since_encode": r.get("days_since_encode")})
+                       "outcome": val, "ts": when,
+                       "metric": metric})
     return out, detail
+
+def _metric_value(metric, slot):
+    """One node's contribution to a pre-registered metric — or (None, None) if it has none.
+
+    Each branch reads the SAME populations `stats` reads (`_by_node`'s reviews/transfers,
+    `_outcome`, `RETENTION_BUCKETS`, `error_class`), so a settled experiment and the
+    dashboard can never tell two different stories about one learner (§4.8 Q1). A node that
+    has not produced this metric's evidence yields NOTHING — never a zero, because "not
+    measured" and "measured as a failure" are different facts and pooling them is the
+    survivorship bug this repo keeps re-learning."""
+    reviews = slot.get("reviews") or []
+    if metric in (None, "first_review_recall"):
+        if not reviews:
+            return None, None
+        return _outcome(reviews[0]), reviews[0].get("ts")
+    if metric == "retention_7d":
+        lo, hi = next((lo, hi) for name, lo, hi in RETENTION_BUCKETS if name == "7d")
+        for r in reviews:
+            d = days_between(slot["first"].get("ts"), r.get("ts"))
+            if d is not None and lo <= d <= hi:
+                return _outcome(r), r.get("ts")
+        return None, None
+    if metric == "transfer_fired":
+        transfers = [r for r in (slot.get("transfers") or []) if r.get("rating")]
+        if not transfers:
+            return None, None
+        last = transfers[-1]
+        return (1.0 if _grade_of(last) == "recalled" else 0.0), last.get("ts")
+    if metric == "slip_share":
+        # `compute_by_kind.procedure_slip_share` counts PROCEDURE receipts only; without the
+        # same filter here one concept-node `slip` was a data point to a settled experiment
+        # and invisible to the dashboard — the two telling different stories about one learner,
+        # which is the exact claim v1.9 made about this registry.
+        classified = [r for r in reviews if r.get("error_class") in ERROR_CLASSES
+                      and r.get("node_kind") == "procedure"]
+        if not classified:
+            return None, None
+        r = classified[0]
+        return (1.0 if r.get("error_class") == "slip" else 0.0), r.get("ts")
+    return None, None
 
 def _spread(groups):
     """The test statistic: max(arm mean) - min(arm mean). Reduces to the plain difference for
@@ -1732,7 +2288,26 @@ def cmd_experiment(args):
     path = p("experiments.json")
     items = _as_list(read_json(path, []))
     if args.action == "start":
-        exp = load_payload(args)
+        preset = getattr(args, "preset", None)
+        if preset and (getattr(args, "json", None) or getattr(args, "file", None)):
+            die("--preset cannot be combined with --json/--file: the preset IS the "
+                "pre-registration, and silently discarding your design would defeat the one "
+                "property this command has (what was registered is a checked-in artifact).")
+        if preset:
+            # A SHIPPED pre-registration (v1.9). The design file lives in the repo, so
+            # "what was registered" is a checked-in artifact rather than a matter of memory
+            # — which is the entire point of pre-registering anything. The learner's seed is
+            # the only thing added at start time.
+            if not slug_ok(preset):
+                die("bad preset name %r" % preset)
+            pf = os.path.join(_plugin_root(), "experiments", preset + ".json")
+            exp = read_json(pf, default=None, quarantine=False)
+            if not isinstance(exp, dict):
+                die("unknown preset %r — shipped designs live in experiments/*.json" % preset)
+            exp = dict(exp)
+            exp.setdefault("seed", today().isoformat().replace("-", ""))
+        else:
+            exp = load_payload(args)
         if not isinstance(exp, dict):
             die("experiment design must be an object")
         for key in ("question", "arms", "metric"):
@@ -1745,6 +2320,11 @@ def cmd_experiment(args):
         if exp["metric"] not in EXPERIMENT_METRICS:
             die("unknown metric %r — the engine will not silently compute a different one "
                 "(supported: %s)" % (exp["metric"], ", ".join(EXPERIMENT_METRICS)))
+        # A rarer population needs the same number of DATA POINTS, which takes longer to
+        # reach. Default the floor per metric rather than letting a transfer experiment
+        # settle on the recall metric's number and call it powered.
+        exp.setdefault("min_per_arm",
+                       EXPERIMENT_METRIC_MIN.get(exp["metric"], EXPERIMENT_MIN_PER_ARM))
         if any(e.get("status") == "active" for e in items if isinstance(e, dict)):
             die("an experiment is already active — settle it before starting another "
                 "(one active experiment at a time; see /coach)")
@@ -1843,7 +2423,7 @@ def cmd_experiment(args):
         # buy down with one payload field is not a power gate, and the shipped skill actively
         # promised the opposite ("the settle will read underpowered, and it will be right"). The
         # design may set a HIGHER bar than the engine; it may never set a lower one.
-        mpa = max(_exp_min_per_arm(exp), EXPERIMENT_MIN_PER_ARM)
+        mpa = max(_exp_min_per_arm(exp), _exp_metric_floor(exp))
         ns = {arm: len(v) for arm, v in groups.items()}
         means = {arm: (round(sum(v) / len(v), 3) if v else None) for arm, v in groups.items()}
         powered = all(n >= mpa for n in ns.values()) and len(ns) >= 2
@@ -1901,7 +2481,7 @@ def cmd_experiment(args):
             emit({"active": None, "note": "no active experiment"})
             return
         groups, _ = _experiment_outcomes(exp)
-        mpa = max(_exp_min_per_arm(exp), EXPERIMENT_MIN_PER_ARM)   # the ENGINE's floor, not the payload's
+        mpa = max(_exp_min_per_arm(exp), _exp_metric_floor(exp))   # the ENGINE's floor, not the payload's
         ns = {arm: len(v) for arm, v in groups.items()}
         assigns = exp.get("assignments")
         ready = bool(ns) and len(ns) >= 2 and all(n >= mpa for n in ns.values())
@@ -2110,6 +2690,167 @@ BY_KIND_CAVEAT = ("kinds are different material by construction — a procedure 
                   "and pre-v1.1 receipts carry no kind stamp — they count as concept, which "
                   "is what every pre-v1.1 grading event actually was.")
 
+RELEARN_MIN_NODES = 5     # below this: counts, never a rate (the house floor rule)
+
+def compute_relearning(receipts):
+    """Did the session end at criterion — and is relearning getting cheap? (v1.5)
+
+    The literature's own efficiency signature is that relearning collapses in cost across
+    spaced sessions (first-pass recall .24 -> .68 -> .82; trials-to-criterion 1.95 -> 1.37 ->
+    1.20 in the one exposure-controlled study). That is the honest encouraging fact this
+    protocol hands a learner, and it is computed from their own rows rather than asserted.
+
+    DERIVED, never stamped: `relearn` rows live on the retries themselves, and the day's
+    first graded receipt is already on disk when a retry happens — receipts are append-only,
+    so retro-stamping a `retries_to_criterion` onto it is forbidden. The aggregate is
+    reconstructed per (node, day) group at read time (docs/15 §2.3)."""
+    groups = {}
+    for r in receipts:
+        if r.get("kind") not in ("review", "encode") or not r.get("rating"):
+            continue
+        t_, n_, ts = r.get("topic"), r.get("node"), r.get("ts")
+        if not isinstance(t_, str) or not isinstance(n_, str) or not isinstance(ts, str):
+            continue
+        g = groups.setdefault((t_, n_, ts), {"first": None, "retries": []})
+        if r.get("relearn") is True:
+            g["retries"].append(r)
+        elif g["first"] is None:
+            g["first"] = r
+    loops = {k: v for k, v in groups.items() if v["retries"] and v["first"] is not None}
+    nodes = sorted({(k[0], k[1]) for k in loops})
+    out = {"loops": len(loops), "n_nodes": len(nodes), "min_nodes": RELEARN_MIN_NODES,
+           "definition": ("a relearning LOOP is a graded retrieval that failed and was "
+                          "re-attempted within the same day until it came back. `retries` "
+                          "counts the re-attempts; the day's first attempt is the review.")}
+    if not loops:
+        out.update(criterion_met_rate=None, mean_retries=None, first_vs_latest=None,
+                   insufficient_data=True,
+                   read=("no relearning loop yet — a session that ends on a failed retrieval "
+                         "is the one-and-done pattern the spacing literature beats"))
+        return out
+    # docs/13 §2.5 says the criterion is ONE graded success. `!= "lapsed"` counted a `partial`
+    # as met — and returned True for any rating it could not map at all (the hand-edited path).
+    met = sum(1 for v in loops.values() if _grade_of(v["retries"][-1]) == "recalled")
+    retries = [len(v["retries"]) for v in loops.values()]
+    by_node = {}
+    for (t_, n_, ts), v in sorted(loops.items()):
+        by_node.setdefault((t_, n_), []).append(len(v["retries"]))
+    # ⚠ PAIRED, or it is not a trend. `first` averaged over every node with a loop while
+    # `latest` averaged over the subset with TWO — different denominators, neither published,
+    # presented as "as the material came back". A fixture where the only twice-looped node got
+    # WORSE (1 retry -> 2) still printed "2.60 -> 2.00". Same population, both sides, or no line.
+    paired = [v for v in by_node.values() if len(v) > 1]
+    firsts = [v[0] for v in paired]
+    latests = [v[-1] for v in paired]
+    enough = len(nodes) >= RELEARN_MIN_NODES
+    out.update(
+        criterion_met_rate=(round(met / float(len(loops)), 3) if enough else None),
+        criterion_met=met,
+        mean_retries=(round(sum(retries) / float(len(retries)), 2) if enough else None),
+        first_vs_latest=({"first": round(sum(firsts) / float(len(firsts)), 2),
+                          "latest": round(sum(latests) / float(len(latests)), 2),
+                          "n_nodes_paired": len(paired)}
+                         if enough and len(paired) >= RELEARN_MIN_NODES else None),
+        insufficient_data=not enough)
+    if not enough:
+        out["read"] = ("%d relearning loop%s across %d node%s — counts only until %d nodes "
+                       "(criterion reached %d time%s)"
+                       % (len(loops), "" if len(loops) == 1 else "s", len(nodes),
+                          "" if len(nodes) == 1 else "s", RELEARN_MIN_NODES, met,
+                          "" if met == 1 else "s"))
+    else:
+        fv = out["first_vs_latest"]
+        trend = ("" if not fv else
+                 " · retries per loop went %.2f -> %.2f as the material came back"
+                 % (fv["first"], fv["latest"]))
+        out["read"] = ("%d relearning loops across %d nodes; the criterion was reached in "
+                       "%d%% of them%s"
+                       % (len(loops), len(nodes),
+                          round(100 * out["criterion_met_rate"]), trend))
+    return out
+
+SELF_GRADING_MIN_N = 20   # below this: counts, never a rate (the house floor rule)
+
+def compute_self_grading(receipts):
+    """Does the TUTOR agree with the blind assessor? (v1.4 — the grader nothing measured.)
+
+    `/coach audit` measures the assessor. It has never measured the tutor, and the tutor
+    writes **every `/review` receipt** and every `error_class` behind `procedure_slip_share`
+    — in-context, with the dialogue it just ran in front of it, which is the exact condition
+    the separation of powers exists to distrust.
+
+    ⚠ WHAT THIS IS NOT. It is not validity. The tutor cannot be spawned blind — dialogue
+    context is a permanent confound — so no blindness property is ever claimed for it. This
+    is educational measurement's *read-behind*: agreement with a second rater whose OWN
+    validity is what the gold-set audit measures. Tutor validity is bounded by that chain and
+    can never exceed it, and the `read` says so in those words rather than in a footnote.
+
+    `signed_bias` > 0 means the tutor rates ABOVE the blind grader — the flattering
+    direction, and the only one that can stop a learner reviewing. Reported with direction
+    counts beside it, because a mean near zero is also what "inflates half, deflates half"
+    looks like (§4.8 Q6, rule 3).
+
+    Banded on `partial`, deliberately: the 2026 short-answer literature finds LLM graders
+    near-human at the extremes and materially off in the mid-range, which is exactly where
+    a tutor's sympathy for a learner it just taught would land."""
+    audits = [r for r in receipts if r.get("kind") == "audit"
+              and r.get("rating") in RATINGS and r.get("audited_rating") in RATINGS]
+    n = len(audits)
+    out = {"n": n, "min_n": SELF_GRADING_MIN_N,
+           "definition": ("of the tutor's own /review grades that the blind assessor "
+                          "re-graded, how often the two agree — and in which direction they "
+                          "differ. Agreement with the assessor, NOT validity.")}
+    if not n:
+        out.update(qwk_vs_assessor=None, signed_bias=None, agree=0, tutor_higher=0,
+                   tutor_lower=0, by_band={}, insufficient_data=True,
+                   read=("no /review grade has ever been spot-audited. The tutor writes every "
+                         "review receipt and nothing has ever checked it — /review escalates "
+                         "to the assessor on a large, disputed, or partial-heavy session."))
+        return out
+    pairs = [(r["audited_rating"], r["rating"]) for r in audits]   # (tutor, assessor)
+    higher = sum(1 for t, a in pairs if RATING_SCORE[t] > RATING_SCORE[a])
+    lower = sum(1 for t, a in pairs if RATING_SCORE[t] < RATING_SCORE[a])
+    agree = sum(1 for t, a in pairs if t == a)
+    bias = sum(RATING_SCORE[t] - RATING_SCORE[a] for t, a in pairs) / float(n)
+    band = {}
+    for r, (t, a) in zip(audits, pairs):
+        # Band by what the ASSESSOR said — the closest thing to ground truth on the item.
+        key = {"again": "lapsed", "hard": "partial"}.get(a, "recalled")
+        s = band.setdefault(key, {"n": 0, "agree": 0, "bias_sum": 0.0})
+        s["n"] += 1
+        s["agree"] += 1 if t == a else 0
+        s["bias_sum"] += RATING_SCORE[t] - RATING_SCORE[a]
+    # A rate at n=1 beside a `read` that says "counts only until 20" is the payload
+    # contradicting itself (§5.5's volume case). Counts always; rates only above the floor.
+    _bandfloor = max(3, SELF_GRADING_MIN_N // 4)
+    by_band = {k: {"n": v["n"], "agree": v["agree"],
+                   "agreement": (round(v["agree"] / float(v["n"]), 3)
+                                 if v["n"] >= _bandfloor else None),
+                   "signed_bias": (round(v["bias_sum"] / float(v["n"]), 3)
+                                   if v["n"] >= _bandfloor else None),
+                   "min_n": _bandfloor}
+               for k, v in sorted(band.items())}
+    enough = n >= SELF_GRADING_MIN_N
+    q = _qwk([(a, t) for t, a in pairs], scores=RATING_SCORE) if enough else None
+    out.update(qwk_vs_assessor=(round(q, 3) if q is not None else None),
+               signed_bias=(round(bias, 3) if enough else None),
+               agree=agree, tutor_higher=higher, tutor_lower=lower,
+               by_band=by_band, insufficient_data=not enough)
+    limit = ("Agreement with the blind assessor, whose own validity is what `/coach audit` "
+             "measures — tutor validity is bounded by that chain, never better.")
+    if not enough:
+        out["read"] = ("%d spot-audit%s so far: the tutor agreed %d time%s, graded HIGHER %d, "
+                       "lower %d. Counts only — %d audits before any rate. %s"
+                       % (n, "" if n == 1 else "s", agree, "" if agree == 1 else "s",
+                          higher, lower, SELF_GRADING_MIN_N, limit))
+    else:
+        out["read"] = ("tutor vs blind assessor over %d spot-audits: QWK %s, signed bias %s "
+                       "(+ = the tutor grades higher, the flattering direction); it graded "
+                       "UP %d and down %d. %s"
+                       % (n, _fmt(out["qwk_vs_assessor"]),
+                          _fmt(out["signed_bias"], sign=True), higher, lower, limit))
+    return out
+
 def compute_by_kind(receipts):
     """Retention telemetry split by knowledge kind (v1.1, docs/11 P17; the compute_modality
     mold, deliberately: same population (_review_receipts), same one-datum-per-node
@@ -2211,6 +2952,18 @@ def _by_node(receipts):
         # a hand-edited receipt can carry any JSON type here; a dict/list would be an
         # unhashable key and take the whole command down with it
         if not isinstance(topic, str) or not isinstance(node, str) or not topic or not node:
+            continue
+        # An AUDIT receipt is a measurement OF A GRADER, not a retrieval by the learner
+        # (v1.4). It may never become a node's `first` — that slot defines day 0 for every
+        # retention bucket and `days_since_encode` — and it counts toward no population here.
+        # A bare CLI `rate --kind audit` on a never-encoded node is therefore invisible to the
+        # learner's metrics, which is exactly right: nobody retrieved anything.
+        if r.get("kind") == "audit":
+            continue
+        # A same-day re-attempt is the criterion loop, not a retrieval event (v1.5, inv. 13).
+        # Excluded HERE, in the shared entry point, so every downstream population inherits
+        # it from one line — the v0.6.4 lesson (one rule, four implementations, three wrong).
+        if r.get("relearn") is True:
             continue
         key = (topic, node)
         first = key not in out
@@ -2390,6 +3143,22 @@ TRANSFER_STATES = ("untested", "probed", "applied")
 TRANSFER_MIN_N = 5
 
 GOLD_SCORE = {"lapsed": 0, "partial": 1, "recalled": 2}   # ordinal; QWK needs the order
+
+# ── THE CANARY (v1.4) ────────────────────────────────────────────────────────────────────
+# A badge is only valid for the grader that earned it. When the model changes underneath a
+# learner (a platform upgrade), the honest options are "re-run the whole 86x3 ceremony" or
+# "carry a badge nobody re-earned" — and the second is how a stale pass gets believed. The
+# canary is the cheap third option: a fixed, seed-stable subset that can only ever RE-LICENSE
+# the prior verdict or DEMAND a full re-audit. It can never mint a `pass` (invariant 12).
+#
+# Composition is deliberate, not random: the mid-band (`partial`) is where the 2026 measured
+# literature puts LLM-grader divergence, and these case types are where THIS grader's real
+# inflations were caught (v1.1.0's audit) or where it still disagrees with the gold on purpose.
+CANARY_N = 15
+CANARY_CASE_TYPES = ("right-answer-wrong-reason", "right-answer-wrong-method",
+                     "partial-credit-boundary", "procedure-partial-boundary",
+                     "slip-vs-conceptual", "fluent-but-empty")
+AUDIT_STALE_DAYS = 90     # when the grader context is unknowable, time is the only signal
 QWK_FLOOR = 0.60        # below this the grader is not trustworthy at all -> teeth
 QWK_TARGET = 0.70       # the conventional threshold for automated scoring -> pass
 BIAS_MAX = 0.15         # signed leniency ceiling: mean(grader - gold), + = inflating
@@ -2535,6 +3304,35 @@ def load_gold(override=None):
         "modified": modified,          # ← the flag that must reach the narrator
     }
 
+def canary_items(items):
+    """The re-licensing subset: ~15 items, chosen the same way every time (v1.4).
+
+    Seed-stable by sha256 of the sid — NOT by `random`, which the engine may not use at all
+    (a shuffled canary is a different instrument each run, and two runs that disagree would
+    be indistinguishable from a grader that changed). Weak/contested case types come first
+    and the `partial` band is oversampled, because that is where the measured literature puts
+    LLM-grader divergence and where this grader's own real inflations were caught."""
+    if not items:
+        return []
+    # STRATIFIED BY BAND, not just sorted by difficulty. The first cut ranked weak-case-type
+    # and mid-band first and drew 15 — and every one came back `partial`, so the canary was
+    # structurally blind to a grader that had started failing the CLEAR cases. A tripwire that
+    # can only see one band is not a tripwire; it is a narrower badge. Quotas oversample the
+    # middle (where the measured divergence lives) while keeping real anchors at both ends.
+    quotas = {"partial": 7, "lapsed": 4, "recalled": 4}
+    def rank(it):
+        return (0 if (it.get("case_type") or "") in CANARY_CASE_TYPES else 1,
+                hashlib.sha256((it.get("sid") or "").encode("utf-8")).hexdigest())
+    picked = []
+    for band, want in sorted(quotas.items()):
+        pool = sorted((i for i in items if i.get("gold_grade") == band), key=rank)
+        picked.extend(pool[:want])
+    if len(picked) < CANARY_N:      # a thin gold set: top up deterministically, never pad
+        seen = {i.get("sid") for i in picked}
+        rest = sorted((i for i in items if i.get("sid") not in seen), key=rank)
+        picked.extend(rest[:CANARY_N - len(picked)])
+    return sorted(picked, key=rank)[:CANARY_N]
+
 def cmd_gold(_args):
     """Emit the gold set SHAPED EXACTLY LIKE `stash list` — a bare array, answer stripped.
 
@@ -2548,6 +3346,17 @@ def cmd_gold(_args):
     count goes to STDERR (a human sees it; the JSON pipe stays clean) and is re-reported in
     the audit's own coverage block, so it never goes unsaid."""
     items, meta = load_gold()
+    if not items:
+        # A packaging slip (gold/ missing from the published artifact) silently produced an
+        # empty gold set, an audit with `gold_n: 0` stamped `gold_source: "bundled:…"` — a
+        # provenance field lying in the flattering direction — and a permanently shut export
+        # gate. Say it loudly on stderr; the JSON pipe stays clean.
+        sys.stderr.write("engram: THE GOLD SET IS EMPTY — expected %s. The grader cannot be "
+                         "audited without it; if this is an installed copy, the package is "
+                         "missing gold/.\n"
+                         % os.path.join(_plugin_root(), "gold", "assessor-gold.jsonl"))
+    if getattr(_args, "canary", False):
+        items = canary_items(items)
     if meta["skipped"]:
         sys.stderr.write("engram: %d malformed gold item(s) skipped\n" % meta["skipped"])
     if meta["modified"]:
@@ -2559,21 +3368,27 @@ def cmd_gold(_args):
     emit([{k: it.get(k) for k in GOLD_ASSESSOR_KEYS
            if k != "node_kind" or it.get(k) is not None} for it in items])
 
-def _qwk(pairs):
+def _qwk(pairs, scores=None):
     """Quadratic weighted kappa over (gold, grader) grade pairs. None if undefined.
+
+    `scores` is the ORDINAL MAP — which categories exist and in what order. It defaults to
+    the three grades; v1.4 passes the four ratings so the tutor-vs-assessor agreement is
+    computed by this same function rather than a second implementation that could drift
+    (the v0.6.4 lesson: one predicate, or three of the four call sites are wrong).
 
     THE headline. Raw agreement overstates chance-corrected agreement by 34-41 points in
     the measured literature, so it is reported but never quoted alone. Returns None when
     the expected-disagreement mass is zero (both raters degenerate onto one category) —
     None, not 1.0: an undefined agreement must never read as a perfect one, because that
     is a wrong number in the flattering direction, which is bug class #1 in this repo."""
-    k = len(GRADES)
+    scores = GOLD_SCORE if scores is None else scores
+    k = len(scores)
     n = len(pairs)
     if not n:
         return None
     obs = [[0] * k for _ in range(k)]
     for gold, grader in pairs:
-        obs[GOLD_SCORE[gold]][GOLD_SCORE[grader]] += 1
+        obs[scores[gold]][scores[grader]] += 1
     row = [sum(obs[i]) for i in range(k)]
     col = [sum(obs[i][j] for i in range(k)) for j in range(k)]
     num = den = 0.0
@@ -2666,6 +3481,23 @@ def cmd_assessor_audit(args):
                     % "/".join(k for k in GOLD_ANSWER_KEYS if k in it))
 
     gold, gold_meta = load_gold(getattr(args, "gold", None))
+    # THE SCOPE (v1.4). A canary run grades a ~15-item subset, so it is measured against that
+    # subset and — critically — can never mint a `pass` (invariant 12). Detected from the
+    # payload rather than trusted from a flag: the sids the grader actually returned are the
+    # only honest evidence of which set it was given.
+    canary = canary_items(gold)
+    canary_sids = {g["sid"] for g in canary}
+    scope = "full"
+    graded_sids_probe = {sid for r in runs for it in r
+                         if isinstance(it, dict) and isinstance(it.get("sid"), str)
+                         for sid in [it["sid"]]}
+    if (getattr(args, "canary", False)
+            or (graded_sids_probe and graded_sids_probe <= canary_sids
+                and len(graded_sids_probe) < len(gold))):
+        scope, gold = "canary", canary
+    grader_context = getattr(args, "grader_context", None)
+    grader_context = (grader_context[:120] if isinstance(grader_context, str) and grader_context
+                      else "unknown")
     skipped = gold_meta["skipped"]
     by_sid = {g["sid"]: g for g in gold}
     parsed = [_run_grades(r) for r in runs]
@@ -2686,7 +3518,7 @@ def cmd_assessor_audit(args):
     # so the ambiguity is what gets published.)
     identical_runs = len(graded) > 1 and all(g == graded[0] for g in graded[1:])
 
-    per_run, confusion, by_case = [], {}, {}
+    per_run, confusion, by_case, by_gold_band = [], {}, {}, {}
     up = down = exact_n = 0            # THE DIRECTION OF ERROR — see `direction` below
     for g in graded:
         pairs = [(by_sid[sid]["gold_grade"], g[sid]) for sid in matched]
@@ -2708,6 +3540,13 @@ def cmd_assessor_audit(args):
                 down += 1              # graded DOWN = harsh. Costly, but never flattering.
             else:
                 exact_n += 1
+            bd = by_gold_band.setdefault(a, {"items": set(), "judgments": 0, "agree": 0,
+                                              "bias_sum": 0.0, "up": 0})
+            bd["items"].add(sid)
+            bd["judgments"] += 1
+            bd["agree"] += 1 if a == b else 0
+            bd["bias_sum"] += GOLD_SCORE[b] - GOLD_SCORE[a]
+            bd["up"] += 1 if GOLD_SCORE[b] > GOLD_SCORE[a] else 0
             ct = by_sid[sid].get("case_type") or "unclassified"
             slot = by_case.setdefault(ct, {"items": set(), "judgments": 0, "agree": 0,
                                            "bias_sum": 0.0})
@@ -2736,6 +3575,16 @@ def cmd_assessor_audit(args):
     # (10 items x 3 runs), and nothing said so. That is the v0.6.4 unlabelled-denominator bug
     # reproduced inside the release built to catch unlabelled denominators (§4.8 Q3). Name it,
     # count it, publish it beside the rate.
+    # THE MID-BAND IS WHERE GRADERS ACTUALLY FAIL (v1.4). The 2026 short-answer literature
+    # finds rubric-anchored LLM graders near-human at the extremes and materially off in the
+    # middle — while the headline QWK, pooled across bands, looks fine. `partial` is Engram's
+    # middle, so the audit now reports each band's own agreement, signed bias and inflation
+    # count. A number that is right in aggregate and wrong where it matters is bug class #7.
+    band_report = {b: {"items": len(s["items"]), "judgments": s["judgments"],
+                       "agreement": round(s["agree"] / float(s["judgments"]), 3),
+                       "leniency_bias": round(s["bias_sum"] / float(s["judgments"]), 3),
+                       "graded_up": s["up"]}
+                   for b, s in sorted(by_gold_band.items()) if s["judgments"]}
     by_case_type = {ct: {"items": len(s["items"]), "judgments": s["judgments"],
                          "agreement": round(s["agree"] / float(s["judgments"]), 3),
                          "leniency_bias": round(s["bias_sum"] / float(s["judgments"]), 3)}
@@ -2755,6 +3604,10 @@ def cmd_assessor_audit(args):
                           "it can also mean the grader inflates as often as it deflates.")}
 
     n = len(matched)
+    # A canary is 15 items BY DESIGN, so it cannot be held to the full audit's floor — that
+    # would make every canary read `insufficient-data` and the re-licensing path would be
+    # dead code shipped as a feature (bug class #3).
+    min_n = min(CANARY_N, len(gold)) if scope == "canary" else MIN_AUDIT_N
     # A run that graded the same sid twice did not cover the gold set — it covered part of it
     # and then had a second go. Same class as a dropped sid, so it lands in the same guard.
     coverage_complete = bool(gold) and not ungraded and not unknown and not dupes
@@ -2814,10 +3667,10 @@ def cmd_assessor_audit(args):
 
     teeth = (qwk is None or qwk < QWK_FLOOR
              or (leniency_bias is not None and leniency_bias > BIAS_MAX) or paradox)
-    if n < MIN_AUDIT_N:
+    if n < min_n:
         verdict = "insufficient-data"
         reasons.insert(0, "n=%d < %d — not enough adjudicated items to say anything about "
-                          "this grader" % (n, MIN_AUDIT_N))
+                          "this grader" % (n, min_n))
     elif not coverage_complete:
         verdict = "incomplete"          # the QWK is over a subset the GRADER chose. Untrustworthy.
     elif teeth:
@@ -2833,6 +3686,25 @@ def cmd_assessor_audit(args):
                        "target for automated scoring" % (qwk, QWK_FLOOR, QWK_TARGET))
     else:
         verdict = "pass"
+    # ⚠ A CANARY MAY NEVER MINT A PASS (invariant 12). It grades ~15 items chosen for
+    # difficulty, so it is a TRIPWIRE, not a certification: it can re-license the verdict a
+    # full audit already earned, or demand a fresh full audit. Anything else and the cheap
+    # path would quietly replace the expensive one, which is how a 15-item badge ends up
+    # standing in for an 86-item claim.
+    if scope == "canary" and verdict not in ("insufficient-data", "incomplete"):
+        # `coverage_complete` belongs in `clean`: a canary that graded a sid twice did not
+        # cover its subset, and promoting it to `canary-pass` handed the re-licensing path
+        # exactly the "grader marks its own homework twice" case `_run_grades` exists to catch.
+        clean = (up == 0 and not teeth and coverage_complete)
+        verdict = "canary-pass" if clean else "canary-fail"
+        reasons.append(
+            "CANARY SCOPE: %d of %d gold items, chosen for difficulty (mid-band and the case "
+            "types this grader has historically failed). A canary can RE-LICENSE the last "
+            "full audit or demand a new one — it can never certify a grader on its own."
+            % (n, len(canary)))
+        if not clean:
+            reasons.append("the canary caught %d inflation%s — the badge is void until a FULL "
+                           "audit is re-run" % (up, "" if up == 1 else "s"))
 
     if verdict == "pass":
         # `pass` structurally implies runs >= MIN_AUDIT_RUNS and matched non-empty, so retest
@@ -2890,6 +3762,13 @@ def cmd_assessor_audit(args):
         "direction": direction,            # ← the safety argument, in three integers
         "confusion": confusion,            # counts are JUDGMENTS (items x runs), not items
         "by_case_type": by_case_type,
+        "by_gold_band": band_report,       # v1.4: where in the range the grader actually fails
+        "scope": scope,                    # "full" | "canary" — a canary never certifies
+        # WHICH GRADER earned this verdict (v1.4). Supplied by the skill from what its
+        # platform actually knows; the engine stores it verbatim and NEVER invents one — a
+        # model naming its own weights is fabricated data. "unknown" is honest and falls back
+        # to time-based staleness.
+        "grader_context": grader_context,
         "by_run": per_run,
         # WHICH ground truth produced this verdict (§4.8 Q5) — reported HONESTLY, which the
         # first cut did not: it hard-coded "bundled" even when gold/local-gold.jsonl had
@@ -2958,14 +3837,58 @@ def _latest_audit():
         return None
     if not names:
         return None
-    latest = names[-1]
-    a = read_json(os.path.join(d, latest), quarantine=False)
-    if not isinstance(a, dict) or a.get("verdict") not in (
-            "pass", "warn", "fail", "incomplete", "insufficient-runs", "insufficient-data"):
-        return {"__unreadable__": latest}
-    return a
+    # ⚠ THE LATEST *FULL* AUDIT — a canary is not a candidate (v1.4). A canary can only
+    # re-license or revoke; if it were allowed to BE the latest audit, running one would
+    # replace an 86-item verdict with a 15-item one, and `canary-pass` (not a valid full
+    # verdict) would read as `unreadable` and silently void a badge that was fine. The cheap
+    # path must never overwrite the expensive one — it may only vouch for it.
+    for latest in reversed(names):
+        a = read_json(os.path.join(d, latest), quarantine=False)
+        if isinstance(a, dict) and a.get("scope") == "canary":
+            continue
+        if not isinstance(a, dict) or a.get("verdict") not in (
+                "pass", "warn", "fail", "incomplete", "insufficient-runs", "insufficient-data"):
+            return {"__unreadable__": latest}
+        return a
+    return None
 
-def compute_grader_health():
+def _latest_canary_relicense(full_audit, current_ctx=None):
+    """Has a CLEAN canary been run since this full audit? (v1.4)
+
+    Scans the audit directory for canary-scoped results newer than the full audit's own
+    timestamp. A `canary-pass` re-licenses a badge whose grader context changed; a
+    `canary-fail` never does (and its own teeth are already engaged through the verdict)."""
+    d = p("audits")
+    if not os.path.isdir(d):
+        return None
+    base = safe_date(full_audit.get("ts") if isinstance(full_audit, dict) else None)
+    best = None
+    for name in sorted(os.listdir(d)):
+        if not name.endswith(".json"):
+            continue
+        rec = read_json(os.path.join(d, name), default=None, quarantine=False)
+        if not isinstance(rec, dict) or rec.get("scope") != "canary":
+            continue
+        if rec.get("verdict") != "canary-pass":
+            continue
+        # ⚠ A CANARY MAY ONLY VOUCH FOR THE GRADER IT ACTUALLY RAN UNDER, AND ONLY FOR AS
+        # LONG AS A FULL AUDIT WOULD HAVE LASTED. Without both clauses one canary — run the
+        # day after the full audit, under the OLD model — permanently disabled `stale-model`
+        # AND `stale-age` for every future grader, re-opened the `export` gate, and left the
+        # dashboard reading "grader validated · QWK 1.00" with no failure word anywhere. That
+        # is v1.4's entire safety claim, unenforceable, in the flattering direction.
+        rec_ctx = rec.get("grader_context")
+        if not (isinstance(rec_ctx, str) and rec_ctx and rec_ctx not in ("unknown",)
+                and isinstance(current_ctx, str) and rec_ctx == current_ctx):
+            continue                       # it vouched for a different grader, or for none
+        ts = safe_date(rec.get("ts"))
+        if not ts or (today() - ts).days > AUDIT_STALE_DAYS:
+            continue                       # a re-licence does not outlive an audit
+        if base is None or ts >= base:
+            best = rec
+    return best
+
+def compute_grader_health(current_grader_context=None):
     """The teeth. An unaudited oracle makes every number downstream unearned.
 
     `grader_unvalidated` is TRUE until an audit says otherwise — including when no audit
@@ -3001,6 +3924,66 @@ def compute_grader_health():
     # handed it. The verdict is the validated field; the flag is a FUNCTION of it, not an input.
     unval = a.get("verdict") not in ("pass", "warn")
     qwk = _num("qwk")
+
+    # ── STALENESS (v1.4): A BADGE BELONGS TO THE GRADER THAT EARNED IT ──────────────────
+    #
+    # A silent model swap under a learner runs UNIFORMLY MORE LENIENT in the one published
+    # measurement of it (2026: injected judge-version drift, detected 60/60, lenient in
+    # direction) — which is precisely Engram's dangerous direction. A platform upgrade would
+    # otherwise inherit an audit it never sat, and the export gate would keep opening.
+    #
+    # Two triggers, in order of evidence: a CONTEXT MISMATCH (both known and different) is
+    # decisive; when either side is unknown, TIME is the only signal left and is used
+    # conservatively. Naive rolling drift detectors are deliberately NOT used — the measured
+    # false-alarm rate on drift-free streams is 75%, and a gate that cries wolf is a gate
+    # nobody reads.
+    stale = None
+    audited_ctx = _str("grader_context")
+    current_ctx = current_grader_context if isinstance(current_grader_context, str) else None
+    if not unval:
+        if (audited_ctx and current_ctx and audited_ctx not in ("unknown",)
+                and current_ctx not in ("unknown",) and audited_ctx != current_ctx):
+            stale = ("stale-model", "the model that earned this badge (%s) is not the one "
+                                    "grading you now (%s)" % (audited_ctx, current_ctx))
+        else:
+            ts = safe_date(_str("ts"))
+            age = (today() - ts).days if ts else None
+            if age is not None and age > AUDIT_STALE_DAYS:
+                stale = ("stale-age", "the last full audit is %d days old and the grader it "
+                                      "measured cannot be identified (%s)"
+                                      % (age, audited_ctx or "no context recorded"))
+    if stale:
+        # A canary can lift this without a full re-run — that is what it is for — and the
+        # relicensing is recorded rather than assumed.
+        relicensed = _latest_canary_relicense(a, current_ctx)
+        if relicensed:
+            stale = None
+            relicensed_note = ("badge re-licensed by the canary run on %s under %s"
+                               % (relicensed.get("ts"), relicensed.get("grader_context")))
+        else:
+            relicensed_note = None
+    else:
+        relicensed_note = None
+    if stale:
+        code, why = stale
+        return {"audited": True, "ts": _str("ts"), "grader": _str("grader"),
+                "n": _num("n"), "runs": _num("runs"), "qwk": qwk,
+                "exact_agreement": _num("exact_agreement"),
+                "leniency_bias": _num("leniency_bias"), "test_retest": _num("test_retest"),
+                "direction": (a.get("direction") if isinstance(a.get("direction"), dict) else None),
+                "by_case_type": (a["by_case_type"] if isinstance(a.get("by_case_type"), dict) else {}),
+                "by_gold_band": (a["by_gold_band"] if isinstance(a.get("by_gold_band"), dict) else {}),
+                "grader_context": audited_ctx, "current_grader_context": current_ctx,
+                "gold_source": _str("gold_source"),
+                "gold_adjudication": _str("gold_adjudication") or GOLD_ADJUDICATION,
+                "gold_modified": bool(a.get("gold_modified")),
+                "identical_runs": bool(a.get("identical_runs")),
+                "reasons": [why], "verdict": code, "grader_unvalidated": True,
+                "stamp": "GRADER BADGE EXPIRED (%s) — %s" % (code, why),
+                "read": ("%s. The QWK below was real when it was measured and it is not a "
+                         "claim about today's grader. `/coach audit` re-runs the canary "
+                         "(~15 items) first; a clean canary re-licenses the badge, a dirty "
+                         "one demands the full set." % why.capitalize())}
     if unval:
         stamp = "GRADER UNVALIDATED (%s) — these grades are not trustworthy" % a.get("verdict")
     elif a.get("gold_modified"):
@@ -3032,8 +4015,163 @@ def compute_grader_health():
             "verdict": a.get("verdict"), "grader_unvalidated": unval,
             "stamp": stamp, "read": _str("read") or "audit present but unreadable"}
 
-def cmd_grader_health(_args):
-    emit(compute_grader_health())
+ADJ_ANCHOR_PASS = 0.80        # calibration gate before an external rater may adjudicate
+ADJ_ANCHOR_MIN_N = 10         # …over at least this many anchors (docs/ADJUDICATION.md §2)
+ADJ_ALPHA_GOOD, ADJ_ALPHA_TENTATIVE = 0.80, 0.667   # Krippendorff's canonical thresholds
+
+def _krippendorff_ordinal(pairs):
+    """Krippendorff's alpha for TWO raters on an ordinal 3-point scale. None if undefined.
+
+    Computed here rather than approximated by a kappa because the adjudication kit's whole
+    point is a statistic an outside reader recognises, with its own disagreement model:
+    alpha = 1 - Do/De, where the ordinal metric weights a lapsed-vs-recalled disagreement
+    more than an adjacent one. With two raters and no missing data this reduces to the
+    standard coincidence-matrix form."""
+    n = len(pairs)
+    if n < 2:
+        return None
+    k = len(GOLD_SCORE)
+    # values, by ordinal rank
+    counts = [0] * k
+    for a, b in pairs:
+        counts[GOLD_SCORE[a]] += 1
+        counts[GOLD_SCORE[b]] += 1
+    total = 2 * n
+    # ordinal difference metric (Krippendorff): squared sum of interval masses
+    def delta(i, j):
+        if i == j:
+            return 0.0
+        lo, hi = (i, j) if i < j else (j, i)
+        s = sum(counts[g] for g in range(lo, hi + 1)) - (counts[lo] + counts[hi]) / 2.0
+        return s * s
+    do = sum(delta(GOLD_SCORE[a], GOLD_SCORE[b]) for a, b in pairs) / float(n)
+    de = 0.0
+    for i in range(k):
+        for j in range(k):
+            if i != j:
+                de += counts[i] * counts[j] * delta(i, j)
+    de = de / float(total * (total - 1)) if total > 1 else 0.0
+    if de == 0:
+        return None            # no disagreement possible: undefined, never a flattering 1.0
+    return 1.0 - do / de
+
+def _bootstrap_alpha_ci(pairs, seed=20260724, iters=1000):
+    """Percentile CI for alpha. n=86 gives a WIDE interval — publish it anyway; a point
+    estimate from 86 items quoted without its spread is the label lying about its own
+    precision (§4.8 Q6)."""
+    if len(pairs) < 4:
+        return None
+    rng = random.Random(seed)
+    vals = []
+    for _ in range(iters):
+        s = [pairs[rng.randrange(len(pairs))] for _ in range(len(pairs))]
+        a = _krippendorff_ordinal(s)
+        if a is not None:
+            vals.append(a)
+    if len(vals) < iters // 2:
+        return None
+    vals.sort()
+    return [round(vals[int(0.025 * len(vals))], 3), round(vals[int(0.975 * len(vals)) - 1], 3)]
+
+def cmd_adjudication_stats(args):
+    """Score an EXTERNAL human's adjudication of the gold set (v1.4, docs/ADJUDICATION.md).
+
+    The repo has asked for one non-author human since v0.7 — *"the highest-value contribution
+    anyone could make to this repository"* — and never shipped the procedure that would make
+    their work countable. This is that procedure, in code: the calibration gate, the
+    chance-corrected statistics an outside reader expects, and thresholds fixed BEFORE any
+    file is read so the bar cannot move to fit the result.
+
+    Read-only. It never edits the gold set: an adjudication that silently rewrote the ground
+    truth would be the circularity this whole apparatus exists to disclose."""
+    rows = load_payload(args)
+    if isinstance(rows, dict):
+        rows = rows.get("items") or rows.get("rows") or []
+    if not isinstance(rows, list) or not rows:
+        die("adjudication file must be a JSON array (or {items:[…]}) of "
+            '{"sid": …, "grade": recalled|partial|lapsed, "anchor": true|false}')
+    gold, gold_meta = load_gold(getattr(args, "gold", None))
+    by_sid = {g["sid"]: g for g in gold}
+    clean, bad = {}, []
+    for r in rows:
+        # `isinstance(..., str)` BEFORE the membership test: a hand-written adjudication file
+        # can hold any JSON type, and `{"a": 1} in GOLD_SCORE` raises `unhashable type` rather
+        # than returning False. Found by the fuzz — 35 crashes in 300 states, in a read path
+        # whose entire job is to survive a human's hand-authored file.
+        if not isinstance(r, dict) or not isinstance(r.get("sid"), str) \
+                or not isinstance(r.get("grade"), str) or r["grade"] not in GOLD_SCORE:
+            bad.append(r if isinstance(r, (str, int)) else "malformed")
+            continue
+        if r["sid"] not in by_sid:
+            bad.append(r["sid"])
+            continue
+        clean[r["sid"]] = (r["grade"], bool(r.get("anchor")))
+    anchors = {s: v for s, v in clean.items() if v[1]}
+    scored = {s: v for s, v in clean.items() if not v[1]}
+    # THE CALIBRATION GATE, FIRST. An untrained rater's disagreement is noise, and noise
+    # published as "the gold set is contested" would be worse than no adjudication at all.
+    a_pairs = [(by_sid[s]["gold_grade"], g) for s, (g, _) in anchors.items()]
+    a_exact = (sum(1 for x, y in a_pairs if x == y) / float(len(a_pairs))) if a_pairs else None
+    # The COUNT is half the gate. docs/ADJUDICATION.md asks for ten anchors; without a
+    # minimum, one correctly-graded anchor "calibrated" a rater whose α was then published as
+    # independent corroboration of the gold set.
+    gate = {"n": len(a_pairs), "exact": (round(a_exact, 3) if a_exact is not None else None),
+            "required": ADJ_ANCHOR_PASS, "required_n": ADJ_ANCHOR_MIN_N,
+            "passed": (len(a_pairs) >= ADJ_ANCHOR_MIN_N and a_exact is not None
+                       and a_exact >= ADJ_ANCHOR_PASS)}
+    pairs = [(by_sid[s]["gold_grade"], g) for s, (g, _) in sorted(scored.items())]
+    n = len(pairs)
+    exact = (round(sum(1 for x, y in pairs if x == y) / float(n), 3)) if n else None
+    qwk = _qwk(pairs) if n else None
+    alpha = _krippendorff_ordinal(pairs) if n else None
+    ci = _bootstrap_alpha_ci(pairs) if n else None
+    stricter = sum(1 for x, y in pairs if GOLD_SCORE[y] < GOLD_SCORE[x])
+    lenient = sum(1 for x, y in pairs if GOLD_SCORE[y] > GOLD_SCORE[x])
+    confusion = {}
+    for x, y in pairs:
+        confusion["%s->%s" % (x, y)] = confusion.get("%s->%s" % (x, y), 0) + 1
+    if not gate["passed"]:
+        verdict, note = "calibration-failed", (
+            "the rater did not clear the anchor gate (%s exact over %d anchors; %.0f%% of at "
+            "least %d required), so their adjudication is not scored. Retrain on the anchors, "
+            "do not lower the bar."
+            % (("%.0f%%" % (100 * a_exact)) if a_exact is not None else "no",
+               len(a_pairs), 100 * ADJ_ANCHOR_PASS, ADJ_ANCHOR_MIN_N))
+    elif alpha is None or n < MIN_AUDIT_N:
+        verdict, note = "insufficient-data", (
+            "n=%d scored items — too few to say anything about the gold set" % n)
+    elif alpha >= ADJ_ALPHA_GOOD:
+        verdict, note = "corroborated", (
+            "alpha %.3f clears %.2f: an outside rater independently agrees with the authored "
+            "gold. ONE external rater CORROBORATES; it does not replace the author — that "
+            "would take two independent externals agreeing with each other." % (alpha, ADJ_ALPHA_GOOD))
+    elif alpha >= ADJ_ALPHA_TENTATIVE:
+        verdict, note = "tentatively-corroborated", (
+            "alpha %.3f is in the tentative band [%.3f, %.2f) — usable for drawing tentative "
+            "conclusions only, and every disagreement should be adjudicated before any badge "
+            "language changes" % (alpha, ADJ_ALPHA_TENTATIVE, ADJ_ALPHA_GOOD))
+    else:
+        verdict, note = "contested", (
+            "alpha %.3f is below %.3f: the external rater and the author do not agree, so the "
+            "gold set is CONTESTED and the circularity caveat stays at full strength. That is "
+            "a real finding about the instrument, not a failure of the rater." % (alpha, ADJ_ALPHA_TENTATIVE))
+    emit({"rater": (getattr(args, "rater", None) or "external"),
+          "gold_source": gold_meta["source"], "gold_n": len(gold),
+          "anchor_gate": gate,
+          "n": n, "exact": exact, "qwk": (round(qwk, 3) if qwk is not None else None),
+          "alpha": (round(alpha, 3) if alpha is not None else None), "alpha_ci": ci,
+          "direction": {"rater_stricter": stricter, "rater_more_lenient": lenient,
+                        "agree": n - stricter - lenient},
+          "confusion": confusion,
+          "unknown_or_malformed": len(bad),
+          "verdict": verdict,
+          "read": ("%s · exact %s, QWK %s, alpha %s %s over %d items (pre-adjudication — the "
+                   "only numbers that count as independent). %s"
+                   % (verdict.upper(), _fmt(exact), _fmt(qwk), _fmt(alpha),
+                      ("CI %s" % ci) if ci else "", n, note))})
+
+def cmd_grader_health(args):
+    emit(compute_grader_health(getattr(args, "grader_context", None)))
 
 def has_transfer_question(node):
     """Is there a harder question to ask of this node at all?
@@ -3090,6 +4228,8 @@ def transfer_candidates(topic_filter=None, limit=None):
     out = []
     for tp, g in iter_graphs(topic_filter):
         for nid, node in graph_nodes(g).items():
+            if is_retired(node):
+                continue                      # off the learner's list (v1.3)
             slot = nodes.get((tp, nid))
             st = node_transfer_state(slot)
             if not _transfer_ready(node, st, t, slot):
@@ -3166,6 +4306,64 @@ def cmd_capstone(args):
           "read": ("the capstone is now a node in the graph. It unlocks when every concept is "
                    "encoded, and it shows up in `next` like anything else — so it cannot "
                    "silently not happen.")})
+
+def cmd_retire(args):
+    """The learner takes something off their list — the autonomy verb Engram never had (v1.3).
+
+    Why this is exempt from "state advances only through receipts" (docs/09 §2.4), said
+    rather than assumed: receipts guard MASTERY claims. Retirement advances no claim — it
+    records a decision, on the node it governs, reversibly. It deliberately does not touch
+    `state` (docs/15 §2.2): a fourth state value would ripple through every state reader, and
+    the capstone requires every node, so it would block the build forever.
+
+    Evidence: value-directed remembering (Castel) — learners are already strategic droppers,
+    and a system that only lets them abandon (silently, guiltily) rather than retire
+    (deliberately, visibly) is misreading a competence as a failure. The adherence LINK is
+    untested and docs/13 §4.3 says so.
+
+    THE RULE THAT KEEPS IT HONEST: the engine NEVER proposes retiring a specific node. That
+    would be auto-retiring whatever the learner keeps failing — a flattering denominator
+    dressed as help. The learner names it; the engine only records and counts."""
+    require_slug(args.topic)
+    g = load_graph(args.topic)
+    nodes = graph_nodes(g)
+    if args.node is not None:
+        if args.node not in nodes:
+            die("unknown node %s in topic %s (run `topic-status --topic %s`)"
+                % (args.node, args.topic, args.topic))
+        targets = [args.node]
+    else:
+        targets = sorted(nodes)
+    changed, skipped = [], []
+    for nid in targets:
+        node = nodes[nid]
+        if not isinstance(node, dict):
+            skipped.append(nid)                     # corrupt node: doctor's business, not ours
+            continue
+        if args.restore:
+            if not is_retired(node):
+                skipped.append(nid)
+                continue
+            # The block STAYS, stamped — the decision's history is auditable rather than
+            # erased. `is_retired` reads False the moment `restored` is set.
+            node["retired"]["restored"] = today().isoformat()
+            changed.append(nid)
+        else:
+            if is_retired(node):
+                skipped.append(nid)
+                continue
+            node["retired"] = {"ts": today().isoformat(), "restored": None}
+            changed.append(nid)
+    if changed:
+        save_graph(g)
+    live = sum(1 for n in nodes.values() if isinstance(n, dict) and is_retired(n))
+    verb = "restored" if args.restore else "retired"
+    emit({"ok": True, "topic": args.topic, verb: changed, "unchanged": skipped,
+          "retired_now": live,
+          "read": ("%d node%s %s; %d retired in this topic. Retired nodes leave the review "
+                   "queue and the frontier, and are COUNTED in every denominator they leave "
+                   "(adherence, retention.unmeasured) — chosen, never quietly dropped."
+                   % (len(changed), "" if len(changed) == 1 else "s", verb, live))})
 
 def cmd_transfer(args):
     cands = transfer_candidates(args.topic, args.limit)
@@ -3295,11 +4493,20 @@ def compute_adherence():
     nodes = _by_node(receipts)
     t = today()
 
-    reached = done = 0
-    for slot in nodes.values():
+    # RETIRED nodes leave this rate — and are counted on the way out (v1.3). A learner who
+    # retires everything they never reviewed would otherwise drive loop_closure to a
+    # flattering 1.0, which is bug class #1 with the learner's own hand on the lever. So the
+    # count travels WITH the rate and reaches the `read` string whenever it is nonzero: the
+    # number stays honest by being labeled, not by punishing the verb.
+    retired = retired_keys()
+    reached = done = retired_excluded = 0
+    for key, slot in nodes.items():
         first_due = safe_date(slot["first"].get("due_next"))
         if first_due is None or first_due > t:
             continue                      # not yet due: the loop hasn't been asked to close
+        if key in retired:
+            retired_excluded += 1
+            continue
         reached += 1
         if slot["reviews"]:
             done += 1
@@ -3331,10 +4538,14 @@ def compute_adherence():
         read = "the loop closes less than half the time — retention is mostly not happening"
     else:
         read = "the loop is closing"
+    if retired_excluded:
+        read += (" (%d past-due concept%s excluded because you retired %s — this rate is over "
+                 "what you kept)" % (retired_excluded, "s" if retired_excluded != 1 else "",
+                                     "them" if retired_excluded != 1 else "it"))
 
     return {
         "loop_closure": {"encoded_past_due": reached, "first_review_done": done,
-                         "rate": rate, "read": read},
+                         "rate": rate, "retired_excluded": retired_excluded, "read": read},
         "return": {
             "sessions_7d": sum(1 for d in sdates if 0 <= (t - d).days < 7),
             "sessions_30d": sum(1 for d in sdates if 0 <= (t - d).days < 30),
@@ -3348,6 +4559,7 @@ def compute_adherence():
             "nodes_reaching_first_due": reached,
             "nodes_first_reviewed": done,
             "nodes_retained_30d": retained_30d,
+            "nodes_retired": len(retired),
         },
     }
 
@@ -3426,10 +4638,16 @@ def compute_retention():
     # A node that is past due NOW has, by definition, not been retrieved since it came due.
     # Its current recall is UNKNOWN — not absent — whatever its history. That, and only that,
     # is the population a retention figure silently drops.
-    stale, never, proj = 0, 0, []
+    stale, never, proj, retired_n = 0, 0, [], 0
     for tp, g in iter_graphs():
         for nid, node in (g.get("nodes") or {}).items():
             if not isinstance(node, dict):
+                continue
+            # Retired nodes leave `past_due_now` and are counted in their own key (v1.3).
+            # They are CHOSEN, not abandoned — different words for different facts, and the
+            # honest denominator stays honest only if the exit is visible.
+            if is_retired(node):
+                retired_n += 1
                 continue
             f = _fsrs_of(node)
             s, due, last = (as_number(f.get("s")), safe_date(f.get("due")),
@@ -3510,10 +4728,13 @@ def compute_retention():
         "unmeasured": {
             "past_due_now": stale,             # ← the honest denominator
             "never_reviewed": never,           # of those, never retrieved even once
+            "retired": retired_n,              # v1.3: chosen off the list, not abandoned
             "projected_recall_now": (round(sum(proj) / len(proj), 3) if proj else None),
             "note": ("UNKNOWN, not absent. These are past due RIGHT NOW — not retrieved since "
                      "they came due, whatever their history. Reporting retention without them "
-                     "is survivorship bias: they are exactly the concepts that decayed."),
+                     "is survivorship bias: they are exactly the concepts that decayed. "
+                     "`retired` is a separate, honest exit: the learner took those off their "
+                     "list deliberately, so they are neither measured nor counted as debt."),
         },
         "read": read,
     }
@@ -3594,6 +4815,27 @@ def compute_stats():
         # v1.1: retention split by knowledge kind (concept/procedure/fact), the instrument
         # for docs/11 §7.3. Same predicates as modality; caveat ships inside the payload.
         "by_kind": compute_by_kind(receipts),
+        # v1.4: the OTHER grader. `grader_health` measures the blind assessor against the
+        # gold set; this measures the tutor — which writes every /review receipt — against
+        # the blind assessor. Agreement, never validity, and the read says so.
+        "self_grading": compute_self_grading(receipts),
+        # v1.5: did sessions end at criterion, and is relearning getting cheap?
+        "relearning": compute_relearning(receipts),
+        # v1.6: the retention/workload trade-off, drawn and never recommended
+        # read_model, NOT load_model: `stats` is a read path and must never persist a heal
+        # (the read-only-commands check exists because three of them once did).
+        "workload": workload_curve(receipts, read_model()),
+        # v1.8: DESCRIPTIVE session facts (replacing the inert `rhythms` field). Never a
+        # scheduling input — chronotype adaptation has no adult outcome evidence.
+        "sessions": {"by_month": _sessions_by_daypart(sessions),
+                     "total": len(sessions),
+                     "note": ("description only — Engram does not schedule by time of day; "
+                              "the adult evidence for chronotype effects on learning "
+                              "outcomes does not support it")},
+        # v1.8: how many adaptations the engine could justify right now — RECOMPUTED, never
+        # stored, because `propose` is read-only and nothing persists a pending queue.
+        "proposals_pending": len(compute_proposals(receipts, read_model(),
+                                                   workload_curve(receipts, read_model()))),
         "due_now": len(due_items()),
         "pending_verify": len(read_jsonl(p(STASH_FILE))),
         "topics": topics,
@@ -3648,8 +4890,8 @@ def cmd_decay(args):
             if not isinstance(nid, str):
                 continue          # unhashable/typed junk in `order` raises on dict.get()
             node = (g.get("nodes") or {}).get(nid)
-            if not isinstance(node, dict):
-                continue
+            if not isinstance(node, dict) or is_retired(node):
+                continue                       # retired: not decaying on the learner's ledger
             f = _fsrs_of(node)
             s, last = as_number(f.get("s")), safe_date(f.get("last"))
             if s is None or last is None:
@@ -3660,7 +4902,7 @@ def cmd_decay(args):
             due_n += 1 if is_due else 0
             # counterfactual: rate it `good` today, then look `horizon` days past that.
             sim = dict(f, retention=retention, im=im)
-            after, _ = apply_rating(sim, "good", t)
+            after, _ = apply_rating(sim, "good", t, w=learner_weights(model))
             rows.append({
                 "topic": tp, "node": nid, "due": is_due,
                 "s": round(s, 1),
@@ -3741,12 +4983,19 @@ def cmd_commit(args):
     """The learner's implementation intention — an if-then plan, in their own words.
 
     Gollwitzer & Sheeran (2006): 94 independent tests, N > 8,000, d = 0.65 on goal
-    attainment; does not shrink with sample size (robust to publication-bias correction) and
-    survived the post-2015 replication crisis. It is the highest-effect-size adherence move
-    available that costs nothing and steers no one.
+    attainment — the broad figure; behavior-specific meta-analyses run d ≈ 0.14–0.31 and that
+    is the honest number to expect here (docs/13 §2.1). Still the strongest licensed adherence
+    move available that costs nothing and steers no one.
 
-    Stored because they said it. Shown back at the moment it names. NEVER enforced — this is
-    not a reminder system, it is the learner's own sentence repeated to them (docs/07 §4)."""
+    Stored because they said it. Shown back at the moment it names (v1.3: the session hook and
+    /review finally DO show it — for three releases it was written and displayed by nothing).
+    NEVER enforced — this is not a reminder system, it is the learner's own sentence repeated
+    to them (docs/07 §4).
+
+    v1.3 adds `renewed`: re-prompting a stated plan is what the direct RCTs actually tested
+    (Messmer 2022; Prestwich 2010), and the effect decays over weeks, so the skills offer a
+    keep/rephrase/drop at a seam. `age_days` is emitted so that offer is engine-driven rather
+    than a model's guess at how stale the plan is."""
     m = load_model()
     before = m["settings"].get("commitment")
     if args.clear and (args.cue or args.action):
@@ -3757,12 +5006,27 @@ def cmd_commit(args):
         if not (args.cue and args.action):
             die('commit needs both --cue and --action '
                 '(e.g. --cue "when I open the terminal" --action "I clear one review")')
+        prev = before if isinstance(before, dict) else {}
+        hist = [d for d in (prev.get("renewed") or []) if isinstance(d, str)]
+        # A RENEWAL is a re-commitment to the same plan; a REPHRASE is a new plan. Either way
+        # the stamp records that the learner touched it today, which is what `age_days` (and
+        # therefore the renewal offer's cadence) is actually asking about.
+        if prev.get("set"):
+            hist = (hist + [today().isoformat()])[-12:]      # bounded: a year of monthly seams
         m["settings"]["commitment"] = {"cue": args.cue, "action": args.action,
-                                       "set": today().isoformat()}
+                                       "set": prev.get("set") or today().isoformat(),
+                                       "renewed": hist}
     if m["settings"].get("commitment") != before:
         write_json(p("learner-model.json"), m)
     c = m["settings"].get("commitment")
-    emit({"commitment": c,
+    age = None
+    if isinstance(c, dict):
+        stamps = [d for d in ([c.get("set")] + list(c.get("renewed") or []))
+                  if isinstance(d, str)]
+        dates = [d for d in (safe_date(s) for s in stamps) if d]
+        if dates:
+            age = (today() - max(dates)).days
+    emit({"commitment": c, "age_days": age,
           "note": ("%s, %s." % (c["cue"], c["action"]) if isinstance(c, dict) and c.get("cue")
                    else "no commitment set — /learn offers to book one at the close.")})
 
@@ -3837,8 +5101,67 @@ def cmd_session_start(_args):
                 by_topic[t] = by_topic.get(t, 0) + 1
         summary = ", ".join("%s: %d" % kv for kv in sorted(by_topic.items(), key=lambda x: -x[1])[:3])
         minutes = max(1, round(len(due) * 0.6))
-        print("[engram] %d review%s due (%s) · ~%d min · /review to clear, /learn to continue."
-              % (len(due), "s" if len(due) != 1 else "", summary, minutes))
+        # THE WALL OF DEBT, defused (v1.3). "28 reviews due · ~17 min" is the line the amnesty
+        # protocol exists to prevent, printed to the exact learner it exists to protect —
+        # ambient, cap-blind, profile-blind. Above the threshold the line LEADS with a path
+        # that fits and still states the full count: information, never a smaller truth.
+        # (docs/05 P14: a wall of debt is the churn trigger, not the cure.)
+        try:
+            _m = read_model()                      # read-only: the hook holds no lock
+            _profile = _m["settings"].get("profile")
+            _mode = _m["settings"].get("default_mode")
+        except Exception:
+            _profile = _mode = None
+        cap = QUICK_CAP if (_profile == "adhd" or _mode == "sprint") else STANDARD_CAP
+        # ⚠ AMNESTY FIRST, AND IT MUST BE THE FIRST WORDS ON THE SCREEN (v1.3).
+        #
+        # `/review`'s return protocol has always guaranteed an order — *nothing is owed →
+        # here is what it costs → here is a two-minute path* — and states plainly that
+        # REVERSED, IT IS A DEBT COLLECTOR. The hook is the surface that speaks FIRST, before
+        # `/review` is even typed, and it had no amnesty at all: it opened with the count, then
+        # the decay cost, and (for one afternoon during this release) closed on the learner's
+        # own unkept promise. The v1.3 dogfood read that sequence cold and called it what it
+        # was. The skill cannot repair an ordering violation that happens before it runs, so
+        # the ordering guarantee has to live HERE.
+        #
+        # Fires only on a real absence — the same >=7d clause the decay line uses (`returning`
+        # below), computed once and shared, so the two surfaces can never disagree about what
+        # counts as coming back.
+        gone_days, never_closed, returning = None, False, False
+        try:
+            _ad = compute_adherence()
+            gone_days = _ad["return"]["days_since_last_session"]
+            never_closed = (_ad["loop_closure"]["encoded_past_due"] > 0
+                            and _ad["loop_closure"]["first_review_done"] == 0)
+            returning = gone_days is not None and gone_days >= RETURN_ABSENCE_DAYS
+        except Exception:
+            pass                                  # ambient surface: never break a session
+        # The amnesty fires on EVERY return event the cost line fires on — including a loop
+        # that has never closed with no session history to date the gap, where the honest
+        # phrasing simply drops the day count rather than inventing one. (Caught by the
+        # ordering check: the first fix left exactly that path amnesty-less, which is the
+        # path the founder's own state was in for six days.)
+        if returning and gone_days is not None:
+            amnesty = ("back after %d days — nothing's owed, a gap doesn't hurt the schedule. "
+                       % gone_days)
+        elif never_closed or returning:
+            # ⚠ "spacing is doing its job" was FALSE on the branch that fires it: a loop that
+            # has never closed is precisely the case where spacing has NOT happened — nothing
+            # was ever re-encountered. It read as reassurance about a system working, one line
+            # above /coach saying THE LOOP HAS NEVER CLOSED about the same concepts. That is a
+            # wrong statement in the flattering direction (bug class #1) hiding inside an
+            # amnesty line. Amnesty owes the learner absolution, not a false progress report.
+            amnesty = "nothing's owed. "
+        else:
+            amnesty = ""
+        if len(due) > 2 * cap:
+            print("[engram] %s%d review%s due (%s) · /review quick clears the %d most urgent "
+                  "(~%d min) · full queue ~%d min."
+                  % (amnesty, len(due), "s" if len(due) != 1 else "", summary, cap,
+                     max(1, round(cap * 0.6)), minutes))
+        else:
+            print("[engram] %s%d review%s due (%s) · ~%d min · /review to clear, /learn to continue."
+                  % (amnesty, len(due), "s" if len(due) != 1 else "", summary, minutes))
         # The honest cost line (v0.6). Engram has always been able to compute what the
         # decay costs and has never said it — its whole ambient surface on the sixth day
         # of a memory dying on schedule was "7 reviews due" (docs/08 §The exhibit).
@@ -3850,12 +5173,33 @@ def cmd_session_start(_args):
         try:
             model = read_model()                      # read-only: the hook holds no lock
             if model["settings"].get("decay_notice", "on") != "off":
-                ad = compute_adherence()
-                lc = ad["loop_closure"]
-                gone = ad["return"]["days_since_last_session"]
-                never_closed = lc["encoded_past_due"] > 0 and lc["first_review_done"] == 0
-                returning = gone is not None and gone >= 7
                 if never_closed or returning:
+                    # THE PLAN COMES BEFORE THE COST, and that ordering is the whole finding.
+                    # Printed after the cost, a learner's own sentence lands as the punchline
+                    # to a decay warning — their unkept promise, quoted at them. Printed
+                    # before it, between amnesty and the number, it is what it was written to
+                    # be: the thing they decided, in their words, at the moment it names.
+                    #
+                    # `commit` has stored this since v0.6 and NOTHING displayed it until now
+                    # — the transfer_probe defect, on the strongest licensed adherence lever
+                    # in the repo. What the direct RCTs tested is the read-back (Messmer 2022;
+                    # Prestwich 2010), not the storing.
+                    #
+                    # Rationed by the return-event rule alone: no daily fallback, because a
+                    # sentence you wrote becomes nagging the moment it greets you every
+                    # session. Steady-state re-anchoring is the renewal offer's job, in
+                    # session, where it can be declined.
+                    c = model["settings"].get("commitment")
+                    if isinstance(c, dict) and c.get("cue") and c.get("action"):
+                        # ensure_ascii=False so the learner's OWN SENTENCE reads like their
+                        # sentence — a Vietnamese cue or an em dash must not come back as
+                        # `—`. The escaping that matters for safety (quotes, newlines,
+                        # control chars) is unaffected, so a commitment carrying a fake
+                        # `[engram]` line still arrives as one inert quoted literal: hook
+                        # output is injected into an agent's context.
+                        print("[engram] your plan: %s"
+                              % json.dumps("%s — %s" % (c["cue"], c["action"]),
+                                           ensure_ascii=False)[:400])
                     mean_now = _mean_recall_now(due)
                     if mean_now is not None and mean_now < 0.90:
                         subject = ("that one sits" if len(due) == 1
@@ -3882,6 +5226,404 @@ def cmd_path(_args):
 
 # ---------------------------------------------------------------- refit
 
+# ── THE FITTING LADDER (v1.6, docs/13 §2.6) ──────────────────────────────────────────
+#
+# "Fits your memory" has been one coarse interval multiplier since v0.2, and no real user
+# has ever earned even that. The measured picture: personalized fitting is worth about as
+# much as TWO algorithm-version upgrades (fitted 4.5 matches or beats default-parameter
+# FSRS-6 and FSRS-7 on the 10k-user benchmark), and production Anki fits the first four
+# parameters from as few as 8 usable reviews.
+#
+# The tiers mirror upstream practice, with Engram's floors set deliberately higher: this
+# project's brand is never shipping a number it cannot stand behind, and a fit nobody can
+# validate per-user is exactly such a number. The gap between our floor and upstream's is
+# POLICY, not evidence, and says so.
+FIT_MIN_GAIN = 1e-4      # a fit must beat the incumbent MATERIALLY, not by float noise
+REFIT_FORCE_MIN = 5      # even --force may not rescale a whole account off ~nothing
+FIT_TIER1_MIN = 64        # S0-only (upstream fits S0 from 8; we want a real sample)
+FIT_TIER2_MIN = 400       # full vector (upstream's own floor is 64; see above)
+FIT_W_BOUNDS = [(0.05, 100.0)] * 4 + [(1.0, 10.0), (0.1, 5.0), (0.1, 5.0), (0.0, 0.9),
+                                      (-2.0, 3.0), (0.0, 0.8), (0.01, 4.0), (0.01, 4.0),
+                                      (0.01, 2.0), (0.01, 0.8), (0.01, 4.0), (0.0, 1.0),
+                                      (1.0, 6.0)]
+
+def _fit_sample(receipts):
+    """(first_rating_grade, elapsed_days, recalled) for every USABLE review.
+
+    Usable = a genuine retention review with a recorded prediction and real elapsed time.
+    Same-day rows are excluded upstream (`relearn`, and the elapsed guard) because their
+    retrievability is 1.0 by construction and would bias both sides of the fit — G11."""
+    by_node = _by_node(receipts)
+    out = []
+    for (_t, _n), slot in by_node.items():
+        first = slot["first"]
+        g = RATINGS.get(first.get("rating"))
+        if not g:
+            continue
+        prev_ts = first.get("ts")
+        for r in slot["reviews"]:
+            if r.get("relearn") is True:
+                continue
+            elapsed = days_between(prev_ts, r.get("ts"))
+            rv = as_number(r.get("retrievability"))
+            if elapsed is None or elapsed <= 0 or rv is None or rv >= 1.0:
+                prev_ts = r.get("ts") or prev_ts
+                continue
+            # ⚠ THE FIRST REVIEW OF A NODE IS THE ONLY ROW S0 CAN LEARN FROM, and it must
+            # carry s_before = 0 so the loss RECOMPUTES stability from the candidate weights.
+            # The first cut passed the RECORDED `s_before` on every row — which was computed
+            # under the OLD weights — so `_fit_loss` never depended on w[0..3] and the S0
+            # fitter was a NO-OP on real receipts. It looked fine (loss fell a hair, output
+            # monotone) because the synthetic instrument test happened to pass 0.0 by hand.
+            # Found by mutating the tier floor: removing the gate changed nothing, because
+            # there was nothing to gate. (§4.5, and it is the sharpest catch of this release.)
+            is_first = not any(row[4] == (_t, _n) for row in out)
+            out.append((g, elapsed, 1.0 if r.get("rating") != "again" else 0.0,
+                        0.0 if is_first else (as_number(r.get("s_before")) or 0.0),
+                        (_t, _n)))
+            prev_ts = r.get("ts") or prev_ts
+    return out
+
+def _fit_loss(w, sample):
+    """Binary cross-entropy of predicted recall vs what happened. Lower is better."""
+    if not sample:
+        return None
+    tot = 0.0
+    for row in sample:
+        g, elapsed, recalled, s_before = row[0], row[1], row[2], row[3]
+        s = s_before if s_before > 0 else init_stability(g, w)
+        pr = clamp(retrievability(elapsed, s), 1e-6, 1 - 1e-6)
+        tot += -(recalled * math.log(pr) + (1.0 - recalled) * math.log(1.0 - pr))
+    return tot / float(len(sample))
+
+def _fit_s0(sample, base):
+    """Tier 1: the four initial-stability weights, one per first rating.
+
+    Upstream's recipe, transposed: a 1-D search per rating group, an L1 pull toward the
+    default so a thin group cannot run away, and a monotonicity repair afterwards — S0 must
+    not decrease as the first rating improves, or the schedule contradicts itself."""
+    w = list(base)
+    for g in (1, 2, 3, 4):
+        # FIRST reviews only (s_before == 0): those are the rows whose predicted stability
+        # IS w[g-1]. A later review's stability came from the previous transition and tells
+        # us nothing about the initial value.
+        #
+        # ⚠ Honest note, because the mutation gate asked: this filter is CLARITY, not a
+        # correctness guard. Later rows carry a fixed `s_before`, so their loss does not
+        # depend on the candidate at all — including them would add a constant and leave the
+        # argmin identical (verified). The load-bearing line is the `is_first` zeroing in
+        # `_fit_sample`; mutate THAT and the fit stops working, which is what the check pins.
+        grp = [row for row in sample if row[0] == g and row[3] == 0.0]
+        if len(grp) < 4:
+            continue                       # too thin to move: keep the default, honestly
+        best, best_loss = w[g - 1], None
+        for cand in [0.1 * (1.15 ** i) for i in range(60)]:
+            trial = list(w); trial[g - 1] = cand
+            l = _fit_loss(trial, grp)
+            if l is None:
+                continue
+            # L1 prior toward the shipped default, so a thin group cannot run away.
+            # ⚠ DIVIDED BY THE GROUP SIZE, because `_fit_loss` returns a MEAN while
+            # upstream's identical-looking prior sits beside a SUM. Un-scaled it is ~1.0
+            # against a loss difference of ~0.07 — the prior wins every time and the fitter
+            # silently never moves. It "worked" (no crash, monotone output, loss went down a
+            # hair) and recovered 3.79 for a true 20.0. Caught only by the §5.5 instrument
+            # test: generate data from KNOWN parameters and demand recovery.
+            l += abs(cand - base[g - 1]) / (16.0 * len(grp))
+            if best_loss is None or l < best_loss:
+                best, best_loss = cand, l
+        w[g - 1] = best
+    for i in range(1, 4):                  # monotonicity repair across ratings
+        w[i] = max(w[i], w[i - 1])
+    return w
+
+def _fit_full(sample, base):
+    """Tier 2: coordinate descent over the whole vector, hard-clamped.
+
+    Deliberately simple and deliberately bounded. The engine is stdlib-only, and it does not
+    need a framework: production `fsrs-rs` replaced its ML framework with hand-derived
+    gradients, so a framework-free fit is the shipping norm, not a compromise. What it DOES
+    need is the safety scaffolding — bounds, a prior, and an acceptance check — because the
+    failure mode at low n is a confident overfit, not a crash."""
+    w = list(base)
+    for _sweep in range(3):
+        for i, (lo, hi) in enumerate(FIT_W_BOUNDS):
+            cur = w[i]
+            best, best_loss = cur, _fit_loss(w, sample)
+            if best_loss is None:
+                return w
+            for scale in (0.8, 0.9, 1.1, 1.25):
+                cand = clamp(cur * scale if cur else (lo + hi) / 2.0, lo, hi)
+                trial = list(w); trial[i] = cand
+                l = _fit_loss(trial, sample)
+                if l is not None and l < best_loss:
+                    best, best_loss = cand, l
+            w[i] = best
+    for i in range(1, 4):
+        w[i] = max(w[i], w[i - 1])
+    return w
+
+def learner_weights(model):
+    """The learner's fitted vector, or None. Validated: a hand-edited model must never
+    push garbage into the scheduler — wrong length, wrong type, or out of bounds means the
+    engine falls back to the shipped defaults rather than trusting the file."""
+    fp = (model.get("memory") or {}).get("fsrs_params")
+    if not isinstance(fp, dict):
+        return None
+    vec = fp.get("w")
+    if not isinstance(vec, list) or len(vec) != len(W):
+        return None
+    out = []
+    for i, v in enumerate(vec):
+        n = as_number(v)
+        if n is None:
+            return None
+        lo, hi = FIT_W_BOUNDS[i]
+        out.append(clamp(n, lo, hi))
+    return out
+
+def workload_curve(receipts, model):
+    """Reviews/day and projected retention across a desired-retention grid (v1.6).
+
+    NOT a recommendation. Anki — holding the largest review dataset in existence — REMOVED
+    its "compute minimum recommended retention" feature in 25.07 and fell back to a
+    simulator plus human judgment; and every implementation of it needs per-review DURATION
+    telemetry, which Engram's receipts do not carry and could not honestly attribute (a
+    review here is embedded in a tutoring dialogue). So the engine draws the trade-off and
+    the learner chooses. Auto-setting this number would be theatre on top of a measurement
+    nobody made.
+
+    The curve is the learner's OWN: it uses their fitted (or default) parameters and the
+    stabilities actually on their graph."""
+    stabs = []
+    for _t, g in iter_graphs():
+        for node in (g.get("nodes") or {}).values():
+            if not isinstance(node, dict) or is_retired(node):
+                continue
+            s = as_number(_fsrs_of(node).get("s"))
+            if s and s > 0:
+                stabs.append(s)
+    if not stabs:
+        return {"points": [], "n_nodes": 0,
+                "read": "nothing scheduled yet — no workload to trade off"}
+    im = as_number((model.get("memory") or {}).get("interval_multiplier"), 1.0)
+    cur = as_number((model.get("memory") or {}).get("desired_retention"), RETENTION_DEFAULT)
+    points = []
+    for target in (0.80, 0.85, 0.90, 0.95):
+        ivls = [interval_for(s, target, im) for s in stabs]
+        per_day = sum(1.0 / max(1, i) for i in ivls)
+        points.append({"desired_retention": target,
+                       "reviews_per_day": round(per_day, 2),
+                       "mean_interval_days": round(sum(ivls) / float(len(ivls)), 1)})
+    base = next((pt for pt in points if abs(pt["desired_retention"] - 0.90) < 1e-9), points[0])
+    return {"points": points, "n_nodes": len(stabs), "current": cur,
+            "guardrails": "default 0.90; workload climbs steeply above it; never above 0.97",
+            "basis": "model-derived (your own stabilities through the FSRS interval formula); "
+                     "NOT a recommendation — Anki removed theirs, and Engram's receipts carry "
+                     "no review durations to price the trade honestly (docs/13 §2.6)",
+            "read": ("at %d%% desired retention you'd clear about %.1f reviews a day across "
+                     "%d scheduled concepts; raising it to 95%% roughly %s that."
+                     % (round(base["desired_retention"] * 100), base["reviews_per_day"],
+                        len(stabs),
+                        "doubles" if points[-1]["reviews_per_day"] > 1.7 * base["reviews_per_day"]
+                        else "increases"))}
+
+# ── ARTICLE 12 · THE ADAPTATION LEDGER (v1.8) ────────────────────────────────────────
+#
+# Engram computes a great deal about a learner and steers on almost none of it. Making it
+# steer is the v2.0 thesis — and it is one hallucinated correlation away from a horoscope.
+# So every adaptation the SYSTEM proposes is: computed by the engine from receipts, offered
+# with its evidence quoted, applied only on consent, written to an append-only ledger, and
+# reversible. Nothing here infers a trait, and nothing applies itself.
+ADAPTATIONS_FILE = "adaptations.jsonl"
+PROPOSAL_MAX = 3          # a screen of "suggestions" is a nag; three is an offer
+
+def record_adaptation(field, before, after, evidence, grade, source="consented"):
+    """Append one ledger row. The consent flow is the ONLY writer (invariant 15)."""
+    append_jsonl(p(ADAPTATIONS_FILE),
+                 {"ts": today().isoformat(), "field": field, "from": before, "to": after,
+                  "evidence": evidence, "grade": grade, "source": source,
+                  "reversible": True})
+
+def _sessions_by_daypart(sessions):
+    """DESCRIPTIVE session facts. Chronotype scheduling stays killed (>80% of adult studies
+    find no main effect, and no intervention study exists) — this describes, it never
+    schedules, and `/coach` is told so in as many words."""
+    out = {}
+    for s in sessions:
+        ts = s.get("ts") if isinstance(s, dict) else None
+        if not isinstance(ts, str):
+            continue
+        out[ts[:7]] = out.get(ts[:7], 0) + 1        # by month: honest, and not a chronotype
+    return out
+
+def compute_proposals(receipts, model, stats_like=None):
+    """At most three adaptations the ENGINE can justify from this learner's own receipts.
+
+    Read-only (invariant 11). Every proposal carries its evidence and its grade —
+    `evidence-backed` where a replicated finding licenses the SHAPE of the move,
+    `model-derived` where the engine's own arithmetic decides it, `heuristic` otherwise —
+    and `/coach` is required to quote both.
+
+    THE FAMILIES ARE CLOSED, and that is the whole safety argument. Adaptivity's evidence
+    base is mostly a graveyard: learning styles (dead), the general aptitude-treatment
+    program (dead — prior-knowledge x guidance is the one replicated survivor), chronotype
+    scheduling (no main effect in adults), learner control over method (worse than
+    non-personalized). What survives is: assistance level from demonstrated prior knowledge,
+    scheduling from individually fitted forgetting, metacognitive prompts that are specific
+    and fading, and small real choices. Nothing else may be proposed, ever."""
+    out = []
+    # Every read here has to survive a hand-edited state: `stats` calls this on every run,
+    # so a garbage receipt must degrade, never brick (§4.7). The fuzz found 472 crashes in
+    # 600 states the moment this function joined the stats path — an unhashable `topic`
+    # poisoning the `firsts` dict key, which is the same shape of bug `_by_node` was
+    # hardened against in v0.6 and which every new receipt-walking function re-earns.
+    settings = model.get("settings") if isinstance(model.get("settings"), dict) else {}
+    sessions = [s for s in read_jsonl(p("sessions.jsonl")) if isinstance(s, dict)]
+
+    # 1 · SESSION SHAPE — from completion telemetry, not preference (model-derived).
+    recent = [s for s in sessions if s.get("kind") in ("learn", "review")
+              and as_number(s.get("items")) is not None]        # a MISSING count is not zero
+    short = [s for s in recent[-8:] if (as_number(s.get("items")) or 0) <= 1]
+    if len(recent) >= 6 and len(short) >= 5 and settings.get("default_mode") != "sprint":
+        out.append({
+            "id": "session-shape", "field": "settings.default_mode",
+            "current": settings.get("default_mode"), "proposed": "sprint",
+            "evidence": ("%d of your last %d sessions covered one item or fewer — the mode "
+                         "you have set is sized for two to three"
+                         % (len(short), len(recent[-8:]))),
+            "grade": "model-derived"})
+
+    # 2 · SCAFFOLD ENTRY — the one replicated aptitude-treatment interaction there is
+    #     (expertise reversal: assistance helps novices d=+0.505, harms the knowledgeable
+    #     d=-0.428). Proposed ONLY from measured first-attempt outcomes, and only upward
+    #     when the evidence is clean — the meta-analysts' own asymmetry says assist when
+    #     unsure, so the engine never proposes REMOVING assistance on thin data.
+    firsts = {}
+    for r in receipts:
+        if not isinstance(r, dict) or r.get("kind") != "encode" or not r.get("rating"):
+            continue
+        topic, node = r.get("topic"), r.get("node")
+        if not isinstance(topic, str) or not isinstance(node, str):
+            continue                # an unhashable key would take the whole command down
+        key = (topic, node)
+        if key not in firsts:
+            firsts[key] = r
+    clean = [r for r in firsts.values() if r.get("grade") == "recalled"]
+    if len(firsts) >= 12 and len(clean) >= int(0.9 * len(firsts)):
+        out.append({
+            "id": "scaffold-entry", "field": "challenge_band.target_success",
+            "current": (model.get("challenge_band") or {}).get("target_success"),
+            "proposed": 0.80,
+            "evidence": ("%d of your last %d first attempts were clean — you are being met "
+                         "below your level, and assistance measurably costs the "
+                         "already-knowledgeable" % (len(clean), len(firsts))),
+            "grade": "evidence-backed"})
+
+    # 3 · DESIRED RETENTION — never a number the engine invents; it points at the CURVE.
+    wl = stats_like if isinstance(stats_like, dict) else None
+    if wl and wl.get("points") and len(wl["points"]) > 1:
+        per_day = {round(pt["desired_retention"], 2): pt["reviews_per_day"]
+                   for pt in wl["points"]}
+        cur = as_number((model.get("memory") or {}).get("desired_retention"), 0.9)
+        if per_day.get(0.90) and per_day[0.90] > 12 and cur >= 0.90:
+            out.append({
+                "id": "workload", "field": "memory.desired_retention",
+                "current": cur, "proposed": None,          # ← deliberately no number
+                "evidence": ("your schedule is asking for ~%.0f reviews a day at %d%%; the "
+                             "curve in `stats.workload` shows what each setting costs"
+                             % (per_day[0.90], round(cur * 100))),
+                "grade": "model-derived",
+                "note": ("the engine does NOT recommend a value — Anki removed its own "
+                         "auto-recommendation and our receipts carry no review durations "
+                         "to price the trade honestly. Show the curve; they choose.")})
+
+    # 4 · SRL PROMPT CADENCE — specific, feedback-paired, and FADING. Generic prompting at
+    #     scale is a documented null; the moderators that make it work (specificity,
+    #     feedback, adaptivity) are the conditions, not decoration.
+    # THROUGH THE SHARED PREDICATE, not a raw kind filter — a bare CLI `rate` writes a
+    # node's ONLY receipt as kind=review, which every other surface correctly treats as the
+    # ENCODING event. Filtering here directly produced "4 of your 12 confidence-rated
+    # reviews were high-confidence misses" on a state whose own `stats.reviews` was 0 — and
+    # that sentence is what `record_adaptation` writes into the append-only ledger.
+    conf = [r for r in _review_receipts(receipts)
+            if as_number(r.get("confidence")) is not None and r.get("grade")]
+    overconf = [r for r in conf if (as_number(r.get("confidence")) or 0) >= 70
+                and r.get("grade") == "lapsed"]
+    if len(conf) >= 10 and len(overconf) >= 3 and settings.get("srl", "on") != "off":
+        out.append({
+            "id": "srl-calibration", "field": "prompt:calibration",
+            "current": None, "proposed": "one calibration line at the review close",
+            "evidence": ("%d of your %d confidence-rated reviews were high-confidence misses "
+                         "— that specific gap is what a calibration prompt is for"
+                         % (len(overconf), len(conf))),
+            "grade": "evidence-backed",
+            "note": "fades after two clean weeks; `settings.srl = off` silences it"})
+    # A recent decline removes the proposal entirely — the learner already answered.
+    declined = declined_proposals()
+    out = [pr for pr in out if pr.get("id") not in declined]
+    return out[:PROPOSAL_MAX]
+
+PROPOSAL_DECLINE_DAYS = 60   # a declined proposal stays gone this long, then may return
+                             # ONCE — the evidence may genuinely have changed by then
+
+def declined_proposals():
+    """Proposal ids the learner has said no to recently (v1.9.1).
+
+    "No is free" was true for a single check-in and charged in instalments after it: a
+    declined proposal returned every week, unchanged, forever. A refusal the system forgets
+    is not a refusal — it is a delay. The ledger already exists; the decline goes in it."""
+    out = {}
+    t_ = today()
+    for row in read_jsonl(p(ADAPTATIONS_FILE)):
+        if not isinstance(row, dict) or row.get("source") != "declined":
+            continue
+        pid = row.get("proposal")
+        d = safe_date(row.get("ts"))
+        if isinstance(pid, str) and d and (t_ - d).days <= PROPOSAL_DECLINE_DAYS:
+            out[pid] = row.get("ts")
+    return out
+
+def cmd_propose(args):
+    """Read-only — EXCEPT `--decline`, which records a refusal so it is not re-asked."""
+    if getattr(args, "decline", None):
+        pid = args.decline
+        acquire_lock()
+        try:
+            append_jsonl(p(ADAPTATIONS_FILE),
+                         {"ts": today().isoformat(), "field": "proposal:%s" % pid,
+                          "proposal": pid, "from": None, "to": None,
+                          "evidence": "declined by the learner", "grade": "learner",
+                          "source": "declined", "reversible": True})
+        finally:
+            release_lock()
+        emit({"declined": pid, "quiet_for_days": PROPOSAL_DECLINE_DAYS,
+              "read": ("noted — %s will not be offered again for %d days. A refusal the "
+                       "system forgets is a delay, not a refusal."
+                       % (pid, PROPOSAL_DECLINE_DAYS))})
+        return
+    receipts = collect_receipts()
+    model = read_model()
+    props = compute_proposals(receipts, model, workload_curve(receipts, model))
+    emit({"proposals": props, "n": len(props),
+          "families": ["session-shape", "scaffold-entry", "workload", "srl-calibration"],
+          "read": ("nothing to propose — the engine only steers on families with surviving "
+                   "evidence, and none of them has enough of your data yet" if not props else
+                   "%d proposal%s, each with its evidence; none is applied until you say so"
+                   % (len(props), "" if len(props) == 1 else "s")),
+          "contract": ("proposed by the engine from receipts · consented by you · logged with "
+                       "its evidence · reversible (Article 12). The engine never infers a "
+                       "trait and never applies a change itself.")})
+
+def cmd_adaptations(_args):
+    """The ledger: every adaptation, its evidence, and whether it is still in force."""
+    rows = [r for r in read_jsonl(p(ADAPTATIONS_FILE)) if isinstance(r, dict)]
+    emit({"n": len(rows), "adaptations": rows,
+          "read": ("no adaptation has ever been applied — every setting is where you or the "
+                   "defaults put it" if not rows else
+                   "%d adaptation%s on record, newest last; every one is reversible"
+                   % (len(rows), "" if len(rows) == 1 else "s"))})
+
 def cmd_refit(args):
     """Coarse per-user schedule fit (v1): a single interval multiplier.
 
@@ -3889,9 +5631,16 @@ def cmd_refit(args):
     If observed recall differs from predicted, rescale intervals along the
     FSRS power forgetting curve so predictions match behavior. Full FSRS
     parameter optimization is out of scope for v1 (documented in README)."""
+    # ⚠ G11: a same-day row carries `retrievability == 1.0` by construction (elapsed 0 on the
+    # power curve), so it inflates BOTH `predicted` and `observed` and biases the multiplier
+    # toward "your memory is better than the model thinks". Upstream FSRS's own training
+    # filter is `(i > 1 AND delta_t > 0)` for exactly this reason. `relearn` rows are the
+    # v1.5 source of them; the `< 1.0` guard catches any that predate the stamp.
     receipts = [r for r in collect_receipts()
                 if r.get("kind") == "review" and r.get("rating")
-                and r.get("retrievability") is not None]
+                and r.get("relearn") is not True
+                and r.get("retrievability") is not None
+                and as_number(r.get("retrievability"), 1.0) < 1.0]
     n = len(receipts)
     if n == 0:
         emit({"ok": False, "reason": "no review receipts with predictions yet",
@@ -3901,6 +5650,58 @@ def cmd_refit(args):
         emit({"ok": False, "reason": "need >=50 review receipts with predictions, have %d" % n,
               "hint": "keep reviewing; refit is meaningful only with real evidence"})
         return
+    # ⚠ `--force` bypassed the floor for the REPORTED parameter fit and left the
+    # `interval_multiplier` — the number that multiplies every future due date — writing
+    # unconditionally underneath it. One receipt produced a 1.5x stretch of the entire
+    # account, narrated as "memory holds better than the default model". The escape hatch
+    # exists for tests; it may not rescale a real learner's schedule off a single datum.
+    if n < REFIT_FORCE_MIN and args.force:
+        emit({"ok": False, "forced": True, "n_reviews": n,
+              "reason": ("--force still needs >=%d review receipts to move the interval "
+                         "multiplier, have %d" % (REFIT_FORCE_MIN, n)),
+              "hint": "the multiplier scales EVERY future due date; it is not a test knob"})
+        return
+
+    # ── TIER 1 / TIER 2: fit the MODEL, not just a multiplier (v1.6) ──────────────────
+    #
+    # Runs before the multiplier, because they answer a strictly better question: the
+    # multiplier rescales every interval by one number, while these fit the curve the
+    # intervals come FROM. Both are gated, both are labeled, and neither ships a fit that
+    # does not beat what the learner already has — Anki's own "parameters appear optimal"
+    # behaviour, and the only guard that makes a low-n fit safe.
+    m0 = load_model()
+    sample = _fit_sample(collect_receipts())
+    tier, fitted, before_loss, after_loss = 0, None, None, None
+    if len(sample) >= FIT_TIER1_MIN or (args.force and sample):
+        base = learner_weights(m0) or list(W)
+        before_loss = _fit_loss(base, sample)
+        cand = (_fit_full(sample, base) if len(sample) >= FIT_TIER2_MIN
+                else _fit_s0(sample, base))
+        tier = 2 if len(sample) >= FIT_TIER2_MIN else 1
+        after_loss = _fit_loss(cand, sample)
+        # THE ACCEPTANCE CHECK. A fit that does not improve the learner's own data is not a
+        # fit, it is noise with 17 decimal places — and shipping it would move every future
+        # due date on the strength of nothing.
+        # A MATERIAL margin, not any float difference: re-running on unchanged evidence
+        # produced a 1.5e-8 delta and the line "they beat your previous ones on your own
+        # reviews", rewriting the weights each time.
+        if (before_loss is not None and after_loss is not None
+                and (before_loss - after_loss) > FIT_MIN_GAIN):
+            fitted = cand
+        else:
+            tier = 0
+    if fitted is not None:
+        m0.setdefault("memory", {})["fsrs_params"] = {
+            "w": [round(x, 4) for x in fitted],
+            "tier": tier, "n_usable": len(sample),
+            "fitted": today().isoformat(),
+            "loss_before": round(before_loss, 5), "loss_after": round(after_loss, 5),
+            # inv. 14: the label rides WITH the number, in the payload
+            "basis": ("fitted from %d usable reviews (tier %d); FSRS is a flashcard-derived "
+                      "model with no published validation on conceptual or procedural "
+                      "material — docs/13 §2.6" % (len(sample), tier)),
+        }
+        write_json(p("learner-model.json"), m0)
     observed = sum(1.0 for r in receipts if r["rating"] != "again") / n
     predicted = sum(r["retrievability"] for r in receipts) / n
     def inv(r):  # proportional to elapsed/S at recall probability r (power curve)
@@ -3911,7 +5712,20 @@ def cmd_refit(args):
     m["memory"]["interval_multiplier"] = round(multiplier, 3)
     m["memory"]["last_refit"] = today().isoformat()
     write_json(p("learner-model.json"), m)
-    emit({"ok": True, "n_reviews": n, "observed_recall": round(observed, 3),
+    emit({"ok": True, "n_reviews": n,
+          "fit": {"tier": tier, "n_usable": len(sample),
+                  "loss_before": (round(before_loss, 5) if before_loss is not None else None),
+                  "loss_after": (round(after_loss, 5) if after_loss is not None else None),
+                  "accepted": fitted is not None,
+                  "next_tier_at": (FIT_TIER1_MIN if len(sample) < FIT_TIER1_MIN
+                                   else (FIT_TIER2_MIN if len(sample) < FIT_TIER2_MIN else None)),
+                  "read": ("parameters fitted (tier %d) — they beat your previous ones on your "
+                           "own reviews" % tier) if fitted is not None else
+                          ("no parameter fit: %d usable reviews, %d needed"
+                           % (len(sample), FIT_TIER1_MIN)) if len(sample) < FIT_TIER1_MIN else
+                          "a fit was computed and REFUSED — it did not beat your current "
+                          "parameters on your own data, so nothing changed"},
+          "observed_recall": round(observed, 3),
           "predicted_recall": round(predicted, 3),
           "interval_multiplier": {"before": prev, "after": round(multiplier, 3)},
           "read": ("intervals shortened — memory decays faster than the default model"
@@ -3989,7 +5803,10 @@ def _hash12(s):
 
 def cmd_export(args):
     """Write a text-stripped receipt bundle to a file. NO NETWORK. The agent posts, on consent."""
-    gh = compute_grader_health()
+    # The staleness teeth reach the export gate too (v1.4): a badge earned by a grader that is
+    # no longer the one grading you is not a badge, and a corpus assembled behind one would
+    # carry a QWK nobody re-earned. Contributing is exactly where that matters most.
+    gh = compute_grader_health(getattr(args, "grader_context", None))
     if gh["grader_unvalidated"] and not getattr(args, "allow_unvalidated", False):
         die("REFUSING TO EXPORT: the grader behind every one of these grades is %s (%s).\n"
             "  A finding aggregated from unaudited oracles is not a finding — it is noise with a\n"
@@ -4187,6 +6004,31 @@ def cmd_doctor(_args):
     info["issues"] = issues
     info["notes"] = notes
     info["ok"] = not issues
+    # v1.7: name the repair, and (only with --fix, only on confirmation) apply it.
+    info["fixes"] = _doctor_fixes(info)
+    if getattr(_args, "fix", False) and info["fixes"]:
+        applied = []
+        for f in info["fixes"]:
+            if f["kind"] != "restore-quarantined":
+                continue            # artifact registration is the smith's command to run
+            src = p("graphs", f["file"].split("/")[-1]) if "/" in f["file"] else p(f["file"])
+            if not os.path.exists(src):
+                continue
+            raw = read_json(src, default=None, quarantine=False)
+            if not isinstance(raw, dict) or not isinstance(raw.get("nodes"), dict):
+                applied.append({"file": f["file"], "restored": False,
+                                "why": "still unparseable or wrong shape — fix it by hand "
+                                       "first; a diagnostic must never restore garbage"})
+                continue
+            dest = src.rsplit(".corrupt.", 1)[0]
+            if os.path.exists(dest):
+                applied.append({"file": f["file"], "restored": False,
+                                "why": "a live file already exists at that path — refusing "
+                                       "to overwrite it"})
+                continue
+            os.rename(src, dest)
+            applied.append({"file": f["file"], "restored": True, "to": dest})
+        info["applied"] = applied
     emit(info)
 
 # ---------------------------------------------------------------- report
@@ -4236,6 +6078,31 @@ tr:last-child td{border-bottom:none}
 footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);
 color:var(--muted);font-size:12px}
 """
+
+def _doctor_fixes(d):
+    """Offered repairs for what `doctor` found — the commands, never the execution (v1.7).
+
+    `doctor` has always named the problem and stopped, which is right for a diagnostic and
+    wrong as the end of the road: an unregistered explorable or a quarantined file sits
+    there until a human happens to read a note. These are *offers*: each carries the exact
+    command, and `--fix` applies every repair it names — each validated first. The
+    ONE-AT-A-TIME confirmation lives in `/coach`, which offers them individually; the engine
+    batches. (The help text used to promise item-by-item confirmation the engine never
+    performed.) There is no `--yes`, deliberately — a repair of state nobody looked at is how
+    a diagnostic becomes a data-loss bug, and the absent flag is what forces a human in."""
+    out = []
+    for note in (d.get("notes") or []):
+        if "unregistered artifact file" in note and "artifact set" in note:
+            out.append({"kind": "register-artifact", "detail": note,
+                        "command": note.split("register with: ", 1)[-1].strip()})
+    for issue in (d.get("issues") or []):
+        if "quarantined corrupt files present" in issue:
+            for name in issue.split(":", 1)[-1].split(","):
+                name = name.strip()
+                if name:
+                    out.append({"kind": "restore-quarantined", "detail": issue, "file": name,
+                                "command": "engram.py doctor --fix   # validates JSON first"})
+    return out
 
 def cmd_report(args):
     stats = compute_stats()
@@ -4323,6 +6190,19 @@ def cmd_report(args):
     # and the user session had all walked straight past it, because every one of them reads JSON.
     if gh.get("stamp"):
         parts.append("<p class='note' style='color:var(--bad)'><b>%s</b></p>" % escape(gh["stamp"]))
+    # THE OTHER GRADER (v1.4). `grader_health` above is the blind assessor, measured against
+    # the gold set. The TUTOR writes every /review receipt and, until now, nothing measured it
+    # — so its number reaches the page too, or it is a guard nobody reads (§4.8 Q4). Rendered
+    # in the neutral register: it is agreement with the assessor, never validity, and the
+    # direction is what matters, because a mean bias of zero is also what "inflates half,
+    # deflates half" looks like.
+    sg = stats.get("self_grading") or {}
+    if sg.get("n"):
+        parts.append("<p class='note'><b>tutor vs blind assessor:</b> %s</p>" % escape(sg["read"]))
+        if sg.get("tutor_higher"):
+            parts.append("<p class='note' style='color:var(--bad)'>the tutor graded ABOVE the "
+                         "blind assessor %d time%s — the only direction that can flatter.</p>"
+                         % (sg["tutor_higher"], "" if sg["tutor_higher"] == 1 else "s"))
     if any(b["n"] for b in ret["buckets"].values()):
         for key, label in (("early", "0–3d (still encoding)"), ("7d", "4–14d"),
                            ("30d", "15–59d"), ("90d", "60–179d"), ("180d+", "180d+")):
@@ -4344,6 +6224,13 @@ def cmd_report(args):
                      % (u["past_due_now"], "s" if u["past_due_now"] != 1 else "",
                         u["never_reviewed"],
                         int(round((u["projected_recall_now"] or 0) * 100))))
+    # v1.3: the retired exit reaches the PAGE, not just the JSON (§4.8 Q4 — the dashboard is
+    # the one surface a human actually looks at, and it is the one that lied in v0.7). Stated
+    # in the neutral register it deserves: this is a decision, not debt.
+    if u.get("retired"):
+        parts.append("<p class='note'>%d concept%s <b>retired by you</b> — off the queue on "
+                     "purpose, neither measured above nor counted as debt.</p>"
+                     % (u["retired"], "s" if u["retired"] != 1 else ""))
     if not ret["coverage"]["complete"]:
         parts.append("<p class='note' style='color:var(--bad)'><b>coverage incomplete — see above</b></p>")
 
@@ -4351,6 +6238,16 @@ def cmd_report(args):
     # yours. Rendered HERE because §4.8 Q4 now requires it: a number whose failure state reaches
     # the JSON, the CLI and the skill — and not the page a human actually looks at — is the exact
     # bug v0.7 shipped. "NO CAPABILITY HAS EVER BEEN MEASURED" belongs on the screen, in red.
+    # THE WORKLOAD TRADE-OFF (v1.6) — drawn on the page, recommended nowhere.
+    wl = stats.get("workload") or {}
+    if wl.get("points"):
+        parts.append("<h2>Workload vs retention — your own curve</h2>")
+        parts.append("<div class='chips'>%s</div>" % "".join(
+            "<span class='chip'>%d%% <b>%.1f/day</b></span>"
+            % (round(pt["desired_retention"] * 100), pt["reviews_per_day"])
+            for pt in wl["points"]))
+        parts.append("<p class='note'>%s</p>" % escape(wl.get("read", "")))
+        parts.append("<p class='note'>%s</p>" % escape(wl.get("basis", "")))
     tr = stats["transfer"]
     parts.append("<h2>Transfer — does the idea fire in different clothes?</h2>")
     if not tr["n"]:
@@ -5273,15 +7170,22 @@ def cmd_selftest(_args):
             "id": "hand", "ts": "2026-08-07", "topic": "m", "node": ids[3],
             "kind": "review", "rating": "excellent", "grade": None})   # truthy non-rating, no grade
         _RECEIPTS_CACHE.clear()
-        # confirm the fixture actually produces the None outcome the fix must survive (or the
-        # check is theatre — §4.5). If a future change stops _outcome from returning None here,
-        # this fails loudly rather than passing vacuously.
-        groups, _ = _experiment_outcomes(next(e2 for e2 in
+        # v1.9 STRENGTHENED THIS PROPERTY, so the check moved with it. An un-scoreable
+        # receipt used to enter the arm as a `None` that every downstream statistic had to
+        # survive; the metric registry now drops it AT THE SOURCE — it yields no datum, the
+        # same as "assigned but not yet reviewed", because *not measured* and *measured as a
+        # failure* are different facts and pooling them is the survivorship bug this repo
+        # keeps re-learning. The fixture still has to reach the branch, or the check is
+        # theatre (§4.5): three nodes score, the fourth cannot.
+        groups, detail = _experiment_outcomes(next(e2 for e2 in
                      _as_list(read_json(p("experiments.json"), [])) if e2.get("id") == x["id"]))
-        exercised = any(v is None for vs in groups.values() for v in vs)
+        scored = sum(len(v) for v in groups.values())
+        exercised = (scored == 3                      # the un-scoreable node contributed none
+                     and not any(v is None for vs in groups.values() for v in vs)
+                     and all(d["outcome"] is not None for d in detail))
         v = _capture_json(cmd_experiment, _ns(action="settle", id=x["id"], verdict=None,
                                               json=None, file=None, topic=None, node=None))
-        return exercised and isinstance(v, dict) and "read" in v   # RETURNED, did not TypeError
+        return exercised and isinstance(v, dict) and "read" in v   # RETURNED, did not brick
     check("a settle DEGRADES on an un-scoreable hand-edited receipt (never a TypeError brick)",
           fresh(_settle_survives_a_garbage_outcome))
 
@@ -6673,9 +8577,13 @@ def cmd_selftest(_args):
         for nid in ("a", "b", "c"):
             _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", grade="recalled",
                                    kind="encode", production="x"))
-        os.environ["ENGRAM_TODAY"] = "2026-07-13"
-        _capture(cmd_rate, _ns(topic="t", node="a", rating="easy", grade="recalled",
-                               kind="review", production="x"))      # `a` becomes healthy/far-out
+        # `a` is reviewed THROUGH the v1.5 dose window (capped 3d, then 9d) and then once
+        # more uncapped, so it ends up genuinely far-out. This also pins that the caps
+        # GRADUATE a node rather than trapping it in a short-interval loop forever.
+        for day in ("2026-07-13", "2026-07-16", "2026-07-25"):
+            os.environ["ENGRAM_TODAY"] = day
+            _capture(cmd_rate, _ns(topic="t", node="a", rating="easy", grade="recalled",
+                                   kind="review", production="x"))
         os.environ["ENGRAM_TODAY"] = "2026-08-20"                   # b, c now rotting
         d = _capture_json(cmd_decay, _ns(topic="t", horizon=30))
         r = _capture_json(cmd_retention, _ns())
@@ -8069,8 +9977,18 @@ def cmd_selftest(_args):
             _capture(cmd_rate, _ns(topic="big", node=nid, rating="good", kind="encode"))
         os.environ["ENGRAM_TODAY"] = "2026-07-20"
         for nid in order:
-            _capture(cmd_rate, _ns(topic="big", node=nid, rating="good", kind="review",
-                                   grade="recalled",
+            # The 5 classified procedure rows must be MISSES: v1.9.1 refuses `--error-class`
+            # on a `recalled` item, because a controlling error needs an error. Same 5
+            # classified rows, same n_classified, now a legal fixture.
+            # …and the SAME number of concept rows miss, so the two arms stay level and the
+            # read stays `indistinguishable` — the property this check is actually about.
+            # (Concept misses carry no error_class, by the same rule.)
+            classified = nid in ("p0", "p1", "p2", "p3", "p4")
+            missed = classified or nid in ("c0", "c1", "c2", "c3", "c4")
+            _capture(cmd_rate, _ns(topic="big", node=nid,
+                                   rating="hard" if missed else "good",
+                                   kind="review",
+                                   grade="partial" if missed else "recalled",
                                    error_class=("slip" if nid in ("p0", "p1", "p2", "p3")
                                                 else ("conceptual" if nid == "p4" else None))))
         bk = _capture_json(cmd_stats, _ns())["by_kind"]
@@ -8225,6 +10143,1161 @@ def cmd_selftest(_args):
     check("read_jsonl drops valid-JSON non-object lines (reads degrade, never brick)",
           fresh(_jsonl_non_object_lines))
 
+    # ══ v1.3 · THE KEPT WORD ═══════════════════════════════════════════════════════════
+    #
+    # -- savings ordering: the near-threshold item outranks the deeply-overdue one --
+    #    THE INSTRUMENT CHECK (§5.5): the fixture is built so the two orders genuinely
+    #    DIVERGE — an item that is maximally overdue but effectively dead must sort BELOW a
+    #    less-overdue item that is still cheap to save, which is the entire claim.
+    def _savings_order(h):
+        g = {"topic": "t", "title": "T", "order": ["dead", "live"], "nodes": {
+            "dead": {"claim": "D", "probe": "pd"}, "live": {"claim": "L", "probe": "pl"}}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        gr = load_graph("t")
+        # `dead`: tiny stability, retrieved 400 days ago  -> R ~ 0, nothing left to save
+        gr["nodes"]["dead"].update(state="review", fsrs={
+            "s": 0.5, "d": 5.0, "last": "2025-06-01", "due": "2025-06-03",
+            "reps": 1, "lapses": 0})
+        # `live`: healthy stability, a few days overdue   -> R still high, cheap to hold
+        gr["nodes"]["live"].update(state="review", fsrs={
+            "s": 20.0, "d": 5.0, "last": "2026-06-20", "due": "2026-07-01",
+            "reps": 3, "lapses": 0})
+        save_graph(gr)
+        overdue = [i["id"] for i in due_items(order="overdue")]
+        savings = [i["id"] for i in due_items(order="savings")]
+        capped = _capture_json(cmd_due, _ns(cap=1))
+        rows = due_items(order="savings")
+        return (overdue == ["dead", "live"]           # the order Engram always served
+                and savings == ["live", "dead"]       # the order the evidence prefers
+                and capped["items"][0]["id"] == "live"
+                and capped["order"] == "savings"
+                and "no human RCT" in capped["order_basis"]      # inv. 14: the label travels
+                # the parked item scores HIGHER raw savings and still sorts last — the whole
+                # point of the floor, and the assertion that separates it from a plain
+                # savings sort (which would have served the dead node first)
+                and rows[1]["savings_per_min"] > rows[0]["savings_per_min"]
+                and rows[1]["effectively_relearn"] is True
+                and rows[0]["effectively_relearn"] is False)
+    check("due --cap ranks by savings/min, not overdue-first, and carries its basis label",
+          fresh(_savings_order))
+
+    # -- the legacy contract is byte-identical: --limit still emits the bare list, old order --
+    def _due_limit_unchanged(h):
+        _add_ab()
+        for nid in ("a", "b"):
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-08-06"
+        legacy = _capture_json(cmd_due, _ns(limit=1))
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return isinstance(legacy, list) and len(legacy) == 1 and "order" not in str(legacy[0])
+    check("due --limit keeps the v1.2.2 shape and order (no silent behavior change)",
+          fresh(_due_limit_unchanged))
+
+    # -- savings and decay agree about the same node (§4.8 Q1: commands must not contradict) --
+    def _savings_matches_decay(h):
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-08-06"
+        d = _capture_json(cmd_decay, _ns(topic="t", horizon=DUE_HORIZON))
+        row = next(r for r in d["nodes"] if r["node"] == "a")
+        item = next(i for i in due_items(order="savings") if i["id"] == "a")
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return abs(row["r_now"] - item["r_now"]) < 1e-9
+    check("due savings and decay report the SAME r_now for the same node",
+          fresh(_savings_matches_decay))
+
+    # -- retire: leaves every queue, is COUNTED in every denominator it leaves, reverses --
+    def _retire_counts(h):
+        _add_ab()
+        for nid in ("a", "b"):
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-08-06"
+        before = _capture_json(cmd_adherence, _ns())["loop_closure"]
+        _capture(cmd_retire, _ns(topic="t", node="a"))
+        _RECEIPTS_CACHE.clear()
+        after = _capture_json(cmd_adherence, _ns())["loop_closure"]
+        ret = _capture_json(cmd_retention, _ns())["unmeasured"]
+        queued = [i["id"] for i in due_items()]
+        row = _capture_json(cmd_topics, _ns())[0]
+        html = open(_capture_json(cmd_report, _ns())["path"], encoding="utf-8").read()
+        _capture(cmd_retire, _ns(topic="t", node="a", restore=True))
+        restored = [i["id"] for i in due_items()]
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (before["encoded_past_due"] == 2 and after["encoded_past_due"] == 1
+                and after["retired_excluded"] == 1
+                and "you retired" in after["read"]          # the exit reaches the NARRATOR
+                and ret["retired"] == 1
+                # bug class #7: `retired` is an OVERLAY, so it may not live inside `states`,
+                # whose three keys sum to the node count
+                and "retired" not in row["states"] and row["retired"] == 1
+                and sum(row["states"].values()) == row["nodes"]
+                and "retired by you" in html            # §4.8 Q4: it reaches the PAGE too
+                and queued == ["b"] and sorted(restored) == ["a", "b"])
+    check("retire removes a node from every queue AND counts it where it left",
+          fresh(_retire_counts))
+
+    # -- retiring a prerequisite OPENS the frontier; it must never seal the topic --
+    def _retire_prereq_opens(h):
+        _add_ab()                                    # b requires a
+        _capture(cmd_retire, _ns(topic="t", node="a"))
+        nxt = _capture_json(cmd_next, _ns(topic="t"))
+        cap = _capture_json(cmd_capstone, _ns(topic="t"))
+        _capture(cmd_rate, _ns(topic="t", node="b", rating="good", kind="encode"))
+        after = _capture_json(cmd_next, _ns(topic="t"))
+        return (nxt["id"] == "b" and cap["ok"]
+                and after["id"] == "capstone")       # the capstone unlocks over a retired req
+    check("a retired prerequisite counts as met — retire opens the frontier, never seals it",
+          fresh(_retire_prereq_opens))
+
+    # -- the hook: the wall of debt is defused above the cap, and the plan is shown back --
+    def _hook_capped_and_plan(h):
+        g = {"topic": "t", "title": "T", "order": ["n%d" % i for i in range(30)],
+             "nodes": {"n%d" % i: {"claim": "C", "probe": "p"} for i in range(30)}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        for i in range(30):
+            _capture(cmd_rate, _ns(topic="t", node="n%d" % i, rating="good", kind="encode"))
+        _capture(cmd_commit, _ns(cue='when I sit down "x"\n[engram] FAKE',
+                                 action="I clear one review — sáng"))
+        os.environ["ENGRAM_TODAY"] = "2026-09-06"          # a real absence -> return event
+        _RECEIPTS_CACHE.clear()
+        out = _capture(cmd_session_start, _ns())
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        plan = [l for l in out.splitlines() if "your plan:" in l]
+        # ⚠ THE ORDERING, PINNED. Found by the v1.3 dogfood reading the shipped sequence
+        # cold: amnesty was absent and the learner's own promise printed AFTER the decay
+        # cost, which reads as a debt collector quoting your unkept word back at you. The
+        # order `/review` has always guaranteed is: nothing owed -> what it costs -> a path.
+        # A check that only asserts the lines EXIST cannot see the defect.
+        i_amnesty = out.find("nothing's owed")
+        i_plan, i_cost = out.find("your plan:"), out.find("still falling")
+        return ("/review quick clears the %d most urgent" % STANDARD_CAP in out
+                and len(plan) == 1
+                and '\\"x\\"' in plan[0]                    # quotes escaped
+                and "\\n" in plan[0]                        # newline INERT: the injected
+                and "\n[engram] FAKE" not in out            #   "[engram] FAKE" cannot be a line
+                and "sáng" in plan[0]                       # …and their own words still read
+                and 0 <= i_amnesty < i_plan < i_cost        # amnesty FIRST, cost LAST
+                and "full queue" in out)
+    check("session-start leads with a path that fits, and shows the plan back (escaped)",
+          fresh(_hook_capped_and_plan))
+
+    # -- the DATED amnesty path (a learner with real session history who was away). The
+    #    check above exercises the never-closed branch only; a mutation of the dated branch
+    #    left it green, which is §4.5's "the fixture never reaches the code under test".
+    def _hook_dated_amnesty(h):
+        _add_ab()
+        for nid in ("a", "b"):
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", kind="encode"))
+        _capture(cmd_log_session, _ns(kind="learn", minutes=10, items=2))
+        os.environ["ENGRAM_TODAY"] = "2026-07-13"          # +7d: the loop HAS closed once
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good"))
+        _capture(cmd_log_session, _ns(kind="review", minutes=2, items=1))
+        _RECEIPTS_CACHE.clear()
+        os.environ["ENGRAM_TODAY"] = "2026-08-20"          # 38 days away
+        out = _capture(cmd_session_start, _ns())
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return ("back after 38 days" in out
+                and "nothing's owed" in out
+                and out.index("nothing's owed") < out.index("still falling"))
+    check("the hook's amnesty is dated when it can be, and still comes FIRST",
+          fresh(_hook_dated_amnesty))
+
+    # -- and it stays SILENT about the plan on an ordinary session (no return event) --
+    def _plan_not_nagging(h):
+        _add_ab()
+        for nid in ("a", "b"):
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", kind="encode"))
+        _capture(cmd_commit, _ns(cue="tomorrow", action="I clear one"))
+        os.environ["ENGRAM_TODAY"] = "2026-08-06"
+        _RECEIPTS_CACHE.clear()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good"))   # loop HAS closed
+        _RECEIPTS_CACHE.clear()
+        os.environ["ENGRAM_TODAY"] = "2026-08-08"                     # 2 days later, not 7
+        out = _capture(cmd_session_start, _ns())
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return "due" in out and "your plan:" not in out
+    check("the plan line is a RETURN event, not a per-session line (anti-nag ration)",
+          fresh(_plan_not_nagging))
+
+    # -- commit renewal metadata: age_days drives the offer, history is bounded --
+    def _commit_age(h):
+        _capture(cmd_commit, _ns(cue="tomorrow", action="I clear one"))
+        os.environ["ENGRAM_TODAY"] = "2026-08-06"
+        renewed = _capture_json(cmd_commit, _ns(cue="tomorrow", action="I clear one"))
+        os.environ["ENGRAM_TODAY"] = "2026-09-06"
+        aged = _capture_json(cmd_commit, _ns())
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (renewed["age_days"] == 0 and renewed["commitment"]["set"] == "2026-07-06"
+                and renewed["commitment"]["renewed"] == ["2026-08-06"]
+                and aged["age_days"] == 31)
+    check("commit stamps renewals and emits age_days (the renewal offer's cadence)",
+          fresh(_commit_age))
+
+    # ══ v1.4 · THE AUDITED TUTOR ═══════════════════════════════════════════════════════
+    #
+    def _gold_runs(n_runs=3, mutate=None, subset=None):
+        """Build an audit payload from the real gold set. `mutate(i, item)` may change a grade."""
+        gold, _ = load_gold()
+        if subset is not None:
+            gold = subset
+        runs = []
+        for r in range(n_runs):
+            run = []
+            for i, g in enumerate(gold):
+                grade = g["gold_grade"]
+                if mutate:
+                    grade = mutate(i, g, r) or grade
+                run.append({"sid": g["sid"], "grade": grade, "rating": "good"})
+            runs.append(run)
+        return {"grader": "engram-assessor", "runs": runs}
+
+    # -- an AUDIT receipt records the verdict and touches NOTHING --
+    def _audit_never_reschedules(h):
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-16"
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good"))
+        before = json.dumps(load_graph("t")["nodes"]["a"], sort_keys=True)
+        out = _capture_json(cmd_rate, _ns(topic="t", node="a", rating="hard", kind="audit",
+                                          audited_rating="good", grade="partial"))
+        after = json.dumps(load_graph("t")["nodes"]["a"], sort_keys=True)
+        _RECEIPTS_CACHE.clear()
+        sg = _capture_json(cmd_stats, _ns())["self_grading"]
+        ad = _capture_json(cmd_adherence, _ns())
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (before == after and out["scheduled"] is False and out["applied"] is True
+                and sg["n"] == 1 and sg["tutor_higher"] == 1 and sg["agree"] == 0
+                # below the floor: counts, never a rate (the house rule)
+                and sg["insufficient_data"] is True and sg["qwk_vs_assessor"] is None
+                # …and it pollutes no learner population
+                and ad["loop_closure"]["first_review_done"] == 1
+                and _capture_json(cmd_stats, _ns())["reviews"] == 1
+                # ⚠ AND THE CASE THE GUARD ACTUALLY EXISTS FOR: an audit that is a node's
+                # FIRST receipt. `_by_node` treats a first receipt as the ENCODING EVENT —
+                # day 0 for every retention bucket — so a bare CLI `rate --kind audit` on a
+                # never-encoded node would invent an encoding that never happened. (The
+                # §4.5 mutation of the guard left every other assertion green: the fixture
+                # above always has the audit arrive last, so it never reached the line.)
+                and _audit_first_is_invisible())
+    def _audit_first_is_invisible():
+        _capture(cmd_rate, _ns(topic="t", node="b", rating="hard", kind="audit",
+                               audited_rating="good"))
+        _RECEIPTS_CACHE.clear()
+        ad = _capture_json(cmd_adherence, _ns())
+        ret = _capture_json(cmd_retention, _ns())
+        return (ad["funnel"]["nodes_encoded"] == 1          # `b` was never encoded by anyone
+                and ret["coverage"]["reviews_total"] == 1)
+    check("an audit receipt is recorded and reschedules NOTHING (audits inform)",
+          fresh(_audit_never_reschedules))
+
+    # -- self_grading's direction: the flattering direction is named, not averaged away --
+    def _self_grading_direction(h):
+        _add_ab()
+        for nid in ("a", "b"):
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-16"
+        for nid in ("a", "b"):
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good"))
+        # a tutor that inflates one and deflates one: MEAN BIAS ZERO, and that is the trap
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="hard", kind="audit",
+                               audited_rating="easy"))
+        _capture(cmd_rate, _ns(topic="t", node="b", rating="easy", kind="audit",
+                               audited_rating="hard"))
+        _RECEIPTS_CACHE.clear()
+        sg = _capture_json(cmd_stats, _ns())["self_grading"]
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (sg["n"] == 2 and sg["tutor_higher"] == 1 and sg["tutor_lower"] == 1
+                and "graded HIGHER 1" in sg["read"]
+                and "bounded by that chain" in sg["read"])   # the limit reaches the narrator
+    check("self_grading reports DIRECTION, so a zero mean bias cannot hide inflation",
+          fresh(_self_grading_direction))
+
+    # -- the canary: deterministic, band-stratified, and it can NEVER mint a pass --
+    def _canary_properties(h):
+        gold, _ = load_gold()
+        c1, c2 = canary_items(gold), canary_items(gold)
+        bands = {}
+        for it in c1:
+            bands[it["gold_grade"]] = bands.get(it["gold_grade"], 0) + 1
+        perfect = _capture_json(cmd_assessor_audit,
+                                _ns(json=json.dumps(_gold_runs(subset=c1)), canary=True))
+        inflate = _capture_json(cmd_assessor_audit, _ns(canary=True, json=json.dumps(
+            _gold_runs(subset=c1,
+                       mutate=lambda i, g, r: "recalled" if i == 0 and g["gold_grade"] != "recalled" else None))))
+        return ([i["sid"] for i in c1] == [i["sid"] for i in c2]         # deterministic
+                and len(c1) == CANARY_N
+                and len(bands) == 3 and bands["partial"] > bands["lapsed"]  # mid-band weighted,
+                                                                            # never mid-band ONLY
+                and perfect["scope"] == "canary"
+                and perfect["verdict"] == "canary-pass"      # ← never "pass": invariant 12
+                and inflate["verdict"] == "canary-fail"
+                and "can never certify a grader on its own" in " ".join(perfect["reasons"]))
+    check("the canary is stable, spans all three bands, and can never mint a `pass`",
+          fresh(_canary_properties))
+
+    # -- the badge expires when the grader changes, and a canary re-licenses it --
+    def _staleness(h):
+        _capture(cmd_assessor_audit, _ns(json=json.dumps(_gold_runs()),
+                                         grader_context="platform/model-A"))
+        same = _capture_json(cmd_grader_health, _ns(grader_context="platform/model-A"))
+        swapped = _capture_json(cmd_grader_health, _ns(grader_context="platform/model-B"))
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="encode"))
+        refused = False
+        try:
+            _capture(cmd_export, _ns(contributor="@x", grader_context="platform/model-B"))
+        except SystemExit:
+            refused = True
+        gold, _ = load_gold()
+        _capture(cmd_assessor_audit, _ns(canary=True, grader_context="platform/model-B",
+                                         json=json.dumps(_gold_runs(subset=canary_items(gold)))))
+        relicensed = _capture_json(cmd_grader_health, _ns(grader_context="platform/model-B"))
+        return (same["verdict"] == "pass" and same["grader_unvalidated"] is False
+                and swapped["verdict"] == "stale-model"
+                and swapped["grader_unvalidated"] is True
+                and "not the one grading you now" in swapped["stamp"]
+                and refused                                   # the export gate inherits it
+                # a canary must not BECOME the latest audit, or canary-pass would read as
+                # unreadable and void a badge that was fine
+                and relicensed["verdict"] == "pass")
+    check("a grader swap expires the badge (export refuses); a clean canary re-licenses it",
+          fresh(_staleness))
+
+    # -- band-stratified audit: the mid-band gets its own row --
+    def _by_band(h):
+        a = _capture_json(cmd_assessor_audit, _ns(json=json.dumps(_gold_runs()),
+                                                  grader_context="p/m"))
+        b = a["by_gold_band"]
+        return (set(b) == {"recalled", "partial", "lapsed"}
+                and all(v["judgments"] == v["items"] * 3 for v in b.values())
+                and b["partial"]["graded_up"] == 0)
+    check("the audit reports agreement per gold BAND (where graders actually fail)",
+          fresh(_by_band))
+
+    # -- the adjudication kit: monotone, and the gate comes first --
+    def _adjudication(h):
+        gold, _ = load_gold()
+        mk = lambda fn: json.dumps([{"sid": g["sid"], "grade": fn(i, g), "anchor": i < 10}
+                                    for i, g in enumerate(gold)])
+        rng = random.Random(3)
+        perfect = _capture_json(cmd_adjudication_stats,
+                                _ns(json=mk(lambda i, g: g["gold_grade"])))
+        coin = _capture_json(cmd_adjudication_stats, _ns(json=mk(
+            lambda i, g: g["gold_grade"] if i < 10 else rng.choice(list(GOLD_SCORE)))))
+        uncal = _capture_json(cmd_adjudication_stats, _ns(json=mk(
+            lambda i, g: rng.choice(list(GOLD_SCORE)))))
+        return (perfect["verdict"] == "corroborated" and perfect["alpha"] == 1.0
+                and perfect["alpha_ci"] is not None
+                # §5.5 monotonicity: a worse rater must SCORE worse
+                and coin["alpha"] < perfect["alpha"] and coin["verdict"] == "contested"
+                # the calibration gate fires BEFORE any agreement number is trusted
+                and uncal["verdict"] == "calibration-failed"
+                and uncal["anchor_gate"]["passed"] is False
+                # one external rater corroborates; it never REPLACES the author
+                and "does not replace the author" in perfect["read"]
+                # a hand-authored file holds any JSON type; an unhashable grade must not
+                # brick the reader (the fuzz found this: 35 crashes in 300 states)
+                and _capture_json(cmd_adjudication_stats, _ns(json=json.dumps(
+                    [{"sid": gold[0]["sid"], "grade": {"a": 1}},
+                     {"sid": gold[1]["sid"], "grade": ["x"]},
+                     {"sid": "nope", "grade": "partial"}])))["unknown_or_malformed"] == 3)
+    check("adjudication-stats gates on calibration and ranks a worse rater worse",
+          fresh(_adjudication))
+
+    # ══ v1.5 · THE RELEARNING LOOP ═════════════════════════════════════════════════════
+    #
+    # -- the dose: >=3 spaced sessions inside the 30-day window, then it GRADUATES --
+    def _dose_caps(h):
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="encode"))
+        ivls, days = [], ["2026-07-10", "2026-07-13", "2026-07-22"]
+        for d in days:
+            os.environ["ENGRAM_TODAY"] = d
+            ivls.append(_capture_json(cmd_rate, _ns(topic="t", node="a", rating="easy"))
+                        ["interval_days"])
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (ivls[0] == DOSE_CAPS[0] and ivls[1] == DOSE_CAPS[1]
+                and ivls[2] > DOSE_CAPS[1] * 2)      # graduates: never a short-interval trap
+    check("the relearning dose caps the first two intervals, then lets the node graduate",
+          fresh(_dose_caps))
+
+    # -- and it is NEW MATERIAL ONLY: a pre-v1.5 node is never retroactively shortened --
+    def _dose_scoped(h):
+        _add_ab()
+        g = load_graph("t")                       # a node that predates the `dose` stamp
+        # reps=1 puts it INSIDE the dose window, so a wrongly-stamped node WOULD be capped.
+        # With reps=3 the window has already passed and the scoping is never exercised —
+        # §4.5's "the fixture never reaches the code under test", caught by the mutation.
+        g["nodes"]["a"].update(state="review", fsrs={"s": 40.0, "d": 5.0, "last": "2026-07-01",
+                                                     "due": "2026-07-06", "reps": 1, "lapses": 0})
+        save_graph(g)
+        old_node = _capture_json(cmd_rate, _ns(topic="t", node="a", rating="easy"))
+        _capture(cmd_model, _ns(set=["settings.relearning=off"]))
+        _capture(cmd_rate, _ns(topic="t", node="b", rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-10"
+        off = _capture_json(cmd_rate, _ns(topic="t", node="b", rating="easy"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (old_node["interval_days"] > DOSE_CAPS[0]      # pre-v1.5 node: untouched
+                and old_node.get("dose_capped") is False
+                and off["interval_days"] > DOSE_CAPS[0]       # off-switch: untouched
+                and load_graph("t")["nodes"]["b"]["fsrs"].get("dose") is not True)
+    check("the dose applies to NEW nodes only, and `relearning: off` disables it",
+          fresh(_dose_scoped))
+
+    # -- G11: a same-day re-attempt must not move the schedule OR bias the fit --
+    def _relearn_guard(h):
+        _add_ab()
+        for nid in ("a", "b"):
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-20"
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="again", grade="lapsed"))
+        before = json.dumps(load_graph("t")["nodes"]["a"], sort_keys=True)
+        _RECEIPTS_CACHE.clear()
+        fit_before = _capture_json(cmd_refit, _ns(force=True))
+        out = _capture_json(cmd_rate, _ns(topic="t", node="a", rating="good",
+                                          grade="recalled", relearn=True, attempt=2))
+        after = json.dumps(load_graph("t")["nodes"]["a"], sort_keys=True)
+        _RECEIPTS_CACHE.clear()
+        fit_after = _capture_json(cmd_refit, _ns(force=True))
+        st = _capture_json(cmd_stats, _ns())
+        ad = _capture_json(cmd_adherence, _ns())
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (before == after and out["scheduled"] is False and out["attempt"] == 2
+                # ⚠ THE ACTUAL G11 DEFECT: a same-day row carries retrievability 1.0, so it
+                # inflated BOTH sides of the fit. The multiplier must not move at all.
+                and fit_before.get("n_reviews") == fit_after.get("n_reviews")
+                and fit_before.get("observed_recall") == fit_after.get("observed_recall")
+                # …and a LEGACY same-day row — written before the `relearn` stamp existed,
+                # carrying retrievability 1.0 — is dropped by the elapsed guard too. Without
+                # this the `< 1.0` clause is untested, because the relearn filter already
+                # removed every row the fixture produced.
+                and _legacy_sameday_row_is_dropped(fit_after)
+                # …and it is not a retention review, an encoding, or a returned loop
+                and st["reviews"] == 1
+                and ad["loop_closure"]["first_review_done"] == 1
+                and st["relearning"]["loops"] == 1
+                and st["relearning"]["criterion_met"] == 1)
+    def _legacy_sameday_row_is_dropped(before_fit):
+        append_jsonl(p("receipts", "t.jsonl"),
+                     {"id": "r_legacy", "ts": today().isoformat(), "topic": "t", "node": "b",
+                      "kind": "review", "rating": "good", "grade": "recalled",
+                      "retrievability": 1.0})     # elapsed 0 => 1.0 by construction
+        _RECEIPTS_CACHE.clear()
+        after = _capture_json(cmd_refit, _ns(force=True))
+        return after.get("n_reviews") == before_fit.get("n_reviews")
+
+    # -- the relearning trend must compare ONE population, or it reports a false improvement --
+    def _relearn_trend_is_paired(h):
+        # FIVE nodes with two loops each, getting WORSE (1 retry -> 2), plus five nodes with
+        # a single 3-retry loop. Paired: first 1.0 -> latest 2.0, the regression it is.
+        # Unpaired: first = (5x1 + 5x3)/10 = 2.0 -> latest 2.0, i.e. "no change" — the two
+        # computations genuinely diverge, which is what makes this check able to see the bug.
+        twice = ["p%d" % i for i in range(5)]
+        once = ["s%d" % i for i in range(5)]
+        ids = twice + once
+        _capture(cmd_add_topic, _ns(json=json.dumps(
+            {"topic": "t", "title": "T", "order": ids,
+             "nodes": {i: {"claim": "C", "probe": "p"} for i in ids}})))
+        for nid in ids:
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", kind="encode"))
+        def loop(nid, retries):
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="again", grade="lapsed"))
+            for k in range(retries):
+                _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", grade="recalled",
+                                       relearn=True, attempt=2 + k))
+        os.environ["ENGRAM_TODAY"] = "2026-07-20"
+        for nid in twice:
+            loop(nid, 1)
+        for nid in once:
+            loop(nid, 3)
+        os.environ["ENGRAM_TODAY"] = "2026-08-20"
+        for nid in twice:
+            loop(nid, 2)
+        _RECEIPTS_CACHE.clear()
+        rl = _capture_json(cmd_stats, _ns())["relearning"]
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        fvl = rl["first_vs_latest"]
+        return (fvl is not None and fvl["n_nodes_paired"] == 5
+                and fvl["first"] == 1.0 and fvl["latest"] == 2.0)
+    check("the relearning trend is paired (or silent) — never two different populations",
+          fresh(_relearn_trend_is_paired))
+
+    check("a same-day re-attempt moves no schedule and biases no fit (G11)",
+          fresh(_relearn_guard))
+
+    # -- the measured boundary: procedures do NOT get the retry loop --
+    def _relearn_not_for_procedures(h):
+        g = {"topic": "t", "title": "T", "order": ["p"], "nodes": {
+            "p": {"claim": "P", "probe": "pp", "kind": "procedure",
+                  "practice": {"problem_frame": "vary the numbers"}}}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        _capture(cmd_rate, _ns(topic="t", node="p", rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-20"
+        refused = False
+        try:
+            _capture(cmd_rate, _ns(topic="t", node="p", rating="good", relearn=True))
+        except SystemExit:
+            refused = True
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return refused
+    check("retrieval-to-criterion is refused on PROCEDURE nodes (the measured boundary)",
+          fresh(_relearn_not_for_procedures))
+
+    # ══ v1.6 · THE FITTED LEARNER ══════════════════════════════════════════════════════
+    #
+    # -- THE INSTRUMENT TEST (§5.5): generate a learner whose memory is genuinely
+    #    different from the default model, and demand the fit MOVE TOWARD it. A fitter
+    #    that cannot recover known parameters from data it generated itself is not a
+    #    fitter; it is a random number with a changelog entry.
+    def _fit_recovers(h):
+        true_w = list(W)
+        true_w[2] = 20.0                       # this learner's `good` memories start far
+                                               # stickier than the shipped default (3.71)
+        sample = []
+        rng = random.Random(11)
+        for _ in range(300):
+            elapsed = rng.choice([3, 7, 14, 30, 60])
+            s = true_w[2]
+            pr = retrievability(elapsed, s)
+            sample.append((3, elapsed, 1.0 if rng.random() < pr else 0.0, 0.0,
+                           ("t", "n%d" % len(sample))))
+        default_loss = _fit_loss(list(W), sample)
+        fitted = _fit_s0(sample, list(W))
+        fitted_loss = _fit_loss(fitted, sample)
+        return (fitted_loss < default_loss                      # it learned something
+                and abs(fitted[2] - true_w[2]) < abs(W[2] - true_w[2]) * 0.5   # …toward truth
+                and fitted[1] <= fitted[2] <= fitted[3])        # monotone across ratings
+    check("the S0 fitter recovers a known parameter from that learner's own data",
+          fresh(_fit_recovers))
+
+    # -- a fit that does not beat the current parameters is REFUSED, not shipped --
+    def _fit_refuses_worse(h):
+        # 60 usable reviews: ENOUGH to clear the multiplier's >=50 gate, and deliberately
+        # BELOW the tier-1 floor of 64 — so the floor is the only thing stopping a fit.
+        # (The first version of this check passed `--force`, which bypasses the floor, so
+        # mutating the floor away changed nothing: §4.5's fake-check pattern again.)
+        n_nodes = FIT_TIER1_MIN - 4
+        g = {"topic": "t", "title": "T", "order": ["n%02d" % i for i in range(n_nodes)],
+             "nodes": {"n%02d" % i: {"claim": "C", "probe": "p"} for i in range(n_nodes)}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        for i in range(n_nodes):
+            _capture(cmd_rate, _ns(topic="t", node="n%02d" % i, rating="good", kind="encode"))
+        # VARIED elapsed and a success pattern that implies a stickier-than-default S0 —
+        # so a fit WOULD be accepted here if the floor let it run. A uniform fixture makes
+        # the loss identical either way, and the floor mutation then changes nothing.
+        for day, lo, hi in (("2026-07-16", 0, 20), ("2026-07-26", 20, 40),
+                            ("2026-08-15", 40, n_nodes)):
+            os.environ["ENGRAM_TODAY"] = day
+            for i in range(lo, hi):
+                _capture(cmd_rate, _ns(topic="t", node="n%02d" % i,
+                                       rating="good" if i % 8 else "again"))
+        _RECEIPTS_CACHE.clear()
+        out = _capture_json(cmd_refit, _ns())          # NO --force: the real path
+        m = read_json(p("learner-model.json"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (out["ok"] is True                       # the multiplier gate DID clear
+                and out["fit"]["n_usable"] == n_nodes
+                and out["fit"]["tier"] == 0 and out["fit"]["accepted"] is False
+                and out["fit"]["next_tier_at"] == FIT_TIER1_MIN
+                and (m.get("memory") or {}).get("fsrs_params") is None)
+    check("no parameter fit below the floor (the gate, not the acceptance check)",
+          fresh(_fit_refuses_worse))
+
+    # -- ABOVE the floor, a fit that does not improve the learner's own data is REFUSED --
+    def _fit_acceptance(h):
+        n_nodes = FIT_TIER1_MIN + 6            # clears the floor
+        g = {"topic": "t", "title": "T", "order": ["n%02d" % i for i in range(n_nodes)],
+             "nodes": {"n%02d" % i: {"claim": "C", "probe": "p"} for i in range(n_nodes)}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        for i in range(n_nodes):
+            _capture(cmd_rate, _ns(topic="t", node="n%02d" % i, rating="good", kind="encode"))
+        # THREE rounds, so nodes carry LATER reviews too — rows whose `s_before` came from a
+        # previous transition and therefore say nothing about the INITIAL stability. Without
+        # them in the fixture, the "first reviews only" filter is untestable (dropping it
+        # changes nothing), which is exactly what the mutation run found.
+        for day in ("2026-07-20", "2026-08-05", "2026-09-01"):
+            os.environ["ENGRAM_TODAY"] = day
+            for i in range(n_nodes):
+                _capture(cmd_rate, _ns(topic="t", node="n%02d" % i, rating="good"))
+        _RECEIPTS_CACHE.clear()
+        sample = _fit_sample(collect_receipts())
+        firsts = [r for r in sample if r[3] == 0.0]
+        if not (len(firsts) == n_nodes and len(sample) > len(firsts)):
+            return False                    # the fixture must actually contain both kinds
+        first = _capture_json(cmd_refit, _ns())         # a real improvement: accepted
+        fitted = read_json(p("learner-model.json"))["memory"]["fsrs_params"]["w"]
+        # RUN IT AGAIN on the same evidence. The candidate now starts FROM the fitted
+        # weights, so there is nothing left to win — and the acceptance check is the only
+        # thing standing between the learner and a second, pointless rewrite of every
+        # future due date. (Constructing "degenerate data the default already explains" is
+        # not possible in general; idempotence on unchanged evidence is the same property,
+        # and it is the one a real learner actually hits, every month, forever.)
+        _RECEIPTS_CACHE.clear()
+        second = _capture_json(cmd_refit, _ns())
+        after = read_json(p("learner-model.json"))["memory"]["fsrs_params"]["w"]
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        # …AND THE FIT MUST REACH THE SCHEDULER. A fitted vector that nothing schedules with
+        # is a number in a JSON file — the "dead code shipped as a feature" bug class, on the
+        # release whose entire claim is that the schedule now fits the learner.
+        _capture(cmd_add_topic, _ns(json=json.dumps(
+            {"topic": "z", "title": "Z", "order": ["q"],
+             "nodes": {"q": {"claim": "Q", "probe": "pq"}}})))
+        with_fit = _capture_json(cmd_rate, _ns(topic="z", node="q", rating="good",
+                                               kind="encode"))["s_after"]
+        default_s0 = init_stability(RATINGS["good"])
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (first["fit"]["n_usable"] >= FIT_TIER1_MIN   # the floor was NOT the blocker
+                and first["fit"]["accepted"] is True
+                and fitted != [round(x, 4) for x in W]      # the fit actually moved
+                and second["fit"]["accepted"] is False
+                and "REFUSED" in second["fit"]["read"]
+                and fitted == after                         # …and nothing moved on re-run
+                and abs(with_fit - default_s0) > 0.01)      # …and the schedule uses it
+    check("re-fitting unchanged evidence is refused, and nothing moves (acceptance gate)",
+          fresh(_fit_acceptance))
+
+    # -- a hand-edited fsrs_params must never push garbage into the scheduler --
+    def _fit_validated(h):
+        _add_ab()
+        for bad in ({"w": "nonsense"}, {"w": [1, 2, 3]}, {"w": ["x"] * len(W)}, "not-a-dict"):
+            m = read_json(p("learner-model.json"))
+            m["memory"]["fsrs_params"] = bad
+            write_json(p("learner-model.json"), m)
+            if learner_weights(read_json(p("learner-model.json"))) is not None:
+                return False
+            _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="encode"))
+            _capture(cmd_stats, _ns())          # must not raise
+        m = read_json(p("learner-model.json"))
+        m["memory"]["fsrs_params"] = {"w": [10 ** 9] * len(W)}       # wildly out of bounds
+        write_json(p("learner-model.json"), m)
+        got = learner_weights(read_json(p("learner-model.json")))
+        return got is not None and got[0] == FIT_W_BOUNDS[0][1]      # clamped, not trusted
+    check("a hand-edited fsrs_params is validated and clamped, never trusted",
+          fresh(_fit_validated))
+
+    # -- the workload curve is a TRADE-OFF, not a recommendation --
+    def _workload(h):
+        _add_ab()
+        for nid in ("a", "b"):
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", kind="encode"))
+        _RECEIPTS_CACHE.clear()
+        wl = _capture_json(cmd_stats, _ns())["workload"]
+        pts = {round(pt["desired_retention"], 2): pt for pt in wl["points"]}
+        before = read_json(p("learner-model.json"))["memory"]["desired_retention"]
+        after = read_json(p("learner-model.json"))["memory"]["desired_retention"]
+        return (len(wl["points"]) == 4
+                # higher desired retention MUST cost more reviews — the trade-off, not a hint
+                and pts[0.95]["reviews_per_day"] > pts[0.80]["reviews_per_day"]
+                and pts[0.95]["mean_interval_days"] < pts[0.80]["mean_interval_days"]
+                and "NOT a recommendation" in wl["basis"]
+                and before == after)          # …and reading it changes nothing
+    check("the workload curve trades reviews against retention and recommends nothing",
+          fresh(_workload))
+
+    # ══ v1.7 · THE OPEN FRONTIER ═══════════════════════════════════════════════════════
+    #
+    # -- --extend adds an arc and touches NOTHING that already exists --
+    def _extend(h):
+        _add_ab()                                     # a, b (b requires a)
+        for nid in ("a", "b"):
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-13"
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="easy"))
+        before = {nid: json.dumps(n, sort_keys=True)
+                  for nid, n in load_graph("t")["nodes"].items() if nid != CAPSTONE_ID}
+        arc2 = {"topic": "t", "title": "T arcs 1-2", "order": ["c"],
+                "nodes": {"c": {"claim": "C", "probe": "pc",
+                                "edges": {"requires": ["b"]}}}}
+        out = _capture_json(cmd_add_topic, _ns(json=json.dumps(arc2), extend=True))
+        g = load_graph("t")
+        after = {nid: json.dumps(n, sort_keys=True)
+                 for nid, n in g["nodes"].items() if nid in before}
+        clashed = False
+        try:
+            _capture(cmd_add_topic, _ns(extend=True, json=json.dumps(
+                {"topic": "t", "title": "x", "order": ["a"],
+                 "nodes": {"a": {"claim": "A2", "probe": "p2"}}})))
+        except SystemExit:
+            clashed = True
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (out["ok"] and before == after            # every old node byte-identical
+                and g["nodes"]["c"]["arc"] == 2 and g["nodes"]["a"]["arc"] == 1
+                # the capstone re-mints over the UNION, so the build still requires the lot
+                and sorted(_requires_of(g["nodes"][CAPSTONE_ID])) == ["a", "b", "c"]
+                and clashed)                             # …and an id collision is refused
+    check("--extend adds an arc, preserves every schedule, and refuses a collision",
+          fresh(_extend))
+
+    # -- the frontier walk names what to ASK, and credits nothing --
+    def _frontier(h):
+        g = {"topic": "t", "title": "T", "order": ["a", "b", "c"], "nodes": {
+            "a": {"claim": "A", "probe": "pa"},
+            "b": {"claim": "B", "probe": "pb", "edges": {"requires": ["a"]}},
+            "c": {"claim": "C", "probe": "pc", "edges": {"requires": ["b"]}}}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        deep = _capture_json(cmd_next, _ns(topic="t", frontier_of="c"))
+        _capture(cmd_rate, _ns(topic="t", node="b", rating="good", kind="pretest",
+                               grade="recalled"))
+        _RECEIPTS_CACHE.clear()
+        after = _capture_json(cmd_next, _ns(topic="t", frontier_of="c"))
+        states = {nid: n.get("state") for nid, n in load_graph("t")["nodes"].items()}
+        return (deep["unreceipted_requires"] == ["b", "a"]      # deepest first
+                and after["unreceipted_requires"] == ["a"]      # a receipt removes it
+                and set(deep["probes"]) == {"a", "b"}
+                # ⚠ IT CREDITS NOTHING: asking about the chain must not advance any node
+                and states["a"] == "new" and states["c"] == "new")
+    check("the frontier walk lists what to ASK and advances no node by itself",
+          fresh(_frontier))
+
+    # -- doctor --fix restores only what now parses, and never overwrites a live file --
+    def _doctor_fix(h):
+        _add_ab()
+        with open(p("graphs", "t.json"), "w", encoding="utf-8") as f:
+            f.write("{broken")
+        _capture_json(cmd_topics, _ns())                     # triggers the quarantine
+        d1 = _capture_json(cmd_doctor, _ns())
+        still_broken = _capture_json(cmd_doctor, _ns(fix=True))
+        corrupt = [n for n in os.listdir(p("graphs")) if ".corrupt." in n]
+        write_json(p("graphs", corrupt[0]),
+                   {"topic": "t", "title": "T", "order": ["a"],
+                    "nodes": {"a": {"claim": "A", "probe": "p"}}})
+        fixed = _capture_json(cmd_doctor, _ns(fix=True))
+        return (any(f["kind"] == "restore-quarantined" for f in d1["fixes"])
+                # a diagnostic must NEVER restore garbage
+                and still_broken["applied"][0]["restored"] is False
+                and fixed["applied"][0]["restored"] is True
+                and [t_["topic"] for t_ in _capture_json(cmd_topics, _ns())] == ["t"])
+    check("doctor --fix restores a quarantined file only once it actually parses",
+          fresh(_doctor_fix))
+
+    # -- …and it TAKES THE LOCK, because it renames a file into the live graphs/ path --
+    def _doctor_fix_locks(h):
+        _add_ab()
+        with open(p("graphs", "t.json"), "w", encoding="utf-8") as f:
+            f.write("{broken")
+        _capture_json(cmd_topics, _ns())
+        corrupt = [n for n in os.listdir(p("graphs")) if ".corrupt." in n][0]
+        write_json(p("graphs", corrupt),
+                   {"topic": "t", "title": "T", "order": ["a"],
+                    "nodes": {"a": {"claim": "A", "probe": "p"}}})
+        with open(_lock_path(), "w", encoding="utf-8") as f:   # another process holds it
+            f.write("999999")
+        blocked = False
+        try:
+            main_dispatch = _ns(fix=True)
+            main_dispatch.cmd = "doctor"
+            acquire_lock(timeout_s=0.2)      # simulate the dispatch-table decision
+        except SystemExit:
+            blocked = True
+        finally:
+            try:
+                os.unlink(_lock_path())
+            except OSError:
+                pass
+        # the bare diagnostic must STILL work while locked — it is how you diagnose a stuck
+        # process, and blocking it would be the cure that prevents the diagnosis
+        with open(_lock_path(), "w", encoding="utf-8") as f:
+            f.write("999999")
+        d = _capture_json(cmd_doctor, _ns())
+        os.unlink(_lock_path())
+        return blocked and isinstance(d, dict) and "issues" in d
+    check("doctor --fix is lock-guarded; bare doctor still runs while locked",
+          fresh(_doctor_fix_locks))
+
+    # -- `retired` and `arc` are ENGINE-OWNED: payloads may not mint them, --replace may
+    #    not destroy them (the learner's own decision has no other record) --
+    def _retired_is_engine_owned(h):
+        _add_ab()
+        _capture(cmd_retire, _ns(topic="t", node="a"))
+        payload = {"topic": "t", "title": "T", "order": ["a", "b"], "nodes": {
+            "a": {"claim": "A", "probe": "pa"},
+            "b": {"claim": "B", "probe": "pb",
+                  "retired": {"ts": "2020-01-01", "restored": None},   # hostile: mint one
+                  "arc": 99}}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(payload), replace=True))
+        g = load_graph("t")
+        return (is_retired(g["nodes"]["a"])          # the real retirement SURVIVED --replace
+                and not is_retired(g["nodes"]["b"])  # the minted one was STRIPPED
+                and g["nodes"]["b"].get("arc") == 1)
+    check("retired/arc are engine-owned: --replace preserves a real one, strips a minted one",
+          fresh(_retired_is_engine_owned))
+
+    # -- --extend must not orphan a registered explorable (the aliasing bug) --
+    def _extend_keeps_artifacts(h):
+        _add_ab()
+        art = os.path.join(h, "artifacts", "t")
+        os.makedirs(art, exist_ok=True)
+        with open(os.path.join(art, "a.html"), "w", encoding="utf-8") as f:
+            f.write("<html></html>")
+        _capture(cmd_artifact, _ns(action="set", topic="t", node="a",
+                                   path=os.path.join(art, "a.html")))
+        before = load_graph("t")["nodes"]["a"]["artifact"]
+        _capture(cmd_add_topic, _ns(extend=True, json=json.dumps(
+            {"topic": "t", "title": "T", "order": ["c"],
+             "nodes": {"c": {"claim": "C", "probe": "pc"}}})))
+        after = load_graph("t")["nodes"]["a"]["artifact"]
+        listed = _capture_json(cmd_artifact, _ns(action="list"))
+        rows = listed if isinstance(listed, list) else listed.get("artifacts", [])
+        return (before and after == before          # the registration survived the extend
+                and len(rows) >= 1)                 # …and `artifact list` still sees it
+    check("--extend preserves registered explorables (no aliasing of carried-forward nodes)",
+          fresh(_extend_keeps_artifacts))
+
+    # ══ v1.8 · THE STEERING MIRROR ═════════════════════════════════════════════════════
+    #
+    # -- propose is READ-ONLY, floors before it speaks, and the loop closes on consent --
+    def _propose_loop(h):
+        n_nodes = 14
+        g = {"topic": "t", "title": "T", "order": ["n%02d" % i for i in range(n_nodes)],
+             "nodes": {"n%02d" % i: {"claim": "C", "probe": "p"} for i in range(n_nodes)}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        empty = _capture_json(cmd_propose, _ns())          # nothing yet: floors hold
+        for i in range(n_nodes):
+            _capture(cmd_rate, _ns(topic="t", node="n%02d" % i, rating="good", kind="encode",
+                                   grade="recalled", confidence=90))
+        for _ in range(6):
+            _capture(cmd_log_session, _ns(kind="review", minutes=2, items=1))
+        _RECEIPTS_CACHE.clear()
+        before_state = json.dumps(read_json(p("learner-model.json")), sort_keys=True)
+        props = _capture_json(cmd_propose, _ns())
+        after_state = json.dumps(read_json(p("learner-model.json")), sort_keys=True)
+        ids = {pr["id"] for pr in props["proposals"]}
+        # consent applies it, and the LEDGER records the evidence with it
+        _capture(cmd_model, _ns(set=["settings.default_mode=sprint"],
+                                because="6 of 6 sessions covered one item",
+                                grade="model-derived"))
+        led = _capture_json(cmd_adaptations, _ns())
+        after = _capture_json(cmd_propose, _ns())
+        return (empty["n"] == 0                                  # floors: silence, not noise
+                and "session-shape" in ids and "scaffold-entry" in ids
+                and before_state == after_state                  # propose WROTE NOTHING
+                and len(props["proposals"]) <= PROPOSAL_MAX
+                and all(pr.get("evidence") and pr.get("grade") for pr in props["proposals"])
+                and led["n"] == 1 and led["adaptations"][0]["source"] == "consented"
+                and led["adaptations"][0]["from"] == "standard"
+                and led["adaptations"][0]["reversible"] is True
+                and "session-shape" not in {pr["id"] for pr in after["proposals"]})
+    check("propose is read-only, floored, evidence-carrying — and consent closes the loop",
+          fresh(_propose_loop))
+
+    # -- the floors are REAL: below them the engine stays silent, whatever the pattern --
+    def _propose_floors(h):
+        g = {"topic": "t", "title": "T", "order": ["n%d" % i for i in range(5)],
+             "nodes": {"n%d" % i: {"claim": "C", "probe": "p"} for i in range(5)}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        for i in range(5):                       # 5 PERFECT first attempts — the pattern is
+            _capture(cmd_rate, _ns(topic="t", node="n%d" % i, rating="good",   # there, the
+                                   kind="encode", grade="recalled"))           # evidence isn't
+        _RECEIPTS_CACHE.clear()
+        thin = _capture_json(cmd_propose, _ns())
+        return "scaffold-entry" not in {pr["id"] for pr in thin["proposals"]}
+    check("a pattern below its floor proposes NOTHING (silence, not a guess)",
+          fresh(_propose_floors))
+
+    # -- and never more than PROPOSAL_MAX, even when every family fires --
+    def _propose_capped(h):
+        n_nodes = 40
+        g = {"topic": "t", "title": "T", "order": ["n%02d" % i for i in range(n_nodes)],
+             "nodes": {"n%02d" % i: {"claim": "C", "probe": "p"} for i in range(n_nodes)}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        for i in range(n_nodes):                          # family 2: clean first attempts
+            _capture(cmd_rate, _ns(topic="t", node="n%02d" % i, rating="good", kind="encode",
+                                   grade="recalled", confidence=90))
+        for _ in range(6):                                # family 1: one-item sessions
+            _capture(cmd_log_session, _ns(kind="review", minutes=2, items=1))
+        os.environ["ENGRAM_TODAY"] = "2026-07-12"         # family 4: confident misses
+        for i in range(n_nodes):
+            _capture(cmd_rate, _ns(topic="t", node="n%02d" % i,
+                                   rating="again" if i < 4 else "good",
+                                   grade="lapsed" if i < 4 else "recalled", confidence=90))
+        # family 3: a genuinely heavy schedule. Set stabilities directly — this fixture is
+        # testing the PROPOSAL engine, not the scheduler, and driving 40 nodes to a one-day
+        # interval through real reviews would test FSRS instead.
+        gph = load_graph("t")
+        for node in gph["nodes"].values():
+            if isinstance(node, dict) and node.get("state") != "new":
+                node["fsrs"]["s"] = 1.0
+        save_graph(gph)
+        _RECEIPTS_CACHE.clear()
+        props = _capture_json(cmd_propose, _ns())
+        raw = compute_proposals(collect_receipts(), read_model(),
+                                workload_curve(collect_receipts(), read_model()))
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        # THE CAP MUST BIND, or this check proves nothing. The fixture qualifies for a
+        # FOURTH family (srl-calibration: 40 confidence-rated reviews, 4 high-confidence
+        # misses) — so its absence from the output is the truncation, observed rather than
+        # assumed.
+        conf = [r for r in collect_receipts() if r.get("kind") == "review"
+                and as_number(r.get("confidence")) is not None and r.get("grade")]
+        overconf = [r for r in conf if (as_number(r.get("confidence")) or 0) >= 70
+                    and r.get("grade") == "lapsed"]
+        qualifies_for_four = len(conf) >= 10 and len(overconf) >= 3
+        return (len(props["proposals"]) == PROPOSAL_MAX and len(raw) == PROPOSAL_MAX
+                and props["n"] == PROPOSAL_MAX
+                and qualifies_for_four
+                and "srl-calibration" not in {pr["id"] for pr in raw})
+    check("propose never exceeds PROPOSAL_MAX, even when every family fires",
+          fresh(_propose_capped))
+
+    # -- the ledger remembers a learner's OWN change too, and marks it as theirs --
+    def _ledger_sources(h):
+        _capture(cmd_model, _ns(set=["settings.momentum=off"]))
+        led = _capture_json(cmd_adaptations, _ns())
+        rows = led["adaptations"]
+        # …and a no-op set writes NO row: the ledger records changes, not commands
+        _capture(cmd_model, _ns(set=["settings.momentum=off"]))
+        again = _capture_json(cmd_adaptations, _ns())
+        return (len(rows) == 1 and rows[0]["source"] == "learner"
+                and rows[0]["grade"] == "learner" and again["n"] == 1)
+    check("the adaptation ledger records who changed what, and never a no-op",
+          fresh(_ledger_sources))
+
+    # -- a declined proposal STAYS declined: "no is free" must not be free-per-check-in --
+    def _decline_sticks(h):
+        n_nodes = 14
+        g = {"topic": "t", "title": "T", "order": ["n%02d" % i for i in range(n_nodes)],
+             "nodes": {"n%02d" % i: {"claim": "C", "probe": "p"} for i in range(n_nodes)}}
+        _capture(cmd_add_topic, _ns(json=json.dumps(g)))
+        for i in range(n_nodes):
+            _capture(cmd_rate, _ns(topic="t", node="n%02d" % i, rating="good", kind="encode",
+                                   grade="recalled", confidence=90))
+        _RECEIPTS_CACHE.clear()
+        before = {pr["id"] for pr in _capture_json(cmd_propose, _ns())["proposals"]}
+        _capture(cmd_propose, _ns(decline="scaffold-entry"))
+        _RECEIPTS_CACHE.clear()
+        after = {pr["id"] for pr in _capture_json(cmd_propose, _ns())["proposals"]}
+        os.environ["ENGRAM_TODAY"] = "2026-11-06"          # past the quiet window
+        later = {pr["id"] for pr in _capture_json(cmd_propose, _ns())["proposals"]}
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        led = _capture_json(cmd_adaptations, _ns())
+        return ("scaffold-entry" in before
+                and "scaffold-entry" not in after          # the no is remembered…
+                and "scaffold-entry" in later              # …and is not permanent
+                and any(r.get("source") == "declined" for r in led["adaptations"]))
+    check("a declined proposal stays declined (a refusal the system forgets is a delay)",
+          fresh(_decline_sticks))
+
+    # -- v1.9.1 REVIEW FIXES: the canary must not re-license a badge it never earned --
+    def _canary_relicense_is_bounded(h):
+        gold, _ = load_gold()
+        full = {"grader": "engram-assessor",
+                "runs": [[{"sid": g["sid"], "grade": g["gold_grade"]} for g in gold]] * 3}
+        _capture(cmd_assessor_audit, _ns(json=json.dumps(full), grader_context="p/modelA"))
+        can = canary_items(gold)
+        payload = {"grader": "engram-assessor",
+                   "runs": [[{"sid": g["sid"], "grade": g["gold_grade"]} for g in can]] * 3}
+        # a canary sat by a THIRD grader must not rescue modelB's expired badge
+        _capture(cmd_assessor_audit, _ns(json=json.dumps(payload), canary=True,
+                                         grader_context="unrelated/modelC"))
+        other = _capture_json(cmd_grader_health, _ns(grader_context="p/modelB"))
+        # …the RIGHT grader's canary does
+        _capture(cmd_assessor_audit, _ns(json=json.dumps(payload), canary=True,
+                                         grader_context="p/modelB"))
+        right = _capture_json(cmd_grader_health, _ns(grader_context="p/modelB"))
+        # …and a re-licence does not outlive an audit
+        os.environ["ENGRAM_TODAY"] = "2027-07-06"
+        aged = _capture_json(cmd_grader_health, _ns(grader_context="p/modelB"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        # …and an INCOMPLETE canary (grader invented sids) may not pass
+        bad = {"grader": "engram-assessor", "runs": [
+            [{"sid": g["sid"], "grade": g["gold_grade"]} for g in can]
+            + [{"sid": "g_not_real", "grade": "recalled"}]] * 3}
+        dirty = _capture_json(cmd_assessor_audit, _ns(json=json.dumps(bad), canary=True,
+                                                      grader_context="p/modelB"))
+        return (other["verdict"] == "stale-model"
+                and right["verdict"] == "pass"
+                and aged["verdict"] in ("stale-model", "stale-age")
+                and dirty["verdict"] != "canary-pass")
+    check("a canary re-licenses only its OWN grader, only for a while, and never dirty",
+          fresh(_canary_relicense_is_bounded))
+
+    # -- refit --force may not rescale a whole account off ~one receipt --
+    def _refit_force_floor(h):
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-20"
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good"))
+        _RECEIPTS_CACHE.clear()
+        out = _capture_json(cmd_refit, _ns(force=True))
+        m = read_json(p("learner-model.json"))
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (out["ok"] is False and "interval multiplier" in out["reason"]
+                and m["memory"]["interval_multiplier"] == 1.0)
+    check("refit --force still refuses to move the interval multiplier off ~nothing",
+          fresh(_refit_force_floor))
+
+    # -- a `model --set` typo may not mint a ledger row for a change that never happened --
+    def _model_set_validates_leaf(h):
+        died = False
+        try:
+            _capture(cmd_model, _ns(set=["memory.desired_retentoin=0.6"],
+                                    because="ev", grade="evidence-backed"))
+        except SystemExit:
+            died = True
+        led = _capture_json(cmd_adaptations, _ns())
+        m = read_json(p("learner-model.json"))
+        return (died and led["n"] == 0
+                and "desired_retentoin" not in json.dumps(m))
+    check("model --set validates the LEAF, so a typo cannot mint a consented ledger row",
+          fresh(_model_set_validates_leaf))
+
+    # -- an audit receipt nothing can read is not an audit --
+    def _audit_pair_required(h):
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="encode"))
+        died = False
+        try:
+            _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="audit"))
+        except SystemExit:
+            died = True
+        # …and --attempt without --relearn is refused (it would be a same-day G11 review)
+        died2 = False
+        try:
+            _capture(cmd_rate, _ns(topic="t", node="a", rating="good", attempt=2))
+        except SystemExit:
+            died2 = True
+        # …and a negative cap may not silently empty the queue
+        died3 = False
+        try:
+            _capture(cmd_due, _ns(cap=-3))
+        except SystemExit:
+            died3 = True
+        return died and died2 and died3
+    check("the CLI refuses the three defaults that bite (audit pair, bare --attempt, -ve cap)",
+          fresh(_audit_pair_required))
+
+    # -- and the amnesty line may never claim something that is FALSE on its own branch --
+    def _amnesty_is_true(h):
+        _add_ab()
+        for nid in ("a", "b"):
+            _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", kind="encode"))
+        os.environ["ENGRAM_TODAY"] = "2026-09-06"
+        _RECEIPTS_CACHE.clear()
+        out = _capture(cmd_session_start, _ns())
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        # the loop has NEVER closed here, so nothing has been spaced and nothing has been
+        # re-encountered — a line saying otherwise is a flattering falsehood inside an
+        # amnesty, which is bug class #1 wearing the kindest possible disguise
+        return ("nothing's owed" in out and "spacing is doing its job" not in out)
+    check("the never-closed amnesty absolves without claiming the system is working",
+          fresh(_amnesty_is_true))
+
+    # -- and the proposal engine degrades on hand-edited state, like every read path --
+    def _propose_degrades(h):
+        _add_ab()
+        _capture(cmd_rate, _ns(topic="t", node="a", rating="good", kind="encode"))
+        # an unhashable topic in a receipt poisoned the `firsts` key and took `stats` (and
+        # therefore the dashboard, and therefore /coach) down with it — 472 crashes in 600
+        # fuzzed states the moment `propose` joined the stats path
+        append_jsonl(p("receipts", "t.jsonl"),
+                     {"id": "r_bad", "ts": "2026-07-06", "topic": {"a": 1}, "node": ["x"],
+                      "kind": "encode", "rating": "good", "grade": "recalled"})
+        append_jsonl(p("sessions.jsonl"), 5)
+        append_jsonl(p("sessions.jsonl"), {"ts": {"nope": 1}, "kind": "review", "items": {}})
+        _RECEIPTS_CACHE.clear()
+        _capture_json(cmd_propose, _ns())        # must not raise
+        s = _capture_json(cmd_stats, _ns())      # nor here, nor on the page
+        _capture_json(cmd_report, _ns())
+        return isinstance(s["proposals_pending"], int)
+    check("propose degrades on hand-edited receipts and sessions (never bricks stats)",
+          fresh(_propose_degrades))
+
+    # -- `rhythms` is GONE, and what replaced it describes without scheduling --
+    def _rhythms_retired(h):
+        m = read_json(p("learner-model.json"))
+        _capture(cmd_log_session, _ns(kind="learn", minutes=10, items=2))
+        s = _capture_json(cmd_stats, _ns())
+        # a v1.7 model carrying the dead key still loads, and does not get it back
+        m2 = read_json(p("learner-model.json")); m2["rhythms"] = {"morning": 3}
+        write_json(p("learner-model.json"), m2)
+        healed = _capture_json(cmd_model, _ns())
+        return ("rhythms" not in m
+                and s["sessions"]["total"] == 1
+                and "does not schedule by time of day" in s["sessions"]["note"]
+                and "rhythms" in healed)     # an existing key is PRESERVED, never deleted
+    check("`rhythms` is retired for new models; description replaces it, scheduling does not",
+          fresh(_rhythms_retired))
+
+    # ══ v1.9 · THE SHARPER QUESTION ════════════════════════════════════════════════════
+    #
+    # -- each metric reads its OWN population; identical receipts must NOT score alike --
+    def _metric_registry(h):
+        def run(metric, extra_min=None):
+            with tempfile.TemporaryDirectory() as hh:
+                os.environ["ENGRAM_HOME"] = hh
+                os.environ["ENGRAM_TODAY"] = "2026-01-01"
+                _capture(cmd_init, _ns())
+                design = {"question": "q", "arms": ["a", "b"], "metric": metric, "seed": "1"}
+                if extra_min:
+                    design["min_per_arm"] = extra_min
+                _capture(cmd_experiment, _ns(action="start", json=json.dumps(design)))
+                ids = ["n%02d" % i for i in range(6)]
+                _capture(cmd_add_topic, _ns(json=json.dumps(
+                    {"topic": "t", "title": "T", "order": ids,
+                     "nodes": {i: {"claim": "C", "probe": "p"} for i in ids}})))
+                for nid in ids:
+                    _capture(cmd_experiment, _ns(action="assign", topic="t", node=nid))
+                    _capture(cmd_rate, _ns(topic="t", node=nid, rating="good", kind="encode",
+                                           grade="recalled"))
+                os.environ["ENGRAM_TODAY"] = "2026-01-08"       # inside the 7d window
+                for nid in ids:
+                    _capture(cmd_rate, _ns(topic="t", node=nid, rating="good",
+                                           grade="recalled"))
+                _RECEIPTS_CACHE.clear()
+                exp = _as_list(read_json(p("experiments.json"), []))[0]
+                groups, _d = _experiment_outcomes(exp)
+                return sum(len(v) for v in groups.values())
+        recall_n = run("first_review_recall")
+        ret_n = run("retention_7d")
+        transfer_n = run("transfer_fired")
+        slip_n = run("slip_share")
+        # THE POINT: one receipt log, four metrics, and they do NOT agree — because they
+        # ask different questions. A metric that scored the same population as every other
+        # would be a relabelling, not a new question.
+        # AND THE FLOOR MOVES WITH THE METRIC — asserted as BEHAVIOUR, not as a constant
+        # comparison, which proves nothing but that the source says what the source says.
+        def floor_for(metric):
+            with tempfile.TemporaryDirectory() as hh:
+                os.environ["ENGRAM_HOME"] = hh
+                os.environ["ENGRAM_TODAY"] = "2026-01-01"
+                _capture(cmd_init, _ns())
+                _capture(cmd_experiment, _ns(action="start", json=json.dumps(
+                    {"question": "q", "arms": ["a", "b"], "metric": metric, "seed": "1"})))
+                return _as_list(read_json(p("experiments.json"), []))[0]["min_per_arm"]
+        rare, common = floor_for("transfer_fired"), floor_for("first_review_recall")
+        os.environ["ENGRAM_HOME"] = h
+        os.environ["ENGRAM_TODAY"] = "2026-07-06"
+        return (recall_n == 6 and ret_n == 6
+                and transfer_n == 0        # no transfer probe was ever served: NO datum…
+                and slip_n == 0            # …and no error was ever classified: nor here
+                and rare != common and rare == EXPERIMENT_METRIC_MIN["transfer_fired"])
+    check("each experiment metric reads its own population — never a zero for absent evidence",
+          fresh(_metric_registry))
+
+    # -- the shipped presets are real pre-registrations, and load as designs --
+    def _presets(h):
+        loaded = []
+        for name in ("probe-variation", "topic-reconstruction"):
+            _capture(cmd_experiment, _ns(action="start", preset=name))
+            exp = _as_list(read_json(p("experiments.json"), []))[-1]
+            loaded.append(exp)
+            _capture(cmd_experiment, _ns(action="settle", id=exp["id"]))   # clear the slot
+        refused = False
+        try:
+            _capture(cmd_experiment, _ns(action="start", preset="does-not-exist"))
+        except SystemExit:
+            refused = True
+        return (all(e["metric"] in EXPERIMENT_METRICS for e in loaded)
+                and all(e.get("randomized") and e.get("seed") for e in loaded)
+                and all(len(e["arms"]) == 2 for e in loaded)
+                # a pre-registration that does not name its own threat to validity is a
+                # wish; both shipped designs do, in the file, before any datum exists
+                and all(e.get("threat_to_validity") for e in loaded)
+                and all(e.get("why_not_a_default") for e in loaded)
+                and refused)
+    check("the shipped experiment presets load as pre-registered designs with their threats",
+          fresh(_presets))
+
     print("\n%d/%d checks passed" % (total[0] - len(failures), total[0]))
     sys.exit(1 if failures else 0)
 
@@ -8238,7 +11311,14 @@ def _ns(**kw):
                     limit=None, set=None, add_interest=None, add_goal=None, action=None,
                     id=None, verdict=None, description=None, force=False,
                     out=None, allow_outside=False, mode=None, minutes=None,
-                    items=None, notes=None, path=None)
+                    items=None, notes=None, path=None,
+                    cap=None, order=None, restore=False, clear=False,   # v1.3
+                    cue=None, horizon=None,
+                    canary=False, grader_context=None, audited_rating=None,  # v1.4
+                    rater=None, gold=None, contributor=None, allow_unvalidated=False,
+                    relearn=False, attempt=None,   # v1.5
+                    extend=False, frontier_of=None, fix=False,   # v1.7
+                    because=None, preset=None, decline=None)   # v1.8/v1.9
     defaults.update(kw)
     for k, v in defaults.items():
         setattr(ns, k, v)
@@ -8260,18 +11340,46 @@ def main():
     ap = argparse.ArgumentParser(prog="engram", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    for name in ("init", "path", "session-start", "topics", "selftest", "stats", "doctor",
-                 "adherence", "retention", "gold", "grader-health"):
+    for name in ("init", "path", "session-start", "topics", "selftest", "stats",
+                 "adherence", "retention"):
         sub.add_parser(name)
+
+    sp = sub.add_parser("doctor")
+    sp.add_argument("--fix", action="store_true",
+                    help="apply the repairs doctor names — one at a time, validated first; "
+                         "there is deliberately no --yes")
+
+    sp = sub.add_parser("gold")
+    sp.add_argument("--canary", action="store_true",
+                    help="the ~15-item canary subset (mid-band and historically weak cases)")
+
+    sp = sub.add_parser("adjudication-stats")
+    sp.add_argument("--file"); sp.add_argument("--json")
+    sp.add_argument("--rater", help="who adjudicated (recorded, never used in the maths)")
+    sp.add_argument("--allow-new-key", action="store_true", help=argparse.SUPPRESS)
+    sp.add_argument("--gold", help=argparse.SUPPRESS)
+
+    sp = sub.add_parser("grader-health")
+    sp.add_argument("--grader-context",
+                    help="the label of the grader running TODAY — a mismatch with the audited "
+                         "one expires the badge (a model swap runs measurably more lenient)")
 
     sp = sub.add_parser("assessor-audit")
     sp.add_argument("--file"); sp.add_argument("--json")
     sp.add_argument("--gold", help="override the gold set (testing; default = bundled)")
+    sp.add_argument("--grader-context",
+                    help="platform/model label the runs were graded under, verbatim from what "
+                         "your platform knows. The engine never guesses it; 'unknown' is honest.")
+    sp.add_argument("--canary", action="store_true",
+                    help="grade the ~15-item re-licensing subset (never certifies on its own)")
 
     sp = sub.add_parser("transfer")
     sp.add_argument("--topic"); sp.add_argument("--limit", type=int)
 
     sp = sub.add_parser("export")
+    sp.add_argument("--grader-context",
+                    help="the grader running today — a mismatch with the audited one expires "
+                         "the badge, and an expired badge refuses to export (v1.4)")
     sp.add_argument("--topic", help="export ONE topic (default: all)")
     sp.add_argument("--contributor", help="the handle this will be posted under. Typed by you; "
                                           "the engine never guesses your identity.")
@@ -8280,6 +11388,11 @@ def main():
 
     sp = sub.add_parser("capstone")
     sp.add_argument("--topic", required=True)
+
+    sp = sub.add_parser("retire")
+    sp.add_argument("--topic", required=True)
+    sp.add_argument("--node", help="one node; omit to retire the whole topic")
+    sp.add_argument("--restore", action="store_true", help="put it back on the list")
 
     sp = sub.add_parser("decay")
     sp.add_argument("--topic")
@@ -8290,16 +11403,31 @@ def main():
     sp.add_argument("--clear", action="store_true")
 
     sp = sub.add_parser("add-topic")
-    sp.add_argument("--json"); sp.add_argument("--file"); sp.add_argument("--replace", action="store_true")
+    sp.add_argument("--extend", action="store_true",
+                    help="add an ARC to an existing topic: new nodes only, every existing "
+                         "node and schedule untouched, capstone re-minted over the union")
+    sp.add_argument("--json"); sp.add_argument("--file"); sp.add_argument("--replace", action="store_true",
+                    help="re-author an EXISTING topic: payload wins, schedules/receipts/"
+                         "retirements carried forward. To ADD material, use --extend")
 
     sp = sub.add_parser("next")
+    sp.add_argument("--frontier-of",
+                    help="read-only: the unreceipted `requires` ancestors of this node, "
+                         "deepest first — what an adaptive pretest should ask")
     sp.add_argument("--topic", required=True)
 
     sp = sub.add_parser("topic-status")
     sp.add_argument("--topic", required=True)
 
     sp = sub.add_parser("due")
-    sp.add_argument("--topic"); sp.add_argument("--limit", type=int)
+    sp.add_argument("--topic")
+    sp.add_argument("--limit", type=int,
+                    help="legacy cap: emits the bare list in the always-served order")
+    sp.add_argument("--cap", type=int,
+                    help="cap a session; defaults to `savings` ordering and emits the labeled "
+                         "object (order + order_basis + items)")
+    sp.add_argument("--order", choices=DUE_ORDERS,
+                    help="overdue (as always) | savings (expected retention saved per minute)")
 
     sp = sub.add_parser("rate")
     sp.add_argument("--topic", required=True); sp.add_argument("--node", required=True)
@@ -8313,6 +11441,15 @@ def main():
     # before validate_item even runs — receipts are append-only (§4.8 Q5).
     sp.add_argument("--error-class", dest="error_class", choices=ERROR_CLASSES)
 
+    sp.add_argument("--relearn", action="store_true",
+                    help="a same-day RE-ATTEMPT after this node's first graded retrieval "
+                         "today: recorded, never scheduled, excluded from every retention "
+                         "population and from refit's sample")
+    sp.add_argument("--attempt", type=int, help="the retry ordinal (2, 3, …)")
+    sp.add_argument("--audited-rating", choices=sorted(RATINGS),
+                    help="audit kind only: the rating the TUTOR committed, which the blind "
+                         "assessor is now re-grading (feeds stats.self_grading)")
+
     sp = sub.add_parser("receipt")
     sp.add_argument("--json"); sp.add_argument("--file")
 
@@ -8320,10 +11457,21 @@ def main():
     sp.add_argument("action", choices=("add", "list", "count", "clear"))
     sp.add_argument("--json"); sp.add_argument("--file")
 
+    sub.add_parser("adaptations")
+    sp = sub.add_parser("propose")
+    sp.add_argument("--decline", help="record a NO for this proposal id, so it is not "
+                                      "re-offered for %d days" % PROPOSAL_DECLINE_DAYS)
+
     sp = sub.add_parser("model")
-    sp.add_argument("--set", action="append")
+    sp.add_argument("--set", action="append",
+                    help="key=value on the open learner model (dotted path, validated leaf)")
     sp.add_argument("--add-interest", action="append")
     sp.add_argument("--add-goal", action="append")
+    sp.add_argument("--because", help="the engine's evidence for this change (goes in the "
+                                      "adaptation ledger; marks the row `consented`)")
+    sp.add_argument("--grade", choices=("evidence-backed", "model-derived", "heuristic",
+                                        "learner"),
+                    help="how well-founded this change is (ledger only)")
 
     sp = sub.add_parser("focus")
     sp.add_argument("action", choices=("on", "off", "status"))
@@ -8341,6 +11489,8 @@ def main():
     sp.add_argument("--description"); sp.add_argument("--id")
 
     sp = sub.add_parser("experiment")
+    sp.add_argument("--preset", help="a shipped, pre-registered design (see `experiments/`): "
+                                     "probe-variation | topic-reconstruction")
     sp.add_argument("action", choices=("start", "assign", "settle", "status", "list"))
     sp.add_argument("--json"); sp.add_argument("--file"); sp.add_argument("--id")
     # `--verdict` is KEPT so the engine can REFUSE it loudly rather than argparse-erroring on an
@@ -8355,7 +11505,10 @@ def main():
     sp.add_argument("--notes")
 
     sp = sub.add_parser("refit")
-    sp.add_argument("--force", action="store_true")
+    sp.add_argument("--force", action="store_true",
+                    help="bypass the >=50-receipt floor for the parameter fit (still needs "
+                         ">=%d receipts to move the interval multiplier, which scales EVERY "
+                         "future due date)" % REFIT_FORCE_MIN)
 
     sp = sub.add_parser("report")
     sp.add_argument("--out"); sp.add_argument("--allow-outside", action="store_true")
@@ -8376,7 +11529,9 @@ def main():
         "gold": cmd_gold, "assessor-audit": cmd_assessor_audit,
         "grader-health": cmd_grader_health,
         "transfer": cmd_transfer, "capstone": cmd_capstone,
-        "export": cmd_export,
+        "export": cmd_export, "retire": cmd_retire,
+        "adjudication-stats": cmd_adjudication_stats,
+        "propose": cmd_propose, "adaptations": cmd_adaptations,
     }
     # Serialize state mutators: the skills run engine processes concurrently by
     # design (background artifact-smith registering while the tutor rates), and
@@ -8391,7 +11546,15 @@ def main():
     # `transfer` is a pure read over graphs + receipts — it SERVES a probe, it never records one.
     mutating = {"init", "add-topic", "rate", "receipt", "stash", "model", "focus",
                 "visuals", "artifact", "misconception", "experiment",
-                "log-session", "refit", "commit", "assessor-audit", "capstone", "export"}
+                "log-session", "refit", "commit", "assessor-audit", "capstone", "export",
+                "retire"}
+    # `doctor` is a READ — except with --fix, which renames a quarantined file into the
+    # live graphs/ path. Unlocked, that is a TOCTOU against any concurrent writer: its
+    # `os.path.exists(dest)` guard has no lock behind it, and POSIX rename REPLACES, so a
+    # topic graph created in the window is silently clobbered. Bare `doctor` stays lock-free
+    # on purpose — a diagnostic that blocks on a held lock cannot diagnose a stuck process.
+    if args.cmd == "doctor" and getattr(args, "fix", False):
+        mutating = mutating | {"doctor"}
     if args.cmd in mutating:
         acquire_lock()
         try:

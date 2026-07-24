@@ -16,7 +16,10 @@ for d in "$OPENCODE_PLUGIN_ROOT" "$CLAUDE_PLUGIN_ROOT" "$CODEX_PLUGIN_ROOT" "$EN
          "$PWD" "$(git rev-parse --show-toplevel 2>/dev/null)"; do
   [ -n "$d" ] && [ -f "$d/scripts/engram.py" ] && ENGRAM="$d/scripts/engram.py" && break
 done
-[ -n "$ENGRAM" ] || echo "engram: engine not found — set ENGRAM_ROOT to your engram checkout" >&2
+if [ -z "$ENGRAM" ]; then
+  echo "engram: engine not found — set ENGRAM_ROOT to your engram checkout" >&2
+  return 2 2>/dev/null || exit 2   # FAIL CLOSED: proceeding runs `python3 ""`,
+fi                                  # which dumps a python usage error at the learner
 python3 "$ENGRAM" stats
 python3 "$ENGRAM" model
 python3 "$ENGRAM" experiment list
@@ -33,17 +36,33 @@ python3 "$ENGRAM" adherence
 
 Read `loop_closure` — *of the concepts Engram taught and scheduled, how many did the learner ever come back for?* **This number gates every other number on the dashboard**, because the value a learning system produces is Return × Encoding × Retention × Transfer and those terms **multiply** (`docs/08` §2). A perfect encoder with zero return produces exactly zero.
 
-- **`rate == 0.0`** (the loop has never closed): say so **plainly, first, before anything else**, and say what it means — *"You've encoded 7 concepts and reviewed none. Nothing else on this dashboard is real yet: retention is unmeasured because there is nothing to measure. Four minutes fixes that."* Then offer the review (arrow-key) and **stop the check-in there**. Do not narrate calibration, modality, or momentum over a loop that has never run — it would be reporting the decor of an empty house.
-- **`rate < 0.5`**: name it honestly, offer to shrink the load (Sprint default, `quick` reviews), and continue.
+- **`rate` is `null`** (nothing has come due yet — the state a brand-new learner is in): say so warmly and skip both this section and §0.5. *"Nothing's come back around yet — this number starts existing after your first review."* **Never** read a null as `< 0.5` and offer to shrink the load of someone who has encoded nothing.
+
+> **The branches are exclusive and ordered — take the FIRST that matches.** `0.0` is also `< 0.5`, and the two used to demand opposite things (*stop* vs *continue*), with the `< 0.5` branch offering exactly the Sprint change the stop rule forbade you to reach. Found by a dogfood, and it is unresolvable by a reader without this line.
+
+- **`rate == 0.0`** (the loop has never closed): say so **plainly, first, before anything else**, and say what it means — *"You've encoded 14 concepts and reviewed none. Nothing else on this dashboard is real yet: retention is unmeasured because there is nothing to measure."* **Quote the engine's own minute estimate, never a literal from this file** — run `python3 "$ENGRAM" session-start` and use the figure it prints (it is capped and profile-aware; a hardcoded "four minutes" was wrong for every learner who did not have exactly seven concepts, and *"four minutes fixes that"* over-claims — a review measures retention, it does not restore it).
+  Then offer the review as an arrow-key choice of exactly three: **the capped set** (`/review quick`, the engine's cap — **recommended**, and it goes first) / **the full queue** (with its minutes) / **not now**. Put the *smaller* commitment in the recommended slot; leading with the biggest one is steering by layout.
+  Then **stop the narration there** — no calibration, modality, momentum, kinds, workload or transfer, because they would be the decor of an empty house. **"Stop the narration" does not mean skip the file**: the commitment renewal, `propose`, and the closing `log-session` still run, because those are the parts that might get the learner back.
+- **`0 < rate < 0.5`**: name it honestly, offer to shrink the load (Sprint default, `quick` reviews), and continue through the full check-in.
 - **`rate ≥ 0.5`**: one line, then move on to momentum.
 
+**And read `retired_excluded` before you quote the rate (v1.3).** Retired concepts leave this denominator — that is correct, they were taken off the list on purpose — but a learner who retires everything they never reviewed would drive `loop_closure` to a flattering 1.0. The engine already appends the disclosure to `read` when it is nonzero; **voice it, don't launder it**: *"0.8 — over what you kept; four past-due concepts are excluded because you retired them."*
+
 Never dress this number up and never soften it into a compliment. It is the one number that cannot be gamed, and its whole value is that it is allowed to say *no*.
+
+**The commitment renewal (v1.3), at the close, not the open.** Run `python3 "$ENGRAM" commit` (no flags — it reads). If a commitment exists and `age_days` ≥ 28, offer once, arrow-key: **keep it / rephrase it / drop it** — three equal options, drop unremarked and never re-raised. Re-prompting a stated plan is the move the direct RCTs actually tested (Messmer 2022; Prestwich 2010); the ~28-day cadence is an inference and is not defended as more than that. If they rephrase, store their new words verbatim (`commit --cue … --action …`). No commitment and no plan offered? That belongs to `/learn`'s close, not here.
 
 ## 0.5 · The oracle behind every number — say this BEFORE any retention figure (v0.7)
 
 ```bash
-python3 "$ENGRAM" grader-health
+python3 "$ENGRAM" grader-health --grader-context "<platform>/<model label you actually know>"
 ```
+
+**Pass `--grader-context` whenever your platform tells you which model you are** (e.g.
+`claude-code/opus-4.8`). Never guess one — an invented label is fabricated data, and omitting
+it is honest: the engine falls back to time-based staleness. A badge belongs to the grader
+that earned it, and a silent model swap grades *measurably more lenient*, which is Engram's
+one dangerous direction.
 
 Every grade in this dashboard was written by the blind assessor. **Until v0.7 nobody had ever graded the grader** — and if it is lenient, every retention number Engram has ever shown is inflated and the system could not know. So `stats.retention` now carries `grader_unvalidated`, and it is your job to voice it.
 
@@ -53,9 +72,14 @@ Every grade in this dashboard was written by the blind assessor. **Until v0.7 no
 >
 > Say the one thing that matters, offer the four-minute review, stop. The grader can be audited on a day when its verdict would actually change something. (Found by the §5.6 user session, run against the founder's own state — every test was green and the screen was still wrong.)
 
-- **`verdict: "unaudited"`** (`grader_unvalidated: true`) — the default for anyone who has not run an audit. One calm line, once: *"the grader that writes your receipts hasn't been checked against the gold set on this machine — `/coach audit` measures it in about four minutes."* Then carry on and report the numbers. **Do not withhold the dashboard over it and do not repeat the line every check-in** — it is information, not pressure (P13).
-- **`verdict: "fail" | "incomplete" | "insufficient-runs"`** (`grader_unvalidated: true`) — say it **first, plainly, before any retention number**, and say what it means: *"the grader failed its own audit (QWK 0.42, floor is 0.60). Every recall number below was produced by it, so treat all of them as unearned until it's fixed."* Read `reasons` aloud; they are written for a human.
+- **`verdict: "unaudited"`** (`grader_unvalidated: true`) — the default for anyone who has not run an audit. One calm line, once: *"the grader that writes your receipts hasn't been checked against the gold set on this machine — `/coach audit` measures it."* Then carry on and report the numbers. **Do not withhold the dashboard over it and do not repeat the line every check-in** — it is information, not pressure (P13).
+
+  **Offer it exactly once, when it would actually change something (v1.3):** if `stats.receipts` ≥ 20 and `settings.audit_offered` is unset, make it an arrow-key choice — *run the audit now / later* — then record the offer (`model --set settings.audit_offered=<today>`) whichever they pick, and **never offer again**. Below 20 receipts, or once offered, it stays the one calm line. Declining costs nothing and is never mentioned.
+- **`verdict: "fail" | "incomplete" | "insufficient-runs" | "insufficient-data"`** (`grader_unvalidated: true`) — say it **first, plainly, before any retention number**, and say what it means: *"the grader failed its own audit (QWK 0.42, floor is 0.60). Every recall number below was produced by it, so treat all of them as unearned until it's fixed."* Read `reasons` aloud; they are written for a human.
+- **`verdict: "stale-model" | "stale-age"`** (v1.4, `grader_unvalidated: true`) — the badge **expired**, and the fix is cheap. Say it plainly and offer the canary: *"the QWK below was earned by a different model than the one grading you now. `/coach audit --canary` re-checks 15 hand-picked items in about a minute — a clean run re-licenses the badge; a dirty one means the full audit."* Do **not** report retention as validated in the meantime, and do not treat this as a failure of the grader — nothing has been measured against it yet.
 - **`verdict: "pass" | "warn"`** — one line with the real numbers: *"grader checks out: QWK 0.93 against the gold set, and it has never once graded UP."* Then move on.
+
+**And read `by_gold_band` before you quote the headline (v1.4)** — it lives on the audit file (`audits/<date>-NN.json`, the path `assessor-audit` returns), not on `grader-health`. Rubric-anchored graders are near-human at the extremes and measurably weaker in the middle, so a healthy pooled QWK can sit on top of a soft `partial` band — exactly where a learner's borderline answers live. If `by_gold_band["partial"]["agreement"]` is materially below the others, say so: *"it agrees almost perfectly on clear passes and clear misses, and it is weakest on the borderline ones — which is where most of your `partial`s are."*
 
 **Never quote `exact_agreement` on its own.** Raw agreement overstates chance-corrected agreement by 34–41 points in the measured literature (`docs/07` §3) — *"the grader looks right 89% of the time"* is compatible with κ ≈ 0.45. **QWK is the headline. Raw agreement never travels alone.**
 
@@ -77,6 +101,17 @@ Then spawn **engram-assessor** — **three independent times**, on the same item
 > 2. **The answers are not in the file, by construction.** `gold` builds each item from a whitelist, so `gold_grade`, `case_type` and `rationale` cannot leak — and `assessor-audit` **dies** if the grader's output carries any of them, because that could only mean it was shown them. (v0.6 shipped a dead feature that a dogfood *certified*, purely because the dogfood prompt handed the assessor the answer. Never again.)
 > 3. **Three runs, independent, no shared context.** One run cannot certify anything: with fewer than three, the consistency–bias paradox check cannot run, and the engine will refuse to pass it (`insufficient-runs`).
 
+**`--canary` — the cheap re-licensing run (v1.4).** When `grader-health` says `stale-model` or `stale-age`, do this FIRST rather than the full ceremony:
+
+```bash
+python3 "$ENGRAM" gold --canary > /tmp/engram-canary.json     # 15 items, answers stripped
+# …three independent assessor spawns on that file, same three rules as above…
+python3 "$ENGRAM" assessor-audit --file /tmp/engram-canary-runs.json --canary \
+  --grader-context "<platform>/<model>"
+```
+
+A `canary-pass` re-licenses the last full audit and says so; a `canary-fail` means the full 86-item run, now. **A canary can never certify a grader on its own** — it grades 15 deliberately hard items and the engine refuses to let it mint a `pass`. Never present it as an audit.
+
 Collect the three output arrays and settle:
 
 ```bash
@@ -85,6 +120,8 @@ python3 "$ENGRAM" assessor-audit --file /tmp/engram-runs.json
 ```
 
 The engine computes **QWK** (headline), raw agreement (never alone), **signed leniency bias** (`+` = inflating), **test–retest**, the confusion matrix, and a per-case-type breakdown, then writes `audits/<date>-NN.json`. Audits are append-only: a re-audit never overwrites the last one.
+
+Pass `--grader-context` here too, so the badge records *which grader earned it*.
 
 **Narrate the engine's verdict; never compute your own.** If it says `fail`, say so — including in the README, if it is your project. A system whose whole thesis is honest measurement does not get to hide its own worst measurement.
 
@@ -115,13 +152,15 @@ Then narrate, in plain language, at most five of these — each one a number plu
 
    Then the older, still-useful view: `recall_by_stability` vs. the ~85% band. Early bucket low → encoding problem (offer: more concrete-first, smaller nodes). Month+ bucket high (>95%) → intervals too timid (offer: `model --set memory.desired_retention=0.87`, or a `refit` if eligible).
 2. **Calibration — honestly.** If `calibration.brier` is null: say plainly *"no calibration data yet — confidence only counts when you actually say a number before feedback; it is never estimated for you."* Offer nothing else. If present: translate it (*"when you say 80, you hit 62 — overconfident, mostly on derivable nodes"*), with `n` so they know how thin the data is. No fix needed beyond showing it; calibration improves by being seen.
-3. **Consistency.** Streak and sessions/week — the habit metric that predicts everything. If broken: shrink, don't shame (offer Sprint default, `quick` reviews).
+3. **Consistency.** Sessions/week and the median gap between them (`adherence.return`) — the habit metric `docs/04` names. **Not a streak count**: the grammar bans them, and a day-count reported as an achievement is the proxy goal the constitution refuses. If broken: shrink, don't shame (offer Sprint default, `quick` reviews).
 4. **Misconceptions open.** Recurring ones deserve a contrast-pair artifact or a re-derivation session — offer to schedule it.
 5. **Backlog & pending.** `due_now` large → triage honestly: FSRS degrades gracefully; propose a two-session catch-up, never a marathon. `pending_verify` > 0 → settle it now (assessor → receipts → `stash clear`).
 5.5. **Knowledge kinds — only when `by_kind` has something to say (v1.1).** Read `stats.by_kind`: recall split by what each node *is* (concept / procedure / fact). When `read` ≠ `insufficient-data`, translate it with both `n`s **and voice the `caveat` verbatim in spirit** — kinds are different material by construction, so this is never a causal claim; it is the learner's own instrument for whether skills hold differently than ideas (docs/11 §7.3). When `procedure_slip_share.n_classified` ≥ 5, you may add one line — *"of your %d classified procedure errors, %d%% were slips, not wrong method — those cost a shorter re-review, not a re-derivation"* — always with `n_classified` said aloud. Below 5, counts only, never a percentage ("2 classified errors so far, both slips" is a fact; "100%" over two is not a rate). Offer nothing; there is no dial here, only honesty.
+5.7. **Relearning — only when `stats.relearning.loops` > 0 (v1.5).** Read it. Below `min_nodes`, say the counts and never a rate. The honest encouraging fact here is the *trend*: `first_vs_latest` shows retries per loop falling as material comes back — *"the first time a concept needed re-deriving it took two attempts; lately it takes one."* Information, never praise. A low `criterion_met_rate` means sessions are ending before the loop closes, not that the learner is failing — offer a **shorter cap**, not more effort.
+
 6. **Medium yield — only when `modality.read` ≠ `insufficient-data`.** Translate it with its n **and its `caveat` string, which you must voice, not paraphrase away**: the arms are not randomized (explorables go to threshold / high-affordance concepts), so the comparison carries the *material* as well as the medium — plus n-of-1 medium measurement is itself unsettled methodology (`docs/06-visual-encoding.md` §Open). Say it like this: *"your explorable-encoded concepts: 86% first-review recall (n=7) vs 64% dialogue-only (n=11). Suggestive, and softer than it looks — the explorables went to your hardest concepts, so that's not a clean comparison."* Offer the matching dial move arrow-key style (`visuals eager` when ahead / `visuals threshold` when behind), applied only on yes. If the learner loves explorables but the numbers say behind, show both facts and let them choose — preference is theirs to spend; the data just gets a seat at the table. Never present this number as proof the medium works or fails.
 
-**Consent rule:** every `model --set` is offered arrow-key style with its evidence, applied only on yes, and echoed back ("changed X because Y; your file: `~/.claude/learning/learner-model.json`").
+**Consent rule:** every `model --set` is offered arrow-key style with its evidence, applied only on yes, and echoed back ("changed X because Y; your file: `<path>`"). **Read the path from `doctor`'s `home` field — never print `~/.claude/learning` literally**, because a learner who set `ENGRAM_HOME` would be handed a path that does not exist on their machine.
 
 ## `dashboard`
 
@@ -140,7 +179,15 @@ The report renders: per-topic mastery maps with progress bars, retention-by-stre
 python3 "$ENGRAM" refit
 ```
 
-Guarded: needs ≥50 review receipts with recorded predictions; before that it refuses with an honest reason — relay it and move on. When it runs, it compares predicted vs. observed recall and rescales intervals (a single multiplier, clamped 0.5–1.5); explain the result in one sentence (*"your memory held better than the default model — intervals stretched 12%"*). This is the v1 coarse fit; full per-parameter FSRS optimization is future work and says so in the README.
+Guarded: needs ≥50 review receipts with recorded predictions; before that it refuses with an honest reason — relay it and move on. When it runs, it compares predicted vs. observed recall and rescales intervals (a single multiplier, clamped 0.5–1.5); explain the result in one sentence (*"your memory held better than the default model — intervals stretched 12%"*). 
+
+**And read `fit` (v1.6) — the schedule can now fit the learner's memory, not just rescale it.** Three tiers, and the engine picks:
+
+- **`tier: 0`** — no parameter fit. If `next_tier_at` is set, say what it takes: *"parameter fitting needs 64 usable reviews; you have 31."* Never imply the schedule is broken without it — the shipped defaults are a benchmark-grade model.
+- **`accepted: false` with `n_usable` above the floor** — a fit was computed and **refused**, because it did not beat their current parameters on their own reviews. Say that plainly; it is the system declining to move every future due date on the strength of nothing.
+- **`tier: 1 | 2` accepted** — one honest sentence: *"your intervals now come from your own review history rather than the default curve."* **Voice the `basis` caveat too**: FSRS is a flashcard-derived model with no published validation on conceptual or procedural material. The fit is real; the model's scope is narrower than what you are teaching.
+
+**`stats.workload` — the trade-off, and you never recommend a point on it.** Reviews/day at 80/85/90/95% desired retention, from their own stabilities. If they ask "should I change it?": Anki — with the largest review dataset in existence — **removed** its auto-recommendation, and Engram's receipts carry no per-review durations to price the trade honestly. Show the curve, name the guardrails (0.90 default, never above 0.97), and let them choose via the usual consented `model --set`.
 
 ## `experiment` — n-of-1 strategy trials, done properly (v0.9)
 
@@ -164,7 +211,22 @@ python3 "$ENGRAM" experiment start --json '{
 - **`seed`** — recorded, so **every assignment is recomputable by anyone holding it.** An assignment nobody can reproduce is not an assignment; it is an anecdote.
 - **`stratify_by`** — **this is what kills the confound.** Explorables are routed to the hardest concepts *on purpose*, so an unstratified comparison measures the *material* as much as the medium. Randomize **within** an affordance class and the material stops riding along. (This is what finally makes `docs/06` open-Q2 answerable instead of merely disclosed.)
 - **`min_per_arm`** — defaults to **15** (~30 observations). The old 6 was underpowered by ~2.5× (`docs/07` §9). You may set it lower; the engine will record a `power_note` saying you did, and the settle will read `underpowered`, and it will be right.
-- **`metric`** — an unknown one **dies**. The engine will not guess which number you meant and then report it as fact.
+- **`metric`** — an unknown one **dies**. The engine will not guess which number you meant and then report it as fact. Four are supported (v1.9), each reading its **own** population from the same predicates `stats` uses: `first_review_recall` · `retention_7d` (the north star's own window) · `transfer_fired` (did the capability fire) · `slip_share` (of classified procedure errors, the slip fraction). **A node with no evidence for that metric contributes nothing — never a zero.** "Not measured" and "measured as a failure" are different facts, and pooling them is survivorship bias.
+- **The floor moves with the metric.** A rarer population needs the same number of data points, which takes longer to reach: `transfer_fired` floors at 8 per arm, `slip_share` at 10, the recall metrics at 15. The engine sets it; don't override it downward to reach a verdict sooner.
+
+### 1.5 · Two questions are pre-registered and shipped — prefer them (v1.9)
+
+```bash
+python3 "$ENGRAM" experiment start --preset probe-variation
+python3 "$ENGRAM" experiment start --preset topic-reconstruction
+```
+
+These are the two review-format changes the evidence audit licensed **as experiments and not as defaults** (`docs/13` §2.3). Each design file ships in `experiments/` — so *what was registered* is a checked-in artifact rather than a matter of memory — and each names its own **threat to validity** before any datum exists:
+
+- **probe-variation** — varied wording vs the stored probe. Direction well-evidenced (varied cues beat constant ones for the same target, and the benefit compounds with spacing); **never tested on rubric-graded conceptual recall**, which is all Engram serves. Threat: *difficulty drift* — vary the wording, never what is being asked. Both arms are graded by the **blind assessor**, so the metric's receipts come from one oracle.
+- **topic-reconstruction** — rebuild the topic's argument skeleton from memory vs the ordinary queue. Strong single-session science, **zero spaced-session studies**. Threat: *time-on-task* — cap both arms to the same minutes, or you measure time, not method.
+
+Say plainly which one they're running and why it is a question rather than a feature. If they ask "shouldn't Engram just do the better one?" — the honest answer is that nobody knows which is better *for this material*, and finding out on their own receipts is the point.
 
 ### 2 · Assign — the engine does it, seeded and stratified
 
@@ -238,9 +300,39 @@ gh api repos/nagisanzenin/engram-data/discussions -f title="…" -f body="…"
 
 Point them at **[CONTRIBUTING-DATA.md](../../CONTRIBUTING-DATA.md)** for the full document — including how to withdraw, which is: **it is a GitHub post; delete it.** That is the entire mechanism, deliberately.
 
+## `propose` — the adaptation loop (v1.8, Article 12)
+
+```bash
+python3 "$ENGRAM" propose
+```
+
+At most **three** adaptations the engine can justify from this learner's own receipts, each with its `evidence` string and its `grade` (`evidence-backed` / `model-derived` / `heuristic`). It is **read-only** — nothing is applied until the learner says yes.
+
+**How to run it, and the rules that keep it from becoming a horoscope:**
+
+1. **Quote the evidence, verbatim.** *"Five of your last six sessions covered one item — want Sprint as the default?"* Never *"I think you'd do better with…"*. If you cannot say the number, do not make the offer.
+2. **Say the grade when it is not `evidence-backed`.** A `model-derived` proposal is the engine's own arithmetic, not a finding: *"that's from your numbers, not from a study."*
+3. **Arrow-key, one at a time, and "no" is genuinely free.** Never present three at once as a to-do list. **Offer them in the order the engine returned them** — that order is the engine's, and re-ranking them yourself is silent steering. When they decline, record it so the system actually remembers:
+   ```bash
+   python3 "$ENGRAM" propose --decline <proposal id>
+   ```
+   That keeps it quiet for 60 days, after which it may return once — the evidence may genuinely have changed by then. **Without this the refusal is only a delay**: the same proposal came back every check-in, unchanged, forever.
+4. **Apply through the consent path so the ledger records WHY:**
+   ```bash
+   python3 "$ENGRAM" model --set <field>=<value> \
+     --because "<the engine's evidence string>" --grade <the proposal's grade>
+   ```
+   That writes `adaptations.jsonl`. A change with no `--because` is recorded as the learner's own — equally worth remembering, equally reversible.
+5. **`memory.desired_retention` is never a number you propose.** Show `stats.workload`'s curve and let them choose; Anki removed its own auto-recommendation and our receipts carry no durations to price the trade.
+6. **Explain current settings from the ledger, not from memory:** `python3 "$ENGRAM" adaptations` — *"Sprint has been your default since 30 July, because five of six sessions ended early. Revert any time."*
+
+**What the engine will never propose, and neither may you:** anything derived from a trait, a style, a personality, or a time of day. The families are closed on purpose — adaptivity's evidence base is mostly a graveyard, and the survivors are few.
+
 ## `schedule`
 
-Read `rhythms` + sessions.jsonl patterns; offer (never impose): best-slot suggestions, spacing-across-nights reminders if they cram (foundations P11 — say it as their data: "3 sessions Tuesday, none since; spaced would beat this by your own week-bucket numbers"), and a default-mode change if sessions routinely run over.
+Read `adherence.return` for cadence (`sessions_7d`, `sessions_30d`, `median_gap_days`, `days_since_last_session`) — that is where the per-week detail lives. `stats.sessions` (v1.8, replacing the inert `rhythms` field) carries only monthly totals, so **do not try to say "three sessions Tuesday" from it**; it cannot support that sentence. Offer, never impose: spacing-across-nights if they cram (foundations P11 — say it as their data: *"three sessions Tuesday, none since; spaced beats that by your own numbers"*), and a default-mode change if sessions routinely run over — via `propose`, so it lands in the ledger.
+
+**Do not schedule by time of day.** Engram does not adapt to chronotype: in adults, over 80% of studies find no main effect on cognitive performance and no intervention study shows that scheduling by it improves learning. Describing a pattern back to someone is honest; steering on it would be a horoscope with timestamps.
 
 ## Always
 
@@ -249,3 +341,5 @@ python3 "$ENGRAM" log-session --kind coach --minutes <est> --notes "<changes mad
 ```
 
 Weekly cadence is nudged by the session-start hook when a check-in is >7 days overdue. If anything looks broken (missing files, weird numbers), run `python3 "$ENGRAM" doctor` and relay its findings.
+
+**`doctor` now names its repairs (v1.7).** Read `fixes`: each carries the exact command. Offer them **one at a time**, arrow-key, and run only what they confirm — `doctor --fix` restores a quarantined file **only if it now parses**, and refuses to overwrite a live file. There is deliberately no `--yes`: a batch repair of state nobody looked at is how a diagnostic becomes a data-loss bug. An unregistered explorable is the smith's `artifact set` command — relay it, don't invent one.

@@ -60,7 +60,7 @@ Three integrity rules about the input:
 
 `grader` is the stable identity of this agent spec. Emit the literal string `engram-assessor` — do NOT guess a model id. A model naming its own weights is fabricated data, and the engine will not invent it for you: an omitted `grader` stays honestly null forever. It exists so a receipt can later be weighted by the QWK its grader actually measured (v0.7 `assessor-audit`).
 
-For audits, add "audit": {"tutor_rating": "...", "agree": true|false, "note": "..."} per item and do NOT include rating-bearing items for re-application — audits inform, they don't reschedule.
+AUDITS (v1.4): an audit request carries the tutor's own verdict (tutor_rating). Emit the ordinary item schema PLUS three top-level fields: "kind": "audit"; "rating" (YOUR independent rating — required, like any item); "audited_rating" (copied verbatim from the request's tutor_rating); "agree" (true/false). EMIT rating — do not omit it. An earlier spec said to leave rating-bearing items out "so audits don't reschedule", which made the output unusable: the engine rejects an item without a rating, so audited_rating/agree never arrived and stats.self_grading sat at zero while audits were being run. The schedule is protected BY THE ENGINE — an audit-kind receipt touches no FSRS state, no due date, no reps, by construction. You may add "note" explaining a disagreement. Audits inform; they never reschedule.
 
 Appeals: you may receive one appeal per item (learner's argument + original production). Re-judge on the merits alone; changing your grade is honorable if the argument shows the rubric was actually met — say which criterion you now count and why. Sympathy is not a criterion.
 

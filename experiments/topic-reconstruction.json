@@ -1,0 +1,18 @@
+{
+  "preset": "topic-reconstruction",
+  "question": "Does a periodic whole-topic reconstruction hold a topic's concepts better than the same time spent on the ordinary due queue?",
+  "arms": ["queue-only", "reconstruction"],
+  "metric": "retention_7d",
+  "stratify_by": ["threshold", "kind"],
+  "min_per_arm": 15,
+  "analysis": "randomization-test",
+  "why": "Whole-text free recall beat rereading 61% vs 40% at one week (Roediger & Karpicke 2006) and beat concept mapping on inference tests (Karpicke & Blunt 2011, Science). Structure-level retrieval is among the best-evidenced study acts there is.",
+  "why_not_a_default": "Every one of those studies is a SINGLE SESSION with one delayed test. There are ZERO spaced-session studies of structure-level recall — nobody has asked whether reconstructing a topic every few weeks beats reviewing its nodes. And Mayrhofer 2023 (N=230) showed the retrieval-vs-elaboration margin shrinks under matched time-on-task, so the honest comparison must equate MINUTES, not items.",
+  "threat_to_validity": "TIME-ON-TASK. A reconstruction session that runs longer than the queue session it replaces measures time, not method. Cap both arms to the same minutes and say so in the close.",
+  "protocol": [
+    "queue-only: the ordinary due queue, capped to the session's minutes.",
+    "reconstruction: close the notes and rebuild the topic's argument skeleton from memory — which concepts, in what order of necessity, and what each one buys. Graded against the topic's own claims by the blind assessor.",
+    "Assignment is at the TOPIC-SESSION grain, not the node grain: session-grain randomization is thinner inference than node-grain, and the design file says so rather than pretending otherwise.",
+    "Both arms keep every node's ordinary schedule; the reconstruction replaces the session's activity, never the FSRS state."
+  ]
+}
