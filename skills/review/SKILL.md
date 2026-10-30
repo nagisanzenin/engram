@@ -38,6 +38,7 @@ If none are set, resolve the plugin root as the directory containing `.zcode-plu
 
 ```bash
 python3 "$ENGRAM" session-start   # what the ambient hook ALREADY told them (read-only)
+python3 "$ENGRAM" model           # the learner's settings
 python3 "$ENGRAM" stash count     # a previous session's ungraded work?
 python3 "$ENGRAM" due --cap <cap>
 ```
